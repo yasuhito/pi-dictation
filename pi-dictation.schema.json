@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "title": "Pi Dictation configuration",
+  "description": "Configuration for the Pi Dictation extension.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URL used by editors."
+    },
+    "shortcut": {
+      "type": "string",
+      "default": "insert",
+      "description": "Pi shortcut used to toggle dictation."
+    },
+    "language": {
+      "type": "string",
+      "default": "",
+      "description": "Language passed to the OpenAI-compatible transcription backend."
+    },
+    "recordCommand": {
+      "type": "string",
+      "default": "",
+      "description": "Custom recorder command. The optional {file} placeholder is replaced with the WAV path."
+    },
+    "transcribeCommand": {
+      "type": "string",
+      "default": "",
+      "description": "Local transcription command. The optional {file} placeholder is replaced with the WAV path."
+    },
+    "openaiModel": {
+      "type": "string",
+      "default": "gpt-4o-mini-transcribe",
+      "description": "Model sent to the OpenAI-compatible transcription endpoint."
+    },
+    "openaiBaseUrl": {
+      "type": "string",
+      "default": "https://api.openai.com/v1",
+      "description": "Base URL for the OpenAI-compatible API."
+    },
+    "openaiApiKey": {
+      "type": "string",
+      "default": "",
+      "description": "OpenAI-compatible API key. Prefer an environment variable or openaiApiKeyCommand."
+    },
+    "openaiApiKeyCommand": {
+      "type": "string",
+      "default": "",
+      "description": "Command that prints the OpenAI-compatible API key."
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000,
+      "default": 120000,
+      "description": "Transcription timeout in milliseconds."
+    },
+    "maxRecordingMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000,
+      "default": 600000,
+      "description": "Maximum recording duration in milliseconds."
+    },
+    "spinner": {
+      "type": "string",
+      "default": "arc",
+      "description": "cli-spinners animation name used during processing."
+    }
+  }
+}

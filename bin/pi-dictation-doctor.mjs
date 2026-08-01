@@ -6,9 +6,12 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 
 const MIN_NODE_VERSION = [22, 19, 0];
+const MIN_DURATION_MS = 1000;
+const MAX_DURATION_MS = 60 * 60 * 1000;
 const CONFIG_DISPLAY_PATH = "~/.pi/agent/pi-dictation.json";
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictation.json");
 const STRING_FIELDS = [
+  "$schema",
   "shortcut",
   "language",
   "recordCommand",
@@ -31,8 +34,13 @@ function validateConfig(config) {
     }
   }
   for (const field of NUMBER_FIELDS) {
-    if (config[field] !== undefined && typeof config[field] !== "number") {
-      throw new Error(`${field} must be a number`);
+    if (config[field] === undefined) continue;
+    if (
+      !Number.isInteger(config[field])
+      || config[field] < MIN_DURATION_MS
+      || config[field] > MAX_DURATION_MS
+    ) {
+      throw new Error(`${field} must be an integer from ${MIN_DURATION_MS} to ${MAX_DURATION_MS}`);
     }
   }
   return config;

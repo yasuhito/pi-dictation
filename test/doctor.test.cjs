@@ -80,6 +80,39 @@ test("doctor reports malformed configuration without exposing its contents", asy
   });
 });
 
+test("doctor tolerates unknown configuration fields", () => {
+  const result = runDoctor({ config: JSON.stringify({ futureMetadata: true }) });
+  assert.match(result.stdout, /Config: ok \(~\/.pi\/agent\/pi-dictation.json\)/);
+});
+
+for (const { name, config, expected } of [
+  {
+    name: "accepts exact duration boundaries",
+    config: { timeoutMs: 1000, maxRecordingMs: 3600000 },
+    expected: /Config: ok \(~\/.pi\/agent\/pi-dictation.json\)/,
+  },
+  {
+    name: "rejects durations below the minimum",
+    config: { timeoutMs: 999 },
+    expected: /timeoutMs must be an integer from 1000 to 3600000/,
+  },
+  {
+    name: "rejects durations above the maximum",
+    config: { maxRecordingMs: 3600001 },
+    expected: /maxRecordingMs must be an integer from 1000 to 3600000/,
+  },
+  {
+    name: "rejects fractional durations",
+    config: { timeoutMs: 1000.5 },
+    expected: /timeoutMs must be an integer from 1000 to 3600000/,
+  },
+]) {
+  test(`doctor ${name}`, () => {
+    const result = runDoctor({ config: JSON.stringify(config) });
+    assert.match(result.stdout, expected);
+  });
+}
+
 test("doctor recognizes an OpenAI key command without executing it", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-dictation-key-command-"));
   const marker = join(dir, "executed");

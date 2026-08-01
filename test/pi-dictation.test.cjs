@@ -69,6 +69,7 @@ async function createRuntime({
   const commands = {};
   const notifications = [];
   let shortcut;
+  let shortcutKey;
   let shutdown;
   let pasted = "";
   let widget;
@@ -83,7 +84,8 @@ async function createRuntime({
   else process.env.PI_DICTATION_TIMEOUT_MS = String(timeoutMs);
 
   const pi = {
-    registerShortcut(_key, definition) {
+    registerShortcut(key, definition) {
+      shortcutKey = key;
       shortcut = definition.handler;
     },
     registerCommand(name, definition) {
@@ -134,6 +136,7 @@ async function createRuntime({
     ctx,
     notifications,
     shortcut,
+    shortcutKey: () => shortcutKey,
     shutdown: () => shutdown({}, ctx),
     pasted: () => pasted,
     widget: () => widget,
@@ -380,6 +383,38 @@ test("valid JSON with a non-object root reports a configuration error", async (t
   }
 });
 
+test("the shipped example configuration loads successfully", async () => {
+  const paths = testPaths("example-config");
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
+  writeFileSync(configPath, readFileSync(join(packageRoot, "pi-dictation.example.json"), "utf8"));
+  const runtime = await createRuntime();
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    await runtime.shortcut(runtime.ctx);
+    assert.equal(runtime.pasted(), "voice-ok");
+  } finally {
+    await runtime.shutdown();
+    rmSync(configPath, { force: true });
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("unknown configuration fields do not discard supported settings", async () => {
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ shortcut: "f8", futureMetadata: true }));
+  try {
+    const runtime = await createRuntime();
+    assert.equal(runtime.shortcutKey(), "f8");
+    await runtime.shutdown();
+  } finally {
+    rmSync(configPath, { force: true });
+  }
+});
+
 test("configuration fields with the wrong type are rejected before registration", async () => {
   const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
@@ -394,12 +429,12 @@ test("configuration fields with the wrong type are rejected before registration"
   }
 });
 
-test("invalid transcription timeouts fall back to the default", async () => {
+test("transcription timeouts below the schema minimum fall back to the default", async () => {
   const paths = testPaths("invalid-timeout");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({
-    timeoutMs: -1,
-    transcribeCommand: "cat {file} >/dev/null; sleep 0.05; printf voice-ok",
+    timeoutMs: 500,
+    transcribeCommand: "cat {file} >/dev/null; sleep 0.6; printf voice-ok",
   });
   try {
     await runtime.shortcut(runtime.ctx);

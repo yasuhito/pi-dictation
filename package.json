@@ -1,6 +1,6 @@
 {
   "name": "pi-dictation",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Safe push-to-talk dictation for Pi with pluggable transcription backends",
   "type": "module",
   "license": "MIT",
@@ -26,6 +26,8 @@
   "files": [
     "bin",
     "extensions",
+    "pi-dictation.schema.json",
+    "pi-dictation.example.json",
     "README.md",
     "LICENSE"
   ],
@@ -56,6 +58,8 @@
     "@earendil-works/pi-coding-agent": "^0.83.0",
     "@earendil-works/pi-tui": "^0.83.0",
     "@types/node": "^24.0.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "jiti": "^2.6.1",
     "typescript": "^5.9.0"
   },

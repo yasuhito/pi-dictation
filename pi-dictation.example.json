@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "shortcut": "insert",
+  "language": "en",
+  "openaiModel": "gpt-4o-mini-transcribe",
+  "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation",
+  "timeoutMs": 120000,
+  "maxRecordingMs": 600000
+}

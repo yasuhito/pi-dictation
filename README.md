@@ -90,6 +90,7 @@ Then create `~/.pi/agent/pi-dictation.json`:
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
   "language": "ja",
   "openaiModel": "gpt-4o-mini-transcribe",
   "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
@@ -104,6 +105,7 @@ Commands receive the WAV path through `{file}`:
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
   "language": "ja",
   "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -"
 }
@@ -113,7 +115,7 @@ The command must write only the transcription to standard output.
 
 ## Configuration
 
-Configuration lives at `~/.pi/agent/pi-dictation.json`.
+Configuration lives at `~/.pi/agent/pi-dictation.json`. Start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
@@ -125,8 +127,8 @@ Configuration lives at `~/.pi/agent/pi-dictation.json`.
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
 | `openaiApiKey` | unset | API key; prefer an environment variable or keyring command |
 | `openaiApiKeyCommand` | unset | Command that prints the API key |
-| `timeoutMs` | `120000` | Transcription timeout |
-| `maxRecordingMs` | `600000` | Graceful-stop threshold, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |
+| `timeoutMs` | `120000` | Transcription timeout; accepts `1000`–`3600000` ms |
+| `maxRecordingMs` | `600000` | Graceful-stop threshold from `1000`–`3600000` ms, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |
 | `spinner` | `arc` | `cli-spinners` animation name |
 
 Every field can also be set with an environment variable:

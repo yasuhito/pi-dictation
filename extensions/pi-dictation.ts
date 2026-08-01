@@ -27,6 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import cliSpinners from "cli-spinners";
+import { normalizeDuration } from "./config.js";
 import { GrowingPcm16WavInput, LiveLevelAnalyzer } from "./live-level.js";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +44,7 @@ const LEVEL_REFRESH_MS = 50;
 const LEVEL_BARS = "▁▂▃▄▅▆▇█";
 
 type DictationConfigFile = {
+  $schema?: string;
   shortcut?: string;
   language?: string;
   recordCommand?: string;
@@ -76,13 +78,9 @@ type ActiveRecording = {
   abortController: AbortController;
 };
 
-function normalizeDuration(value, fallback) {
-  const duration = Number(value);
-  return Number.isFinite(duration) && duration >= 100 ? duration : fallback;
-}
-
 function validateConfig(config) {
   const stringFields = [
+    "$schema",
     "shortcut",
     "language",
     "recordCommand",
