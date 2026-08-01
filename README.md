@@ -56,6 +56,7 @@ Commands:
 
 - `/dictate` — start or stop dictation
 - `/dictate-cancel` — cancel recording or transcription
+- `/dictate-config` — edit safe settings interactively and inspect privacy-safe recorder/backend status
 - `/dictate-help` — show whether recorder selection is automatic or custom, plus the transcription backend
 
 ## Diagnose setup
@@ -133,7 +134,9 @@ The command must write only the transcription to standard output.
 
 ## Configuration
 
-Configuration lives at `~/.pi/agent/pi-dictation.json`. Start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation. Configuration is validated when recording starts, and changes apply to the next recording. Shortcut changes require `/reload` or a restart. Unknown fields are rejected before external work starts.
+Configuration lives at `~/.pi/agent/pi-dictation.json`. Run `/dictate-config` to edit the shortcut, language, OpenAI model, duration limits, and spinner through Pi's TUI. The settings screen never displays API keys or custom command contents, preserves fields it does not edit, identifies environment overrides, and saves atomically with `0600` permissions. Shortcut changes require `/reload` or a restart; other saved changes apply to the next recording.
+
+You can also start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation. Unknown fields and invalid values are rejected before external work starts.
 
 | Field | Default | Purpose |
 | --- | --- | --- |

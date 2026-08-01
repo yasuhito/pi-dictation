@@ -20,42 +20,22 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cliSpinners from "cli-spinners";
-import { normalizeDuration } from "./config.js";
+import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
+import { showDictationConfig } from "./config-ui.js";
 import { GrowingPcm16WavInput, LiveLevelAnalyzer } from "./live-level.js";
 import { defaultRecordCommand } from "./recorder.js";
 import { shellQuote } from "./shell.js";
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictation.json");
-const DEFAULT_SHORTCUT = "insert";
-const DEFAULT_TIMEOUT_MS = 120000;
-const DEFAULT_MAX_RECORDING_MS = 10 * 60 * 1000;
+const CONFIG_PATH = getConfigPath();
 const MAX_RECORDER_STDERR_BYTES = 64 * 1024;
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
 const WIDGET_KEY = "pi-dictation";
-const DEFAULT_SPINNER = "arc";
 const FALLBACK_SPINNER = { interval: 140, frames: ["|", "/", "-", "\\"] };
 const LEVEL_REFRESH_MS = 50;
 const LEVEL_BARS = "▁▂▃▄▅▆▇█";
-
-type DictationConfigFile = {
-  $schema?: string;
-  shortcut?: string;
-  language?: string;
-  recordCommand?: string;
-  transcribeCommand?: string;
-  openaiModel?: string;
-  openaiBaseUrl?: string;
-  openaiApiKey?: string;
-  openaiApiKeyCommand?: string;
-  timeoutMs?: number;
-  maxRecordingMs?: number;
-  spinner?: string;
-  configError?: string;
-};
 
 type StripOptions = {
   autoHideMs?: number;
@@ -76,78 +56,6 @@ type ActiveRecording = {
   cancelRequested: boolean;
   abortController: AbortController;
 };
-
-function validateConfig(config) {
-  const stringFields = [
-    "$schema",
-    "shortcut",
-    "language",
-    "recordCommand",
-    "transcribeCommand",
-    "openaiModel",
-    "openaiBaseUrl",
-    "openaiApiKey",
-    "openaiApiKeyCommand",
-    "spinner",
-  ];
-  const knownFields = new Set([...stringFields, "timeoutMs", "maxRecordingMs"]);
-  if (Object.keys(config).some((field) => !knownFields.has(field))) {
-    throw new Error("Unknown configuration field");
-  }
-  for (const field of stringFields) {
-    if (config[field] !== undefined && typeof config[field] !== "string") {
-      throw new Error(`${field} must be a string`);
-    }
-  }
-  for (const field of ["timeoutMs", "maxRecordingMs"]) {
-    if (config[field] !== undefined && typeof config[field] !== "number") {
-      throw new Error(`${field} must be a number`);
-    }
-  }
-  return config;
-}
-
-function loadConfig() {
-  let fromFile: DictationConfigFile = {};
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("configuration root must be an object");
-      }
-      fromFile = validateConfig(parsed);
-    } catch (error) {
-      fromFile = { configError: `Failed to load ${CONFIG_PATH}: ${error.message}` };
-    }
-  }
-
-  const timeoutMs = normalizeDuration(
-    process.env.PI_DICTATION_TIMEOUT_MS || fromFile.timeoutMs || DEFAULT_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS
-  );
-  const maxRecordingMs = normalizeDuration(
-    process.env.PI_DICTATION_MAX_RECORDING_MS || fromFile.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
-    DEFAULT_MAX_RECORDING_MS
-  );
-
-  return {
-    shortcut: process.env.PI_DICTATION_SHORTCUT || fromFile.shortcut || DEFAULT_SHORTCUT,
-    language: process.env.PI_DICTATION_LANGUAGE || fromFile.language || "",
-    recordCommand: process.env.PI_DICTATION_RECORD_CMD || fromFile.recordCommand || "",
-    transcribeCommand: process.env.PI_DICTATION_TRANSCRIBE_CMD || fromFile.transcribeCommand || "",
-    openaiModel: process.env.PI_DICTATION_OPENAI_MODEL || fromFile.openaiModel || "gpt-4o-mini-transcribe",
-    openaiBaseUrl:
-      process.env.PI_DICTATION_OPENAI_BASE_URL || fromFile.openaiBaseUrl || "https://api.openai.com/v1",
-    openaiApiKey:
-      process.env.PI_DICTATION_OPENAI_API_KEY || process.env.OPENAI_API_KEY || fromFile.openaiApiKey || "",
-    openaiApiKeyCommand:
-      process.env.PI_DICTATION_OPENAI_API_KEY_COMMAND || fromFile.openaiApiKeyCommand || "",
-    timeoutMs,
-    maxRecordingMs,
-    spinner: process.env.PI_DICTATION_SPINNER || fromFile.spinner || DEFAULT_SPINNER,
-    configError: fromFile.configError,
-  };
-}
 
 function errorDetail(value) {
   const sanitized = String(value || "").replace(/[^\t\n\x20-\x7e\u00a0-\uffff]/g, "�").trim();
@@ -815,6 +723,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("dictate-cancel", {
     description: "Cancel active dictation",
     handler: async (_args, ctx) => stopRecording(ctx, { cancel: true }),
+  });
+
+  pi.registerCommand("dictate-config", {
+    description: "Configure Pi Dictation",
+    handler: async (_args, ctx) => showDictationConfig(ctx),
   });
 
   pi.registerCommand("dictate-help", {

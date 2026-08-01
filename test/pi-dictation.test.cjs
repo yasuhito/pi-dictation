@@ -153,6 +153,11 @@ test("portable process inspection rejects a missing process", () => {
   assert.equal(isRunning(99999999), false);
 });
 
+test("the extension registers the focused settings command", async () => {
+  const runtime = await createRuntime();
+  assert.equal(typeof runtime.commands["dictate-config"], "function");
+});
+
 test("recording appears as a responsive above-editor Dictation strip", async (t) => {
   const paths = testPaths("recording-strip");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;

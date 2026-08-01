@@ -25,24 +25,31 @@ const systemEnvironment: RecorderEnvironment = {
   commandExists: systemCommandExists,
 };
 
-export async function defaultRecordCommand(
-  file: string,
+export async function detectDefaultRecorder(
   environment: RecorderEnvironment = systemEnvironment
-): Promise<string> {
+): Promise<"ffmpeg" | "pw-record" | "arecord"> {
   if (environment.platform === "darwin") {
-    if (await environment.commandExists("ffmpeg")) {
-      return `ffmpeg -hide_banner -loglevel error -nostdin -f avfoundation -i ':default' -vn -ac 1 -ar 16000 -c:a pcm_s16le -flush_packets 1 -y ${shellQuote(file)}`;
-    }
+    if (await environment.commandExists("ffmpeg")) return "ffmpeg";
     throw new Error("No recorder found. Install ffmpeg or set PI_DICTATION_RECORD_CMD.");
   }
   if (environment.platform !== "linux") {
     throw new Error(`Unsupported recording platform: ${environment.platform}`);
   }
-  if (await environment.commandExists("pw-record")) {
+  if (await environment.commandExists("pw-record")) return "pw-record";
+  if (await environment.commandExists("arecord")) return "arecord";
+  throw new Error("No recorder found. Install pw-record/arecord or set PI_DICTATION_RECORD_CMD.");
+}
+
+export async function defaultRecordCommand(
+  file: string,
+  environment: RecorderEnvironment = systemEnvironment
+): Promise<string> {
+  const recorder = await detectDefaultRecorder(environment);
+  if (recorder === "ffmpeg") {
+    return `ffmpeg -hide_banner -loglevel error -nostdin -f avfoundation -i ':default' -vn -ac 1 -ar 16000 -c:a pcm_s16le -flush_packets 1 -y ${shellQuote(file)}`;
+  }
+  if (recorder === "pw-record") {
     return `pw-record --format s16 --rate 16000 --channels 1 ${shellQuote(file)}`;
   }
-  if (await environment.commandExists("arecord")) {
-    return `arecord -q -f S16_LE -r 16000 -c 1 -t wav ${shellQuote(file)}`;
-  }
-  throw new Error("No recorder found. Install pw-record/arecord or set PI_DICTATION_RECORD_CMD.");
+  return `arecord -q -f S16_LE -r 16000 -c 1 -t wav ${shellQuote(file)}`;
 }

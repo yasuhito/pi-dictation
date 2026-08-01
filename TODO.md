@@ -36,4 +36,4 @@ Windows support requires a separate process-lifecycle design rather than pretend
 
 ## Later
 
-- [ ] Add a focused `/dictate-config` settings screen after the platform-specific recorder interface has settled, so the UI does not need to be redesigned for each operating system.
+- [x] Add a focused `/dictate-config` settings screen for safe fields, privacy-safe status, environment-override visibility, and atomic private saves.
