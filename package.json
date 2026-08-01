@@ -21,7 +21,7 @@
     "voice-input"
   ],
   "bin": {
-    "pi-dictation-doctor": "./bin/pi-dictation-doctor.mjs"
+    "pi-dictation-doctor": "bin/pi-dictation-doctor.mjs"
   },
   "files": [
     "bin",

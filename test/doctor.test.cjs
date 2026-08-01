@@ -33,7 +33,7 @@ test("package exposes the doctor executable", async (t) => {
   const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 
   await t.test("maps the public command to the doctor script", () => {
-    assert.equal(manifest.bin?.["pi-dictation-doctor"], "./bin/pi-dictation-doctor.mjs");
+    assert.equal(manifest.bin?.["pi-dictation-doctor"], "bin/pi-dictation-doctor.mjs");
   });
   await t.test("ships the bin directory", () => {
     assert.ok(manifest.files.includes("bin"));
