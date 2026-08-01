@@ -80,9 +80,14 @@ test("doctor reports malformed configuration without exposing its contents", asy
   });
 });
 
-test("doctor tolerates unknown configuration fields", () => {
-  const result = runDoctor({ config: JSON.stringify({ futureMetadata: true }) });
-  assert.match(result.stdout, /Config: ok \(~\/.pi\/agent\/pi-dictation.json\)/);
+test("doctor rejects unknown configuration fields without exposing their names", async (t) => {
+  const result = runDoctor({ config: JSON.stringify({ SUPER_SECRET_FIELD: true }) });
+  await t.test("rejects the configuration", () => {
+    assert.match(result.stdout, /Config: invalid \(~\/.pi\/agent\/pi-dictation.json: unknown configuration field\)/);
+  });
+  await t.test("does not expose the unknown field name", () => {
+    assert.doesNotMatch(result.stdout, /SUPER_SECRET_FIELD/);
+  });
 });
 
 for (const { name, config, expected } of [

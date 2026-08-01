@@ -69,7 +69,6 @@ async function createRuntime({
   const commands = {};
   const notifications = [];
   let shortcut;
-  let shortcutKey;
   let shutdown;
   let pasted = "";
   let widget;
@@ -84,8 +83,7 @@ async function createRuntime({
   else process.env.PI_DICTATION_TIMEOUT_MS = String(timeoutMs);
 
   const pi = {
-    registerShortcut(key, definition) {
-      shortcutKey = key;
+    registerShortcut(_key, definition) {
       shortcut = definition.handler;
     },
     registerCommand(name, definition) {
@@ -136,7 +134,6 @@ async function createRuntime({
     ctx,
     notifications,
     shortcut,
-    shortcutKey: () => shortcutKey,
     shutdown: () => shutdown({}, ctx),
     pasted: () => pasted,
     widget: () => widget,
@@ -402,13 +399,40 @@ test("the shipped example configuration loads successfully", async () => {
   }
 });
 
-test("unknown configuration fields do not discard supported settings", async () => {
+test("configuration changes during recording apply to the next recording", async () => {
+  const paths = testPaths("config-snapshot");
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ transcribeCommand: "printf voice-ok" }));
+  const runtime = await createRuntime({ transcribeCommand: null });
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    writeFileSync(configPath, JSON.stringify({ futureMetadata: true }));
+    await runtime.shortcut(runtime.ctx);
+    assert.equal(runtime.pasted(), "voice-ok");
+  } finally {
+    await runtime.shutdown();
+    rmSync(configPath, { force: true });
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("unknown configuration fields are rejected without exposing their names", async (t) => {
   const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
-  writeFileSync(configPath, JSON.stringify({ shortcut: "f8", futureMetadata: true }));
+  writeFileSync(configPath, JSON.stringify({ shortcut: "f8", SUPER_SECRET_FIELD: true }));
   try {
     const runtime = await createRuntime();
-    assert.equal(runtime.shortcutKey(), "f8");
+    await runtime.shortcut(runtime.ctx);
+    const message = runtime.notifications.at(-1)?.message ?? "";
+    await t.test("rejects the configuration", () => {
+      assert.match(message, /unknown configuration field/i);
+    });
+    await t.test("does not expose the unknown field name", () => {
+      assert.doesNotMatch(message, /SUPER_SECRET_FIELD/);
+    });
     await runtime.shutdown();
   } finally {
     rmSync(configPath, { force: true });

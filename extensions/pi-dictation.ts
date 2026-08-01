@@ -67,6 +67,7 @@ type StripOptions = {
 };
 
 type ActiveRecording = {
+  config: ReturnType<typeof loadConfig>;
   proc: ChildProcess;
   file: string;
   dir: string;
@@ -91,6 +92,10 @@ function validateConfig(config) {
     "openaiApiKeyCommand",
     "spinner",
   ];
+  const knownFields = new Set([...stringFields, "timeoutMs", "maxRecordingMs"]);
+  if (Object.keys(config).some((field) => !knownFields.has(field))) {
+    throw new Error("Unknown configuration field");
+  }
   for (const field of stringFields) {
     if (config[field] !== undefined && typeof config[field] !== "string") {
       throw new Error(`${field} must be a string`);
@@ -677,6 +682,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       const active: ActiveRecording = {
+        config,
         proc,
         file,
         dir,
@@ -755,7 +761,7 @@ export default function (pi: ExtensionAPI) {
       return active.stopPromise;
     }
 
-    const config = loadConfig();
+    const config = active.config;
     active.stopping = true;
     recordingPhase = "stopping";
     clearTimeout(active.maxTimer);

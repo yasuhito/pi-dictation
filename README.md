@@ -22,6 +22,8 @@ Pi Dictation supports OpenAI audio transcription and arbitrary local transcripti
   - an OpenAI API key, or
   - a local command such as `whisper-cli`
 
+macOS support is next on the [roadmap](./TODO.md). Native Windows support is planned after its process-lifecycle safety design is validated.
+
 ## Install
 
 From npm:
@@ -115,7 +117,7 @@ The command must write only the transcription to standard output.
 
 ## Configuration
 
-Configuration lives at `~/.pi/agent/pi-dictation.json`. Start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation.
+Configuration lives at `~/.pi/agent/pi-dictation.json`. Start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation. Configuration is validated when recording starts, and changes apply to the next recording. Shortcut changes require `/reload` or a restart. Unknown fields are rejected before external work starts.
 
 | Field | Default | Purpose |
 | --- | --- | --- |

@@ -28,6 +28,10 @@ function validateConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("configuration root must be an object");
   }
+  const knownFields = new Set([...STRING_FIELDS, ...NUMBER_FIELDS]);
+  if (Object.keys(config).some((field) => !knownFields.has(field))) {
+    throw new Error("unknown configuration field");
+  }
   for (const field of STRING_FIELDS) {
     if (config[field] !== undefined && typeof config[field] !== "string") {
       throw new Error(`${field} must be a string`);

@@ -1,6 +1,6 @@
 {
   "name": "pi-dictation",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Safe push-to-talk dictation for Pi with pluggable transcription backends",
   "type": "module",
   "license": "MIT",
@@ -29,6 +29,7 @@
     "pi-dictation.schema.json",
     "pi-dictation.example.json",
     "README.md",
+    "TODO.md",
     "LICENSE"
   ],
   "scripts": {

@@ -39,6 +39,14 @@ test("the example configuration satisfies the schema", () => {
   assert.equal(validate(example), true, JSON.stringify(validate.errors));
 });
 
+test("the schema rejects unknown configuration fields", () => {
+  const schema = readJson("pi-dictation.schema.json");
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema);
+  assert.equal(validate({ futureMetadata: true }), false);
+});
+
 test("the transcription timeout schema declares the runtime bounds", () => {
   const { timeoutMs } = readJson("pi-dictation.schema.json").properties;
   assert.deepEqual({ minimum: timeoutMs.minimum, maximum: timeoutMs.maximum }, { minimum: 1000, maximum: 3600000 });
