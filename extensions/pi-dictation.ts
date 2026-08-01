@@ -20,17 +20,16 @@
 //
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import cliSpinners from "cli-spinners";
 import { normalizeDuration } from "./config.js";
 import { GrowingPcm16WavInput, LiveLevelAnalyzer } from "./live-level.js";
-
-const execFileAsync = promisify(execFile);
+import { defaultRecordCommand } from "./recorder.js";
+import { shellQuote } from "./shell.js";
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictation.json");
 const DEFAULT_SHORTCUT = "insert";
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -151,10 +150,6 @@ function loadConfig() {
   };
 }
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
 function errorDetail(value) {
   const sanitized = String(value || "").replace(/[^\t\n\x20-\x7e\u00a0-\uffff]/g, "�").trim();
   const bytes = Buffer.from(sanitized);
@@ -180,27 +175,6 @@ async function boundedResponseText(response) {
     await reader.cancel().catch(() => {});
   }
   return errorDetail(Buffer.concat(chunks));
-}
-
-async function commandExists(command) {
-  try {
-    await execFileAsync("/bin/sh", ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`], {
-      timeout: 1000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function defaultRecordCommand(file) {
-  if (await commandExists("pw-record")) {
-    return `pw-record --format s16 --rate 16000 --channels 1 ${shellQuote(file)}`;
-  }
-  if (await commandExists("arecord")) {
-    return `arecord -q -f S16_LE -r 16000 -c 1 -t wav ${shellQuote(file)}`;
-  }
-  throw new Error("No recorder found. Install pw-record/arecord or set PI_DICTATION_RECORD_CMD.");
 }
 
 function expandFileTemplate(template, file) {

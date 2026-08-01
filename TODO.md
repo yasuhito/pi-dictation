@@ -4,7 +4,8 @@
 
 macOS is the next platform target because Pi already runs there and its POSIX process model is close to the current Linux implementation.
 
-- [ ] Introduce a small recorder/process-owner module so platform differences stay behind one interface.
+- [x] Isolate platform-specific recorder selection behind one module interface.
+- [ ] Introduce a process-owner module before adding Windows-specific lifecycle behavior.
 - [ ] Add automatic macOS recording through FFmpeg's AVFoundation input.
 - [ ] Add microphone discovery and selection without requiring users to write recorder commands.
 - [ ] Preserve PCM16 mono WAV output so the existing truthful live-level history keeps working.
