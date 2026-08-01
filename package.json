@@ -1,6 +1,6 @@
 {
   "name": "pi-dictation",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Safe push-to-talk dictation for Pi with pluggable transcription backends",
   "type": "module",
   "license": "MIT",
@@ -20,7 +20,11 @@
     "speech-to-text",
     "voice-input"
   ],
+  "bin": {
+    "pi-dictation-doctor": "./bin/pi-dictation-doctor.mjs"
+  },
   "files": [
+    "bin",
     "extensions",
     "README.md",
     "LICENSE"
@@ -28,8 +32,10 @@
   "scripts": {
     "test": "node --test test/*.test.cjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test",
+    "test:assertions": "node scripts/check-test-assertions.mjs",
+    "check": "npm run test:assertions && npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run",
+    "doctor": "node bin/pi-dictation-doctor.mjs",
     "demo:generate": "node scripts/generate-demo.mjs"
   },
   "pi": {

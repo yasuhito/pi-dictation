@@ -56,6 +56,22 @@ Commands:
 - `/dictate-cancel` — cancel recording or transcription
 - `/dictate-help` — show whether recorder selection is automatic or custom, plus the transcription backend
 
+## Diagnose setup
+
+Run the privacy-safe doctor when recording or transcription is not working:
+
+```bash
+npx -p pi-dictation pi-dictation-doctor
+```
+
+From a source checkout:
+
+```bash
+npm run doctor
+```
+
+The doctor checks Node.js, Pi, Linux support, configuration validity, recorder availability, the requested and effective transcription backend, and whether an OpenAI credential source is configured. It does not execute API-key commands or print custom commands or secret values.
+
 ## Configure OpenAI transcription
 
 The simplest option is `OPENAI_API_KEY`:

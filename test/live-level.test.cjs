@@ -41,7 +41,7 @@ test("the fixed level scale keeps silence gated and preserves speech bands", asy
   );
 });
 
-test("incomplete and unsupported audio input stays on the truthful silent-line fallback", async () => {
+test("incomplete and unsupported audio input stays on the truthful silent-line fallback", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-dictation-fallback-"));
   const file = join(dir, "recording.wav");
   try {
@@ -50,18 +50,28 @@ test("incomplete and unsupported audio input stays on the truthful silent-line f
     );
     writeFileSync(file, wavHeader().subarray(0, 24));
     const input = new GrowingPcm16WavInput(file);
-    assert.deepEqual(Array.from(await input.readNewestInterval(50)), []);
-    assert.equal(input.state, "pending");
+    const incompleteSamples = Array.from(await input.readNewestInterval(50));
+    await t.test("incomplete input produces no visual samples", () => {
+      assert.deepEqual(incompleteSamples, []);
+    });
+    await t.test("incomplete input remains pending", () => {
+      assert.equal(input.state, "pending");
+    });
 
     writeFileSync(file, Buffer.concat([wavHeader({ channels: 2 }), pcm(Array(1600).fill(8000))]));
-    assert.deepEqual(Array.from(await input.readNewestInterval(50)), []);
-    assert.equal(input.state, "unsupported");
+    const unsupportedSamples = Array.from(await input.readNewestInterval(50));
+    await t.test("unsupported input produces no visual samples", () => {
+      assert.deepEqual(unsupportedSamples, []);
+    });
+    await t.test("unsupported input is identified", () => {
+      assert.equal(input.state, "unsupported");
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("implausible WAV sample rates are rejected before they can amplify allocations", async () => {
+test("implausible WAV sample rates are rejected before they can amplify allocations", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-dictation-sample-rate-"));
   const file = join(dir, "recording.wav");
   try {
@@ -73,14 +83,19 @@ test("implausible WAV sample rates are rejected before they can amplify allocati
       pcm(Array(1000).fill(1000)),
     ]));
     const input = new GrowingPcm16WavInput(file);
-    assert.deepEqual(Array.from(await input.readNewestInterval(50)), []);
-    assert.equal(input.state, "unsupported");
+    const samples = Array.from(await input.readNewestInterval(50));
+    await t.test("implausible input produces no visual samples", () => {
+      assert.deepEqual(samples, []);
+    });
+    await t.test("implausible input is identified as unsupported", () => {
+      assert.equal(input.state, "unsupported");
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("growing PCM16 mono WAV input drops stale visualization backlog and reads the newest interval", async () => {
+test("growing PCM16 mono WAV input drops stale visualization backlog and reads the newest interval", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-dictation-level-"));
   const file = join(dir, "recording.wav");
   try {
@@ -97,10 +112,16 @@ test("growing PCM16 mono WAV input drops stale visualization backlog and reads t
     ]));
 
     const input = new GrowingPcm16WavInput(file);
-    assert.deepEqual(Array.from(await input.readNewestInterval(50)), Array(800).fill(3000));
+    const newestInitialSamples = Array.from(await input.readNewestInterval(50));
+    await t.test("initial read drops stale intervals", () => {
+      assert.deepEqual(newestInitialSamples, Array(800).fill(3000));
+    });
 
     appendFileSync(file, pcm(Array(800).fill(4000)));
-    assert.deepEqual(Array.from(await input.readNewestInterval(50)), Array(800).fill(4000));
+    const appendedSamples = Array.from(await input.readNewestInterval(50));
+    await t.test("next read returns the appended interval", () => {
+      assert.deepEqual(appendedSamples, Array(800).fill(4000));
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

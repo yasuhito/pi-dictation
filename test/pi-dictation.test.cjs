@@ -147,28 +147,30 @@ function testPaths(name) {
   return { dir, marker: join(dir, "marker"), pidFile: join(dir, "pids") };
 }
 
-test("recording appears as a responsive above-editor Dictation strip", async () => {
+test("recording appears as a responsive above-editor Dictation strip", async (t) => {
   const paths = testPaths("recording-strip");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime();
   try {
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
-
-    assert.equal(runtime.widgetCalls.length, 1);
-    assert.equal(runtime.widgetCalls[0].key, "pi-dictation");
-    assert.deepEqual(runtime.widgetCalls[0].options, { placement: "aboveEditor" });
     const [line] = runtime.widget().render(32);
-    assert.equal(line.length, 32);
-    assert.match(line, /^[● ] REC  /);
-    assert.match(line, /▁+  \d\d:\d\d$/);
+    const expectations = [
+      ["registers one widget", () => assert.equal(runtime.widgetCalls.length, 1)],
+      ["uses the Dictation widget key", () => assert.equal(runtime.widgetCalls[0].key, "pi-dictation")],
+      ["places the widget above the editor", () => assert.deepEqual(runtime.widgetCalls[0].options, { placement: "aboveEditor" })],
+      ["fills the available width", () => assert.equal(line.length, 32)],
+      ["shows the recording marker and label", () => assert.match(line, /^[● ] REC  /)],
+      ["shows level history and elapsed time", () => assert.match(line, /▁+  \d\d:\d\d$/)],
+    ];
+    for (const [name, expectation] of expectations) await t.test(name, expectation);
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
 
-test("theme styling does not break the responsive Dictation strip width", async () => {
+test("theme styling does not break the responsive Dictation strip width", async (t) => {
   const paths = testPaths("styled-width");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({ ansiTheme: true });
@@ -180,9 +182,15 @@ test("theme styling does not break the responsive Dictation strip width", async 
       1200
     );
     const plain = runtime.widget().render(32)[0].replace(/\u001b\[[0-9;]*m/g, "");
-    assert.equal(plain.length, 32);
-    assert.match(plain, /^● REC  /);
-    assert.match(plain, /  \d\d:\d\d$/);
+    await t.test("preserves the requested width", () => {
+      assert.equal(plain.length, 32);
+    });
+    await t.test("preserves the recording prefix", () => {
+      assert.match(plain, /^● REC  /);
+    });
+    await t.test("preserves elapsed time", () => {
+      assert.match(plain, /  \d\d:\d\d$/);
+    });
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
@@ -208,7 +216,7 @@ test("multi-column spinner frames never exceed the terminal width", async () => 
   }
 });
 
-test("the recording marker fully blinks off after 520 ms without shifting the strip", async () => {
+test("the recording marker fully blinks off after 520 ms without shifting the strip", async (t) => {
   const paths = testPaths("recording-blink");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime();
@@ -217,15 +225,25 @@ test("the recording marker fully blinks off after 520 ms without shifting the st
     await waitFor(() => readPids(paths.pidFile).length === 1);
     await waitFor(() => runtime.widget().render(32)[0].startsWith("● REC  "), 1200);
     const on = runtime.widget().render(32)[0];
-    assert.match(on, /^● REC  /);
+    await t.test("starts with the marker visible", () => {
+      assert.match(on, /^● REC  /);
+    });
     await waitFor(() => runtime.widget().render(32)[0].startsWith("  REC  "), 800);
     const off = runtime.widget().render(32)[0];
-    assert.equal(off.length, on.length);
-    assert.match(off, /^  REC  /);
-    assert.ok(runtime.renderRequests() > 0);
+    await t.test("does not shift while blinking", () => {
+      assert.equal(off.length, on.length);
+    });
+    await t.test("fully hides the marker", () => {
+      assert.match(off, /^  REC  /);
+    });
+    await t.test("requests an animation render", () => {
+      assert.ok(runtime.renderRequests() > 0);
+    });
   } finally {
     await runtime.shutdown();
-    assert.equal(runtime.widget(), undefined);
+    await t.test("removes the widget on shutdown", () => {
+      assert.equal(runtime.widget(), undefined);
+    });
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
@@ -246,7 +264,7 @@ test("valid −40 dBFS microphone silence renders as one thin line", async () =>
   }
 });
 
-test("the Dictation strip renders actual appended PCM as live level history", async () => {
+test("the Dictation strip renders actual appended PCM as live level history", async (t) => {
   const paths = testPaths("live-level-history");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({ recorderArgs: "--growing-wav" });
@@ -254,17 +272,24 @@ test("the Dictation strip renders actual appended PCM as live level history", as
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
     await waitFor(() => /[▂▃▄▅▆▇█]/.test(runtime.widget().render(32)[0]));
-    assert.match(runtime.widget().render(32)[0], /^[● ] REC  .+  \d\d:\d\d$/);
+    const fullWidth = runtime.widget().render(32)[0];
     const [minimumWidth] = runtime.widget().render(14);
-    assert.equal(visibleWidth(minimumWidth), 14);
-    assert.match(minimumWidth, /^[● ] REC {4}\d\d:\d\d$/);
+    await t.test("shows measured levels at full width", () => {
+      assert.match(fullWidth, /^[● ] REC  .+  \d\d:\d\d$/);
+    });
+    await t.test("fits the minimum width", () => {
+      assert.equal(visibleWidth(minimumWidth), 14);
+    });
+    await t.test("drops level history at the minimum width", () => {
+      assert.match(minimumWidth, /^[● ] REC {4}\d\d:\d\d$/);
+    });
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
 
-test("one Dictation strip transitions through processing, transcribing, ready, and auto-hide", async () => {
+test("one Dictation strip transitions through processing, transcribing, ready, and auto-hide", async (t) => {
   const paths = testPaths("strip-lifecycle");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({
@@ -276,12 +301,20 @@ test("one Dictation strip transitions through processing, transcribing, ready, a
     const strip = runtime.widget();
 
     const stopping = runtime.shortcut(runtime.ctx);
-    assert.match(strip.render(32)[0], /Processing recording…/);
+    await t.test("shows processing", () => {
+      assert.match(strip.render(32)[0], /Processing recording…/);
+    });
     await waitFor(() => existsSync(paths.marker));
-    assert.match(strip.render(32)[0], /Transcribing…/);
+    await t.test("shows transcription", () => {
+      assert.match(strip.render(32)[0], /Transcribing…/);
+    });
     await stopping;
-    assert.match(strip.render(32)[0], /✓ Dictation ready/);
-    assert.equal(runtime.widgetCalls.filter(({ content }) => content).length, 1);
+    await t.test("shows completion", () => {
+      assert.match(strip.render(32)[0], /✓ Dictation ready/);
+    });
+    await t.test("reuses one strip", () => {
+      assert.equal(runtime.widgetCalls.filter(({ content }) => content).length, 1);
+    });
     await waitFor(() => runtime.widget() === undefined, 2000);
   } finally {
     await runtime.shutdown();
@@ -289,7 +322,7 @@ test("one Dictation strip transitions through processing, transcribing, ready, a
   }
 });
 
-test("normal dictation pastes the transcription", async () => {
+test("normal dictation pastes the transcription", async (t) => {
   const paths = testPaths("normal");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime();
@@ -298,8 +331,12 @@ test("normal dictation pastes the transcription", async () => {
     await waitFor(() => readPids(paths.pidFile).length === 1);
     const [pid] = readPids(paths.pidFile);
     await runtime.shortcut(runtime.ctx);
-    assert.equal(runtime.pasted(), "voice-ok");
-    assert.equal(isRunning(pid), false);
+    await t.test("pastes the returned text", () => {
+      assert.equal(runtime.pasted(), "voice-ok");
+    });
+    await t.test("stops the recorder", () => {
+      assert.equal(isRunning(pid), false);
+    });
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
@@ -324,15 +361,19 @@ test("recordings are created in a private temporary directory", async () => {
   }
 });
 
-test("valid JSON with a non-object root reports a configuration error", async () => {
+test("valid JSON with a non-object root reports a configuration error", async (t) => {
   const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
   writeFileSync(configPath, "null");
   try {
     const runtime = await createRuntime();
     await runtime.shortcut(runtime.ctx);
-    assert.match(runtime.notifications.at(-1)?.message ?? "", /configuration.*object/i);
-    assert.match(runtime.widget().render(32)[0], /× Dictation failed/);
+    await t.test("explains the invalid root", () => {
+      assert.match(runtime.notifications.at(-1)?.message ?? "", /configuration.*object/i);
+    });
+    await t.test("shows failure in the strip", () => {
+      assert.match(runtime.widget().render(32)[0], /× Dictation failed/);
+    });
     await runtime.shutdown();
   } finally {
     rmSync(configPath, { force: true });
@@ -371,7 +412,7 @@ test("invalid transcription timeouts fall back to the default", async () => {
   }
 });
 
-test("OpenAI transcription pastes the returned text", async () => {
+test("OpenAI transcription pastes the returned text", async (t) => {
   const paths = testPaths("openai");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   process.env.PI_DICTATION_OPENAI_API_KEY = "test-key";
@@ -389,9 +430,15 @@ test("OpenAI transcription pastes the returned text", async () => {
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
     await runtime.shortcut(runtime.ctx);
-    assert.equal(runtime.pasted(), "openai-ok");
-    assert.equal(request.url, "https://api.openai.com/v1/audio/transcriptions");
-    assert.equal(request.options.headers.Authorization, "Bearer test-key");
+    await t.test("pastes the returned text", () => {
+      assert.equal(runtime.pasted(), "openai-ok");
+    });
+    await t.test("uses the audio transcription endpoint", () => {
+      assert.equal(request.url, "https://api.openai.com/v1/audio/transcriptions");
+    });
+    await t.test("authorizes with the configured key", () => {
+      assert.equal(request.options.headers.Authorization, "Bearer test-key");
+    });
   } finally {
     await runtime.shutdown();
     global.fetch = originalFetch;
@@ -400,22 +447,26 @@ test("OpenAI transcription pastes the returned text", async () => {
   }
 });
 
-test("an unexpected recorder exit is reported and cleaned up", async () => {
+test("an unexpected recorder exit is reported and cleaned up", async (t) => {
   const paths = testPaths("recorder-exit");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({ recorderArgs: "--exit-immediately" });
   try {
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => runtime.notifications.some(({ message }) => /stopped unexpectedly/.test(message)));
-    assert.match(runtime.widget().render(32)[0], /× Dictation failed/);
-    assert.equal(runtime.pasted(), "");
+    await t.test("shows failure in the strip", () => {
+      assert.match(runtime.widget().render(32)[0], /× Dictation failed/);
+    });
+    await t.test("does not paste a transcript", () => {
+      assert.equal(runtime.pasted(), "");
+    });
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
 
-test("the external recording limit stops a recorder and its descendants", async () => {
+test("the external recording limit stops a recorder and its descendants", async (t) => {
   const paths = testPaths("recording-limit");
   const childPidFile = join(paths.dir, "child-pid");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
@@ -427,8 +478,12 @@ test("the external recording limit stops a recorder and its descendants", async 
     const [pid] = readPids(paths.pidFile);
     const childPid = Number(readFileSync(childPidFile, "utf8"));
     await waitFor(() => !isRunning(pid) && !isRunning(childPid), 7500);
-    assert.equal(isRunning(pid), false);
-    assert.equal(isRunning(childPid), false);
+    await t.test("stops the recorder", () => {
+      assert.equal(isRunning(pid), false);
+    });
+    await t.test("stops the recorder descendant", () => {
+      assert.equal(isRunning(childPid), false);
+    });
   } finally {
     await runtime.shutdown();
     delete process.env.PI_DICTATION_TEST_CHILD_PID_FILE;
@@ -436,7 +491,7 @@ test("the external recording limit stops a recorder and its descendants", async 
   }
 });
 
-test("the external watchdog survives an abrupt Pi exit", async () => {
+test("the external watchdog survives an abrupt Pi exit", async (t) => {
   const paths = testPaths("abrupt-pi");
   const childPidFile = join(paths.dir, "child-pid");
   const harness = spawn(process.execPath, [abruptPiPath], {
@@ -460,8 +515,12 @@ test("the external watchdog survives an abrupt Pi exit", async () => {
     harness.kill("SIGKILL");
     await waitFor(() => harness.exitCode !== null || harness.signalCode !== null);
     await waitFor(() => !isRunning(recorderPid) && !isRunning(childPid), 7500);
-    assert.equal(isRunning(recorderPid), false);
-    assert.equal(isRunning(childPid), false);
+    await t.test("stops the recorder", () => {
+      assert.equal(isRunning(recorderPid), false);
+    });
+    await t.test("stops the recorder descendant", () => {
+      assert.equal(isRunning(childPid), false);
+    });
   } finally {
     if (harness.exitCode === null && harness.signalCode === null) harness.kill("SIGKILL");
     for (const pid of [recorderPid, childPid]) {
@@ -493,7 +552,7 @@ test("rapid repeated toggles do not start a recorder", async () => {
   }
 });
 
-test("cancel supersedes transcription already in progress", async () => {
+test("cancel supersedes transcription already in progress", async (t) => {
   const paths = testPaths("cancel");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({
@@ -506,8 +565,12 @@ test("cancel supersedes transcription already in progress", async () => {
     await waitFor(() => existsSync(paths.marker));
     await runtime.commands["dictate-cancel"]("", runtime.ctx);
     await stopping;
-    assert.match(runtime.widget().render(32)[0], /– Dictation cancelled/);
-    assert.equal(runtime.pasted(), "");
+    await t.test("shows cancellation in the strip", () => {
+      assert.match(runtime.widget().render(32)[0], /– Dictation cancelled/);
+    });
+    await t.test("does not paste late output", () => {
+      assert.equal(runtime.pasted(), "");
+    });
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
