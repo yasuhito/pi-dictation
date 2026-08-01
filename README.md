@@ -18,6 +18,12 @@ Pi Dictation supports OpenAI audio transcription and arbitrary local transcripti
 
 ## Install
 
+From npm:
+
+```bash
+pi install npm:pi-dictation
+```
+
 From GitHub:
 
 ```bash
