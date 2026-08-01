@@ -1,6 +1,6 @@
 {
   "name": "pi-dictation",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Safe push-to-talk dictation for Pi with pluggable transcription backends",
   "type": "module",
   "license": "MIT",
@@ -29,12 +29,15 @@
     "test": "node --test test/*.test.cjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "demo:generate": "node scripts/generate-demo.mjs"
   },
   "pi": {
     "extensions": [
       "./extensions/pi-dictation.ts"
-    ]
+    ],
+    "video": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.mp4",
+    "image": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.gif"
   },
   "dependencies": {
     "cli-spinners": "^3.4.0"
