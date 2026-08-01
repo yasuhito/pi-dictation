@@ -29,6 +29,12 @@ export async function defaultRecordCommand(
   file: string,
   environment: RecorderEnvironment = systemEnvironment
 ): Promise<string> {
+  if (environment.platform === "darwin") {
+    if (await environment.commandExists("ffmpeg")) {
+      return `ffmpeg -hide_banner -loglevel error -nostdin -f avfoundation -i ':0' -vn -ac 1 -ar 16000 -c:a pcm_s16le -flush_packets 1 -y ${shellQuote(file)}`;
+    }
+    throw new Error("No recorder found. Install ffmpeg or set PI_DICTATION_RECORD_CMD.");
+  }
   if (environment.platform !== "linux") {
     throw new Error(`Unsupported recording platform: ${environment.platform}`);
   }

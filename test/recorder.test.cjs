@@ -43,10 +43,27 @@ test("Linux reports unavailable recorder dependencies", async () => {
   );
 });
 
+test("macOS records audio-only PCM16 mono WAV through FFmpeg AVFoundation", async () => {
+  const { defaultRecordCommand } = await loadRecorder();
+  const command = await defaultRecordCommand("/tmp/voice.wav", environment("darwin", ["ffmpeg"]));
+  assert.equal(
+    command,
+    "ffmpeg -hide_banner -loglevel error -nostdin -f avfoundation -i ':0' -vn -ac 1 -ar 16000 -c:a pcm_s16le -flush_packets 1 -y '/tmp/voice.wav'"
+  );
+});
+
+test("macOS reports a missing FFmpeg dependency", async () => {
+  const { defaultRecordCommand } = await loadRecorder();
+  await assert.rejects(
+    defaultRecordCommand("/tmp/voice.wav", environment("darwin", [])),
+    /No recorder found\. Install ffmpeg or set PI_DICTATION_RECORD_CMD\./
+  );
+});
+
 test("unsupported platforms fail before probing recorder commands", async () => {
   const { defaultRecordCommand } = await loadRecorder();
   await assert.rejects(
-    defaultRecordCommand("/tmp/voice.wav", environment("darwin", ["pw-record"])),
-    /Unsupported recording platform: darwin/
+    defaultRecordCommand("/tmp/voice.wav", environment("win32", ["ffmpeg"])),
+    /Unsupported recording platform: win32/
   );
 });
