@@ -6,7 +6,7 @@ macOS is the next platform target because Pi already runs there and its POSIX pr
 
 - [x] Isolate platform-specific recorder selection behind one module interface.
 - [ ] Introduce a process-owner module before adding Windows-specific lifecycle behavior.
-- [x] Add automatic macOS recording through FFmpeg's AVFoundation audio device `:0`.
+- [x] Add automatic macOS recording through FFmpeg's AVFoundation system-default audio input.
 - [ ] Add microphone discovery and selection without requiring users to write recorder commands.
 - [ ] Preserve PCM16 mono WAV output so the existing truthful live-level history keeps working.
 - [x] Run lifecycle, cancellation, descendant-cleanup, and abrupt-Pi-exit tests on `macos-latest` CI.
