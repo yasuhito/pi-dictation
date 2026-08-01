@@ -10,8 +10,7 @@
 //   "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -",
 //   "recordCommand": "pw-record --format s16 --rate 16000 --channels 1 {file}",
 //   "maxRecordingMs": 600000,
-//   "openaiModel": "gpt-4o-mini-transcribe",
-//   "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
+//   "openaiModel": "gpt-4o-mini-transcribe"
 // }
 //
 // Transcription backend order:
@@ -360,7 +359,7 @@ async function transcribeWithOpenAI(config, file, signal) {
     const apiKey = await resolveOpenAIApiKey(config, controller.signal);
     if (!apiKey) {
       throw new Error(
-        "No transcription backend configured. Store an API key with secret-tool or set OPENAI_API_KEY."
+        "No transcription backend configured. Configure openaiApiKeyCommand or set OPENAI_API_KEY."
       );
     }
 

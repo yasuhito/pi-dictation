@@ -18,7 +18,9 @@
     "pi-coding-agent",
     "dictation",
     "speech-to-text",
-    "voice-input"
+    "voice-input",
+    "linux",
+    "macos"
   ],
   "bin": {
     "pi-dictation-doctor": "bin/pi-dictation-doctor.mjs"

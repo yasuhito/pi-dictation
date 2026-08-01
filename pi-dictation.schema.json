@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
   "title": "Pi Dictation configuration",
-  "description": "Configuration for the Pi Dictation extension.",
+  "description": "Configuration for the Pi Dictation extension on Linux and macOS.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -13,7 +13,7 @@
     "shortcut": {
       "type": "string",
       "default": "insert",
-      "description": "Pi shortcut used to toggle dictation."
+      "description": "Pi shortcut used to toggle dictation. Mac keyboards commonly need a shortcut such as f8 instead of insert."
     },
     "language": {
       "type": "string",
@@ -23,7 +23,7 @@
     "recordCommand": {
       "type": "string",
       "default": "",
-      "description": "Custom recorder command. The optional {file} placeholder is replaced with the WAV path."
+      "description": "Custom recorder command. By default, Linux auto-detects pw-record or arecord and macOS uses FFmpeg AVFoundation. The optional {file} placeholder is replaced with the WAV path."
     },
     "transcribeCommand": {
       "type": "string",

@@ -12,17 +12,17 @@ Pi Dictation supports OpenAI audio transcription and arbitrary local transcripti
 
 ## Requirements
 
-- Linux with `/bin/sh` and POSIX process-group support
+- Linux or macOS with `/bin/sh` and POSIX process-group support
 - Pi
 - Node.js 22.19 or newer
 - One recorder:
-  - `pw-record` on PipeWire systems, or
-  - `arecord` on ALSA systems
+  - Linux: `pw-record` on PipeWire systems or `arecord` on ALSA systems
+  - macOS: FFmpeg with AVFoundation (`brew install ffmpeg`)
 - One transcription backend:
   - an OpenAI API key, or
   - a local command such as `whisper-cli`
 
-macOS support is next on the [roadmap](./TODO.md). Native Windows support is planned after its process-lifecycle safety design is validated.
+On macOS, Pi Dictation records from the system-default audio input and macOS may ask the terminal running Pi for microphone permission. Native Windows support remains on the [roadmap](./TODO.md) until its process-lifecycle safety design is validated.
 
 ## Install
 
@@ -48,7 +48,7 @@ Restart Pi or run `/reload` after installation.
 
 ## Use
 
-Press `Insert` to begin recording. Press it again to stop and transcribe.
+Press `Insert` to begin recording. Press it again to stop and transcribe. Mac keyboards commonly lack an Insert key, so macOS users should configure a shortcut such as `f8` and use `fn+F8` when the function-key row controls media features.
 
 While recording, a one-line Dictation strip appears above the editor with a blinking recording marker, recent live microphone levels, and elapsed time. The same strip shows processing, transcription, completion, cancellation, and failure states, then hides automatically. Live levels are available for PCM16 mono WAV recorder output, including custom recorder commands that produce that format. Incomplete or unsupported output uses a flat silent line rather than simulated activity.
 
@@ -72,7 +72,7 @@ From a source checkout:
 npm run doctor
 ```
 
-The doctor checks Node.js, Pi, Linux support, configuration validity, recorder availability, the requested and effective transcription backend, and whether an OpenAI credential source is configured. It does not execute API-key commands or print custom commands or secret values.
+The doctor checks Node.js, Pi, Linux or macOS support, configuration validity, recorder availability, the requested and effective transcription backend, and whether an OpenAI credential source is configured. It does not execute API-key commands or print custom commands or secret values.
 
 ## Configure OpenAI transcription
 
@@ -82,13 +82,13 @@ The simplest option is `OPENAI_API_KEY`:
 export OPENAI_API_KEY=...
 ```
 
-To avoid storing the key in shell configuration, save it in the system keyring:
+To avoid storing the key in shell configuration, save it in the system keyring.
+
+Linux with Secret Service:
 
 ```bash
 secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-dictation
 ```
-
-Then create `~/.pi/agent/pi-dictation.json`:
 
 ```json
 {
@@ -96,6 +96,22 @@ Then create `~/.pi/agent/pi-dictation.json`:
   "language": "ja",
   "openaiModel": "gpt-4o-mini-transcribe",
   "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
+}
+```
+
+macOS Keychain (the command prompts for the key without placing it in shell history):
+
+```bash
+security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
+```
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "shortcut": "f8",
+  "language": "ja",
+  "openaiModel": "gpt-4o-mini-transcribe",
+  "openaiApiKeyCommand": "security find-generic-password -a \"$USER\" -s pi-dictation-openai -w"
 }
 ```
 
