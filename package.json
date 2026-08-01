@@ -1,0 +1,54 @@
+{
+  "name": "pi-dictation",
+  "version": "0.1.0",
+  "description": "Safe push-to-talk dictation for Pi with pluggable transcription backends",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yasuhito Takamiya",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yasuhito/pi-dictation.git"
+  },
+  "homepage": "https://github.com/yasuhito/pi-dictation#readme",
+  "bugs": {
+    "url": "https://github.com/yasuhito/pi-dictation/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "dictation",
+    "speech-to-text",
+    "voice-input"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-dictation.ts"
+    ]
+  },
+  "dependencies": {
+    "cli-spinners": "^3.4.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@types/node": "^24.0.0",
+    "jiti": "^2.6.1",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
