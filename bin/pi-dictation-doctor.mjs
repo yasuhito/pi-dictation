@@ -122,9 +122,11 @@ if (piVersion) {
 
 if (process.platform === "linux") {
   lines.push("Platform: ok (linux)");
+} else if (process.platform === "darwin") {
+  lines.push("Platform: ok (macOS)");
 } else {
-  lines.push(`Platform: unsupported (${process.platform}; Linux required)`);
-  issues.push("use Pi Dictation on Linux");
+  lines.push(`Platform: unsupported (${process.platform}; Linux or macOS required)`);
+  issues.push("use Pi Dictation on Linux or macOS");
 }
 
 if (config.error) {
@@ -137,13 +139,24 @@ if (config.error) {
 const recordCommand = configuredValue("PI_DICTATION_RECORD_CMD", config.value.recordCommand);
 if (recordCommand) {
   lines.push("Recorder: ok (custom command configured)");
-} else if (commandExists("pw-record")) {
-  lines.push("Recorder: ok (pw-record auto-detected)");
-} else if (commandExists("arecord")) {
-  lines.push("Recorder: ok (arecord auto-detected)");
+} else if (process.platform === "darwin") {
+  if (commandExists("ffmpeg")) {
+    lines.push("Recorder: ok (ffmpeg AVFoundation auto-detected)");
+  } else {
+    lines.push("Recorder: unavailable (ffmpeg not found)");
+    issues.push("install ffmpeg or configure PI_DICTATION_RECORD_CMD");
+  }
+} else if (process.platform === "linux") {
+  if (commandExists("pw-record")) {
+    lines.push("Recorder: ok (pw-record auto-detected)");
+  } else if (commandExists("arecord")) {
+    lines.push("Recorder: ok (arecord auto-detected)");
+  } else {
+    lines.push("Recorder: unavailable (pw-record and arecord not found)");
+    issues.push("install pw-record/arecord or configure PI_DICTATION_RECORD_CMD");
+  }
 } else {
-  lines.push("Recorder: unavailable (pw-record and arecord not found)");
-  issues.push("install pw-record/arecord or configure PI_DICTATION_RECORD_CMD");
+  lines.push(`Recorder: unavailable (no default recorder for ${process.platform})`);
 }
 
 const transcribeCommand = configuredValue("PI_DICTATION_TRANSCRIBE_CMD", config.value.transcribeCommand);

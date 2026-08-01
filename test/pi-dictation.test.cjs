@@ -3,7 +3,7 @@ const { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { createJiti } = require("jiti");
 const { visibleWidth } = require("@earendil-works/pi-tui");
 
@@ -50,12 +50,10 @@ function isAlive(pid) {
 
 function isRunning(pid) {
   if (!isAlive(pid)) return false;
-  try {
-    const state = readFileSync(`/proc/${pid}/stat`, "utf8").match(/^\d+ \(.+\) (\S)/)?.[1];
-    return state !== "Z";
-  } catch {
-    return false;
-  }
+  const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  if (result.status !== 0) return false;
+  const state = result.stdout.trim();
+  return Boolean(state) && !state.startsWith("Z");
 }
 
 async function createRuntime({
@@ -146,6 +144,14 @@ function testPaths(name) {
   const dir = mkdtempSync(join(tmpdir(), `pi-dictation-${name}-`));
   return { dir, marker: join(dir, "marker"), pidFile: join(dir, "pids") };
 }
+
+test("portable process inspection recognizes a running process", () => {
+  assert.equal(isRunning(process.pid), true);
+});
+
+test("portable process inspection rejects a missing process", () => {
+  assert.equal(isRunning(99999999), false);
+});
 
 test("recording appears as a responsive above-editor Dictation strip", async (t) => {
   const paths = testPaths("recording-strip");

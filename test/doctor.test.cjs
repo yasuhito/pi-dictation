@@ -54,7 +54,13 @@ test("doctor reports a ready custom setup without exposing commands or API keys"
     ["identifies the report", () => assert.match(result.stdout, /Pi Dictation doctor/)],
     ["reports Node", () => assert.match(result.stdout, /Node: ok \(v\d+\./)],
     ["reports Pi", () => assert.match(result.stdout, /Pi: ok \(.+\)/)],
-    ["reports Linux", () => assert.match(result.stdout, /Platform: ok \(linux\)/)],
+    [
+      "reports the supported platform",
+      () => assert.match(
+        result.stdout,
+        process.platform === "darwin" ? /Platform: ok \(macOS\)/ : /Platform: ok \(linux\)/
+      ),
+    ],
     ["reports the optional config as absent", () => assert.match(result.stdout, /Config: ok \(not found; defaults and environment used\)/)],
     ["reports a custom recorder", () => assert.match(result.stdout, /Recorder: ok \(custom command configured\)/)],
     ["reports the requested backend", () => assert.match(result.stdout, /Backend requested: custom command/)],
@@ -145,12 +151,28 @@ test("doctor fails with actionable guidance when recording and transcription are
 
   const expectations = [
     ["exits unsuccessfully", () => assert.equal(result.status, 1)],
-    ["reports missing recorders", () => assert.match(result.stdout, /Recorder: unavailable \(pw-record and arecord not found\)/)],
+    [
+      "reports missing recorders",
+      () => assert.match(
+        result.stdout,
+        process.platform === "darwin"
+          ? /Recorder: unavailable \(ffmpeg not found\)/
+          : /Recorder: unavailable \(pw-record and arecord not found\)/
+      ),
+    ],
     ["reports the default requested backend", () => assert.match(result.stdout, /Backend requested: OpenAI-compatible transcription/)],
     ["reports no effective backend", () => assert.match(result.stdout, /Backend effective: unavailable \(no local command or OpenAI credential configured\)/)],
     ["reports an absent OpenAI credential", () => assert.match(result.stdout, /OpenAI credential: absent/)],
     ["reports that attention is needed", () => assert.match(result.stdout, /Result: needs attention/)],
-    ["suggests recorder setup", () => assert.match(result.stdout, /install pw-record\/arecord or configure PI_DICTATION_RECORD_CMD/)],
+    [
+      "suggests recorder setup",
+      () => assert.match(
+        result.stdout,
+        process.platform === "darwin"
+          ? /install ffmpeg or configure PI_DICTATION_RECORD_CMD/
+          : /install pw-record\/arecord or configure PI_DICTATION_RECORD_CMD/
+      ),
+    ],
     ["suggests transcription setup", () => assert.match(result.stdout, /configure a local transcription command or an OpenAI credential/)],
   ];
   for (const [name, expectation] of expectations) await t.test(name, expectation);
