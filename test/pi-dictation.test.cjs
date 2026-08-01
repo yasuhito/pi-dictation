@@ -147,7 +147,7 @@ function testPaths(name) {
   return { dir, marker: join(dir, "marker"), pidFile: join(dir, "pids") };
 }
 
-test("recording appears as a responsive below-editor Dictation strip", async () => {
+test("recording appears as a responsive above-editor Dictation strip", async () => {
   const paths = testPaths("recording-strip");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime();
@@ -157,7 +157,7 @@ test("recording appears as a responsive below-editor Dictation strip", async () 
 
     assert.equal(runtime.widgetCalls.length, 1);
     assert.equal(runtime.widgetCalls[0].key, "pi-dictation");
-    assert.deepEqual(runtime.widgetCalls[0].options, { placement: "belowEditor" });
+    assert.deepEqual(runtime.widgetCalls[0].options, { placement: "aboveEditor" });
     const [line] = runtime.widget().render(32);
     assert.equal(line.length, 32);
     assert.match(line, /^[● ] REC  /);

@@ -471,7 +471,7 @@ class DictationStrip {
         this.theme = theme;
         return this;
       },
-      { placement: "belowEditor" }
+      { placement: "aboveEditor" }
     );
     this.setLabel(label, options);
   }
@@ -587,7 +587,7 @@ class DictationStrip {
 
   remove() {
     this.dispose();
-    this.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
+    this.ui.setWidget(WIDGET_KEY, undefined, { placement: "aboveEditor" });
   }
 
   dispose() {
