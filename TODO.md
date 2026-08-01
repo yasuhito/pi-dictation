@@ -13,6 +13,8 @@ macOS is the next platform target because Pi already runs there and its POSIX pr
 - [x] Update the doctor for macOS and its FFmpeg dependency.
 - [ ] Update the schema, example, and README support claim after live-device validation passes.
 
+Remote validation on an Apple Silicon Mac confirmed that `:default` selects the macOS system input, the WAV grows every second, FFprobe reports PCM16 mono at 16 kHz, the complete Pi recording lifecycle reaches `Dictation ready`, and the doctor is ready. AVFoundation capture launched from SSH produced digital silence (`-91 dBFS`), so a local GUI terminal still needs one spoken-audio check before the support claim is published.
+
 ## 2. Native Windows support
 
 Pi supports native Windows when a bash shell is available; Git for Windows is sufficient for most users. See Pi's official [Windows setup documentation](https://pi.dev/docs/latest/windows).
