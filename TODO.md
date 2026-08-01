@@ -9,8 +9,9 @@ macOS is the next platform target because Pi already runs there and its POSIX pr
 - [x] Add automatic macOS recording through FFmpeg's AVFoundation audio device `:0`.
 - [ ] Add microphone discovery and selection without requiring users to write recorder commands.
 - [ ] Preserve PCM16 mono WAV output so the existing truthful live-level history keeps working.
-- [ ] Run lifecycle, cancellation, descendant-cleanup, and abrupt-Pi-exit tests on `macos-latest` CI.
-- [ ] Update the doctor, schema, example, and README only after the safety tests pass.
+- [x] Run lifecycle, cancellation, descendant-cleanup, and abrupt-Pi-exit tests on `macos-latest` CI.
+- [x] Update the doctor for macOS and its FFmpeg dependency.
+- [ ] Update the schema, example, and README support claim after live-device validation passes.
 
 ## 2. Native Windows support
 
