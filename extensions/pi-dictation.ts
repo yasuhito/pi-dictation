@@ -19,6 +19,7 @@
 // 2. OpenAI audio transcription when OPENAI_API_KEY is set
 //
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
@@ -26,6 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import cliSpinners from "cli-spinners";
+import { GrowingPcm16WavInput, LiveLevelAnalyzer } from "./live-level.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictation.json");
@@ -34,9 +36,11 @@ const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_RECORDING_MS = 10 * 60 * 1000;
 const MAX_RECORDER_STDERR_BYTES = 64 * 1024;
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
-const STATUS_KEY = "pi-dictation";
+const WIDGET_KEY = "pi-dictation";
 const DEFAULT_SPINNER = "arc";
 const FALLBACK_SPINNER = { interval: 140, frames: ["|", "/", "-", "\\"] };
+const LEVEL_REFRESH_MS = 50;
+const LEVEL_BARS = "▁▂▃▄▅▆▇█";
 
 type DictationConfigFile = {
   shortcut?: string;
@@ -53,7 +57,7 @@ type DictationConfigFile = {
   configError?: string;
 };
 
-type BadgeOptions = {
+type StripOptions = {
   autoHideMs?: number;
   blink?: boolean;
   spin?: boolean;
@@ -431,7 +435,7 @@ function resolveSpinner(name) {
   return cliSpinners?.[name] || cliSpinners?.[DEFAULT_SPINNER] || FALLBACK_SPINNER;
 }
 
-class VoiceBadge {
+class DictationStrip {
   ui: any;
   label: string;
   spinner: { interval: number; frames: string[] };
@@ -439,8 +443,15 @@ class VoiceBadge {
   blinkOn: boolean;
   animationMode: "none" | "spin" | "blink";
   timer: ReturnType<typeof setInterval> | null;
+  tui: any;
+  theme: any;
+  startedAt: number;
+  levels: number[];
+  levelTimer: ReturnType<typeof setInterval> | null;
+  levelGeneration: number;
+  levelReadInFlight: boolean;
 
-  constructor(ui: any, label: string, options: BadgeOptions = {}) {
+  constructor(ui: any, label: string, options: StripOptions = {}) {
     this.ui = ui;
     this.label = label;
     this.spinner = resolveSpinner(options.spinner);
@@ -448,17 +459,33 @@ class VoiceBadge {
     this.blinkOn = true;
     this.animationMode = "none";
     this.timer = null;
+    this.startedAt = Date.now();
+    this.levels = [];
+    this.levelTimer = null;
+    this.levelGeneration = 0;
+    this.levelReadInFlight = false;
+    this.ui.setWidget(
+      WIDGET_KEY,
+      (tui, theme) => {
+        this.tui = tui;
+        this.theme = theme;
+        return this;
+      },
+      { placement: "belowEditor" }
+    );
     this.setLabel(label, options);
   }
 
-  setLabel(label: string, options: BadgeOptions = {}) {
+  setLabel(label: string, options: StripOptions = {}) {
     this.label = label;
     if (options.spinner) this.spinner = resolveSpinner(options.spinner);
     this.animationMode = options.spin ? "spin" : options.blink ? "blink" : "none";
+    if (this.animationMode !== "blink") this.stopLiveLevels();
     this.frameIndex = 0;
     this.blinkOn = true;
+    if (this.animationMode === "blink") this.startedAt = Date.now();
     this.restartAnimationTimer();
-    this.render();
+    this.requestRender();
   }
 
   restartAnimationTimer() {
@@ -473,25 +500,100 @@ class VoiceBadge {
       } else {
         this.blinkOn = !this.blinkOn;
       }
-      this.render();
+      this.requestRender();
     }, interval || FALLBACK_SPINNER.interval);
     this.timer.unref?.();
   }
 
-  render() {
-    const indicator =
-      this.animationMode === "spin"
-        ? `${this.spinner.frames[this.frameIndex] ?? ""} `
-        : this.animationMode === "blink" && this.blinkOn
-          ? "● "
-          : "";
-    this.ui.setStatus(STATUS_KEY, `${indicator}${this.label}`);
+  requestRender() {
+    this.tui?.requestRender();
+  }
+
+  startLiveLevels(file: string) {
+    this.stopLiveLevels();
+    this.levels = [];
+    const input = new GrowingPcm16WavInput(file);
+    const analyzer = new LiveLevelAnalyzer();
+    const generation = this.levelGeneration;
+    const poll = async () => {
+      if (this.levelReadInFlight || generation !== this.levelGeneration) return;
+      this.levelReadInFlight = true;
+      try {
+        let samples: Int16Array;
+        try {
+          samples = await input.readNewestInterval(LEVEL_REFRESH_MS);
+        } catch {
+          samples = new Int16Array();
+        }
+        if (generation !== this.levelGeneration || this.animationMode !== "blink") return;
+        this.levels.push(analyzer.update(samples, input.sampleRate));
+        if (this.levels.length > 500) this.levels.splice(0, this.levels.length - 500);
+        this.requestRender();
+      } finally {
+        this.levelReadInFlight = false;
+      }
+    };
+    void poll();
+    this.levelTimer = setInterval(() => void poll(), LEVEL_REFRESH_MS);
+    this.levelTimer.unref?.();
+  }
+
+  stopLiveLevels() {
+    this.levelGeneration++;
+    if (this.levelTimer) clearInterval(this.levelTimer);
+    this.levelTimer = null;
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(0, width);
+    if (this.animationMode === "blink") {
+      const elapsedSeconds = Math.floor((Date.now() - this.startedAt) / 1000);
+      const elapsed = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+      const marker = this.blinkOn ? this.theme?.bold(this.theme?.fg("error", "●") ?? "●") ?? "●" : " ";
+      const left = `${marker} REC  `;
+      const leftWidth = "● REC  ".length;
+      const right = `  ${elapsed}`;
+      if (safeWidth < leftWidth + right.length) {
+        return [truncateToWidth(`${this.blinkOn ? "●" : " "} REC ${elapsed}`, safeWidth, "")];
+      }
+      const waveWidth = safeWidth - leftWidth - right.length;
+      const selected = waveWidth > 0 ? this.levels.slice(-waveWidth) : [];
+      const levels = Array(Math.max(0, waveWidth - selected.length)).fill(0).concat(selected);
+      const wave = levels.map((level, index) => {
+        const ratio = (index + 1) / waveWidth;
+        const color = ratio <= 0.2 ? "dim" : ratio <= 0.65 ? "muted" : "accent";
+        const bar = LEVEL_BARS[level] ?? LEVEL_BARS[0];
+        return this.theme?.fg(color, bar) ?? bar;
+      }).join("");
+      return [`${left}${wave}${right}`];
+    }
+
+    let indicator = this.animationMode === "spin" ? (this.spinner.frames[this.frameIndex] ?? "") : "";
+    let color = "warning";
+    if (this.label === "Dictation ready") {
+      indicator = "✓";
+      color = "success";
+    } else if (this.label === "Dictation cancelled") {
+      indicator = "–";
+      color = "dim";
+    } else if (this.label === "Dictation failed") {
+      indicator = "×";
+      color = "error";
+    }
+    const plain = `${indicator}${indicator ? " " : ""}${this.label}`;
+    const styled = this.theme?.fg(color, plain) ?? plain;
+    return [truncateToWidth(styled, safeWidth, "")];
+  }
+
+  remove() {
+    this.dispose();
+    this.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
   }
 
   dispose() {
+    this.stopLiveLevels();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.ui.setStatus(STATUS_KEY, undefined);
   }
 }
 
@@ -501,35 +603,36 @@ export default function (pi: ExtensionAPI) {
   let shuttingDown = false;
   let cancelStartupRequested = false;
   const recordingProcesses = new Set<ActiveRecording>();
-  let badge = null;
-  let badgeHideTimer = null;
+  let strip = null;
+  let stripHideTimer = null;
 
-  function clearBadgeTimer() {
-    if (badgeHideTimer) {
-      clearTimeout(badgeHideTimer);
-      badgeHideTimer = null;
+  function clearStripTimer() {
+    if (stripHideTimer) {
+      clearTimeout(stripHideTimer);
+      stripHideTimer = null;
     }
   }
 
-  function clearBadge() {
-    clearBadgeTimer();
-    badge?.dispose();
-    badge = null;
+  function clearStrip() {
+    clearStripTimer();
+    const currentStrip = strip;
+    strip = null;
+    currentStrip?.remove();
   }
 
-  function showBadge(ctx: any, label: string, options: BadgeOptions = {}) {
-    clearBadgeTimer();
-    if (badge) badge.setLabel(label, options);
-    else badge = new VoiceBadge(ctx.ui, label, options);
+  function showStrip(ctx: any, label: string, options: StripOptions = {}) {
+    clearStripTimer();
+    if (strip) strip.setLabel(label, options);
+    else strip = new DictationStrip(ctx.ui, label, options);
 
     if (options.autoHideMs) {
-      badgeHideTimer = setTimeout(() => clearBadge(), options.autoHideMs);
-      badgeHideTimer.unref?.();
+      stripHideTimer = setTimeout(() => clearStrip(), options.autoHideMs);
+      stripHideTimer.unref?.();
     }
   }
 
   function showDone(ctx) {
-    showBadge(ctx, "✓ Done", { autoHideMs: 1200 });
+    showStrip(ctx, "Dictation ready", { autoHideMs: 1200 });
   }
 
   async function startRecording(ctx) {
@@ -542,6 +645,7 @@ export default function (pi: ExtensionAPI) {
     let ownershipTransferred = false;
     try {
       if (config.configError) {
+        showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
         ctx.ui.notify(config.configError, "error");
         return;
       }
@@ -610,7 +714,7 @@ export default function (pi: ExtensionAPI) {
         const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
         recording = null;
         recordingPhase = "idle";
-        showBadge(ctx, "Stopped", { autoHideMs: 1800 });
+        showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
         ctx.ui.notify(
           `Voice recording stopped unexpectedly (${error?.message || signal || code}).${stderr ? ` ${stderr}` : ""}`,
           "error"
@@ -620,10 +724,11 @@ export default function (pi: ExtensionAPI) {
       proc.once("error", (error) => handleRecorderTermination(null, null, error));
       proc.once("exit", (code, signal) => handleRecorderTermination(code, signal, null));
 
-      showBadge(ctx, "Recording", { blink: true });
+      showStrip(ctx, "Recording", { blink: true });
+      strip.startLiveLevels(file);
     } catch (error) {
       if (!shuttingDown && !cancelStartupRequested) {
-        showBadge(ctx, "Failed", { autoHideMs: 2000 });
+        showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
         ctx.ui.notify(`Dictation failed: ${error.message}`, "error");
       }
     } finally {
@@ -640,10 +745,10 @@ export default function (pi: ExtensionAPI) {
     if (!active) {
       if (recordingPhase === "starting") {
         cancelStartupRequested = true;
-        if (!shuttingDown) showBadge(ctx, "Cancelled", { autoHideMs: 1000 });
+        if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
         return;
       }
-      if (!shuttingDown) showBadge(ctx, "Idle", { autoHideMs: 1000 });
+      if (!shuttingDown) showStrip(ctx, "Idle", { autoHideMs: 1000 });
       return;
     }
     if (cancel) active.cancelRequested = true;
@@ -656,14 +761,14 @@ export default function (pi: ExtensionAPI) {
     active.stopping = true;
     recordingPhase = "stopping";
     clearTimeout(active.maxTimer);
-    if (!shuttingDown) showBadge(ctx, "Processing", { spin: true, spinner: config.spinner });
+    if (!shuttingDown) showStrip(ctx, "Processing recording…", { spin: true, spinner: config.spinner });
 
     active.stopPromise = (async () => {
       try {
         await stopProcessGroup(active.proc, 3000);
 
         if (active.cancelRequested || shuttingDown) {
-          if (!shuttingDown) showBadge(ctx, "Cancelled", { autoHideMs: 1000 });
+          if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
           return;
         }
 
@@ -676,16 +781,16 @@ export default function (pi: ExtensionAPI) {
           throw new Error(`Recording file is empty or too small.${stderr ? ` ${stderr}` : ""}`);
         }
 
-        showBadge(ctx, "Transcribing", { spin: true, spinner: config.spinner });
+        showStrip(ctx, "Transcribing…", { spin: true, spinner: config.spinner });
         const text = await transcribe(config, active.file, ctx.cwd, active.abortController.signal);
         if (shuttingDown || active.cancelRequested) return;
         ctx.ui.pasteToEditor(text);
         showDone(ctx);
       } catch (error) {
         if (!shuttingDown && active.cancelRequested) {
-          showBadge(ctx, "Cancelled", { autoHideMs: 1000 });
+          showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
         } else if (!shuttingDown) {
-          showBadge(ctx, "Failed", { autoHideMs: 2000 });
+          showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
           ctx.ui.notify(`Dictation failed: ${error.message}`, "error");
         }
       } finally {
@@ -752,8 +857,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    clearBadge();
     shuttingDown = true;
+    clearStrip();
     recordingPhase = "stopping";
     const activeRecordings = [...recordingProcesses];
     for (const active of activeRecordings) active.abortController.abort();

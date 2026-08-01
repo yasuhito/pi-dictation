@@ -36,6 +36,8 @@ Restart Pi or run `/reload` after installation.
 
 Press `Insert` to begin recording. Press it again to stop and transcribe.
 
+While recording, a one-line Dictation strip appears below the editor with a blinking recording marker, recent live microphone levels, and elapsed time. The same strip shows processing, transcription, completion, cancellation, and failure states, then hides automatically. Live levels are available for PCM16 mono WAV recorder output, including custom recorder commands that produce that format. Incomplete or unsupported output uses a flat silent line rather than simulated activity.
+
 Commands:
 
 - `/dictate` — start or stop dictation
