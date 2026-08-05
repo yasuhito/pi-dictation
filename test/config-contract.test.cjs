@@ -47,6 +47,25 @@ test("the schema rejects unknown configuration fields", () => {
   assert.equal(validate({ futureMetadata: true }), false);
 });
 
+for (const scenario of [
+  { name: "an explicit local command", recorder: { type: "local", command: "capture {file}" }, valid: true },
+  { name: "a Bridge Unix endpoint", recorder: { type: "bridge", endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" }, credentialFile: "/home/user/.config/pi-dictation/credential" }, valid: true },
+  { name: "a Bridge loopback TCP endpoint", recorder: { type: "bridge", endpoint: { type: "tcp", host: "::1", port: 43120 }, credentialFile: "/home/user/.config/pi-dictation/credential" }, valid: true },
+  { name: "the removed top-level recordCommand", value: { recordCommand: "capture" }, valid: false },
+  { name: "mode-incompatible local fields", recorder: { type: "local", credentialFile: "/secret" }, valid: false },
+  { name: "a relative Bridge socket path", recorder: { type: "bridge", endpoint: { type: "unix", path: "relative.sock" }, credentialFile: "/secret" }, valid: false },
+  { name: "a non-loopback Bridge host", recorder: { type: "bridge", endpoint: { type: "tcp", host: "0.0.0.0", port: 43120 }, credentialFile: "/secret" }, valid: false },
+  { name: "an invalid Bridge port", recorder: { type: "bridge", endpoint: { type: "tcp", host: "127.0.0.1", port: 0 }, credentialFile: "/secret" }, valid: false },
+]) {
+  test(`the schema ${scenario.valid ? "accepts" : "rejects"} ${scenario.name}`, () => {
+    const schema = readJson("pi-dictation.schema.json");
+    const ajv = new Ajv2020({ strict: true });
+    addFormats(ajv);
+    const validate = ajv.compile(schema);
+    assert.equal(validate(scenario.value || { recorder: scenario.recorder }), scenario.valid);
+  });
+}
+
 test("the transcription timeout schema declares the runtime bounds", () => {
   const { timeoutMs } = readJson("pi-dictation.schema.json").properties;
   assert.deepEqual({ minimum: timeoutMs.minimum, maximum: timeoutMs.maximum }, { minimum: 1000, maximum: 3600000 });

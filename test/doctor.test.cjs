@@ -42,8 +42,8 @@ test("package exposes the doctor executable", async (t) => {
 
 test("doctor reports a ready custom setup without exposing commands or API keys", async (t) => {
   const result = runDoctor({
+    config: JSON.stringify({ recorder: { type: "local", command: "capture --token recorder-secret {file}" } }),
     env: {
-      PI_DICTATION_RECORD_CMD: "capture --token recorder-secret {file}",
       PI_DICTATION_TRANSCRIBE_CMD: "transcribe --token transcript-secret {file}",
       PI_DICTATION_OPENAI_API_KEY: "openai-secret",
     },
@@ -61,8 +61,8 @@ test("doctor reports a ready custom setup without exposing commands or API keys"
         process.platform === "darwin" ? /Platform: ok \(macOS\)/ : /Platform: ok \(linux\)/
       ),
     ],
-    ["reports the optional config as absent", () => assert.match(result.stdout, /Config: ok \(not found; defaults and environment used\)/)],
-    ["reports a custom recorder", () => assert.match(result.stdout, /Recorder: ok \(custom command configured\)/)],
+    ["reports the private config", () => assert.match(result.stdout, /Config: ok \(~\/.pi\/agent\/pi-dictation.json\)/)],
+    ["reports a custom recorder", () => assert.match(result.stdout, /Recorder: ok \(custom local command configured\)/)],
     ["reports the requested backend", () => assert.match(result.stdout, /Backend requested: custom command/)],
     ["reports the effective backend", () => assert.match(result.stdout, /Backend effective: ok \(custom command configured\)/)],
     ["reports the credential source", () => assert.match(result.stdout, /OpenAI credential: present \(PI_DICTATION_OPENAI_API_KEY\)/)],
@@ -129,8 +129,8 @@ test("doctor recognizes an OpenAI key command without executing it", async (t) =
   const marker = join(dir, "executed");
   try {
     const result = runDoctor({
+      config: JSON.stringify({ recorder: { type: "local", command: "capture {file}" } }),
       env: {
-        PI_DICTATION_RECORD_CMD: "capture {file}",
         PI_DICTATION_OPENAI_API_KEY_COMMAND: `touch ${marker}`,
       },
     });
@@ -169,8 +169,8 @@ test("doctor fails with actionable guidance when recording and transcription are
       () => assert.match(
         result.stdout,
         process.platform === "darwin"
-          ? /install ffmpeg or configure PI_DICTATION_RECORD_CMD/
-          : /install pw-record\/arecord or configure PI_DICTATION_RECORD_CMD/
+          ? /install ffmpeg or configure recorder\.command/
+          : /install pw-record\/arecord or configure recorder\.command/
       ),
     ],
     ["suggests transcription setup", () => assert.match(result.stdout, /configure a local transcription command or an OpenAI credential/)],

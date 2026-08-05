@@ -20,10 +20,91 @@
       "default": "",
       "description": "Language passed to the OpenAI-compatible transcription backend."
     },
-    "recordCommand": {
-      "type": "string",
-      "default": "",
-      "description": "Custom recorder command. By default, Linux auto-detects pw-record or arecord and macOS uses FFmpeg AVFoundation. The optional {file} placeholder is replaced with the WAV path."
+    "recorder": {
+      "description": "Recorder selection. Omit to auto-detect a local recorder.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "local"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Explicit local recorder command. {file} is replaced with a private staging WAV path."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "endpoint",
+            "credentialFile"
+          ],
+          "properties": {
+            "type": {
+              "const": "bridge"
+            },
+            "endpoint": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "path"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "unix"
+                    },
+                    "path": {
+                      "type": "string",
+                      "pattern": "^/"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "host",
+                    "port"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "tcp"
+                    },
+                    "host": {
+                      "enum": [
+                        "127.0.0.1",
+                        "::1"
+                      ]
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    }
+                  }
+                }
+              ]
+            },
+            "credentialFile": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        }
+      ]
     },
     "transcribeCommand": {
       "type": "string",

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 export const MIN_DURATION_MS = 1000;
@@ -11,11 +11,21 @@ export const DEFAULT_TIMEOUT_MS = 120000;
 export const DEFAULT_MAX_RECORDING_MS = 10 * 60 * 1000;
 export const DEFAULT_SPINNER = "arc";
 
+export type RecorderConfig =
+  | { type: "local"; command?: string }
+  | {
+      type: "bridge";
+      endpoint:
+        | { type: "unix"; path: string }
+        | { type: "tcp"; host: "127.0.0.1" | "::1"; port: number };
+      credentialFile: string;
+    };
+
 export type DictationConfigFile = {
   $schema?: string;
   shortcut?: string;
   language?: string;
-  recordCommand?: string;
+  recorder?: RecorderConfig;
   transcribeCommand?: string;
   openaiModel?: string;
   openaiBaseUrl?: string;
@@ -29,7 +39,7 @@ export type DictationConfigFile = {
 export type EffectiveDictationConfig = {
   shortcut: string;
   language: string;
-  recordCommand: string;
+  recorder: RecorderConfig;
   transcribeCommand: string;
   openaiModel: string;
   openaiBaseUrl: string;
@@ -61,7 +71,6 @@ export function validateConfigFile(value: unknown): DictationConfigFile {
     "$schema",
     "shortcut",
     "language",
-    "recordCommand",
     "transcribeCommand",
     "openaiModel",
     "openaiBaseUrl",
@@ -69,7 +78,7 @@ export function validateConfigFile(value: unknown): DictationConfigFile {
     "openaiApiKeyCommand",
     "spinner",
   ];
-  const knownFields = new Set([...stringFields, "timeoutMs", "maxRecordingMs"]);
+  const knownFields = new Set([...stringFields, "recorder", "timeoutMs", "maxRecordingMs"]);
   if (Object.keys(config).some((field) => !knownFields.has(field))) {
     throw new Error("Unknown configuration field");
   }
@@ -86,7 +95,57 @@ export function validateConfigFile(value: unknown): DictationConfigFile {
       throw new Error(`${field} must be between ${MIN_DURATION_MS} and ${MAX_DURATION_MS}`);
     }
   }
+  if (config.recorder !== undefined) validateRecorderConfig(config.recorder);
   return config as DictationConfigFile;
+}
+
+function validateExactFields(value: Record<string, unknown>, fields: string[]): void {
+  if (Object.keys(value).some((field) => !fields.includes(field))) {
+    throw new Error("Unknown Recorder configuration field");
+  }
+}
+
+export function validateRecorderConfig(value: unknown): RecorderConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("recorder must be an object");
+  }
+  const recorder = value as Record<string, unknown>;
+  if (recorder.type === "local") {
+    validateExactFields(recorder, ["type", "command"]);
+    if (
+      recorder.command !== undefined &&
+      (typeof recorder.command !== "string" || recorder.command.length === 0)
+    ) {
+      throw new Error("recorder.command must be a non-empty string");
+    }
+    return recorder as RecorderConfig;
+  }
+  if (recorder.type !== "bridge") throw new Error("recorder.type must be local or bridge");
+  validateExactFields(recorder, ["type", "endpoint", "credentialFile"]);
+  if (typeof recorder.credentialFile !== "string" || !isAbsolute(recorder.credentialFile)) {
+    throw new Error("Bridge credentialFile must be an absolute path");
+  }
+  if (!recorder.endpoint || typeof recorder.endpoint !== "object" || Array.isArray(recorder.endpoint)) {
+    throw new Error("Bridge endpoint must be an object");
+  }
+  const endpoint = recorder.endpoint as Record<string, unknown>;
+  if (endpoint.type === "unix") {
+    validateExactFields(endpoint, ["type", "path"]);
+    if (typeof endpoint.path !== "string" || !isAbsolute(endpoint.path)) {
+      throw new Error("Bridge Unix endpoint path must be absolute");
+    }
+  } else if (endpoint.type === "tcp") {
+    validateExactFields(endpoint, ["type", "host", "port"]);
+    if (endpoint.host !== "127.0.0.1" && endpoint.host !== "::1") {
+      throw new Error("Bridge TCP endpoint host must be loopback");
+    }
+    if (!Number.isInteger(endpoint.port) || Number(endpoint.port) < 1 || Number(endpoint.port) > 65535) {
+      throw new Error("Bridge TCP endpoint port must be from 1 to 65535");
+    }
+  } else {
+    throw new Error("Bridge endpoint type must be unix or tcp");
+  }
+  return recorder as RecorderConfig;
 }
 
 export function readConfigFile(path = getConfigPath()): DictationConfigFile {
@@ -115,7 +174,7 @@ export function loadConfig(
   return {
     shortcut: env.PI_DICTATION_SHORTCUT || fromFile.shortcut || DEFAULT_SHORTCUT,
     language: env.PI_DICTATION_LANGUAGE || fromFile.language || "",
-    recordCommand: env.PI_DICTATION_RECORD_CMD || fromFile.recordCommand || "",
+    recorder: fromFile.recorder || { type: "local" },
     transcribeCommand: env.PI_DICTATION_TRANSCRIBE_CMD || fromFile.transcribeCommand || "",
     openaiModel: env.PI_DICTATION_OPENAI_MODEL || fromFile.openaiModel || "gpt-4o-mini-transcribe",
     openaiBaseUrl:

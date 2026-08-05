@@ -8,7 +8,7 @@
 //   "shortcut": "insert",
 //   "language": "ja",
 //   "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -",
-//   "recordCommand": "pw-record --format s16 --rate 16000 --channels 1 {file}",
+//   "recorder": { "type": "local", "command": "pw-record --format s16 --rate 16000 --channels 1 {file}" },
 //   "maxRecordingMs": 600000,
 //   "openaiModel": "gpt-4o-mini-transcribe"
 // }
@@ -20,17 +20,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cliSpinners from "cli-spinners";
 import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
 import { showDictationConfig } from "./config-ui.js";
-import { GrowingPcm16WavInput, LiveLevelAnalyzer } from "./live-level.js";
-import { defaultRecordCommand } from "./recorder.js";
+import { levelForDb } from "./live-level.js";
+import { createRecorder, type LevelObservation, type Recording } from "./recorder.js";
 import { shellQuote } from "./shell.js";
 const CONFIG_PATH = getConfigPath();
-const MAX_RECORDER_STDERR_BYTES = 64 * 1024;
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
 const WIDGET_KEY = "pi-dictation";
 const FALLBACK_SPINNER = { interval: 140, frames: ["|", "/", "-", "\\"] };
@@ -46,12 +45,9 @@ type StripOptions = {
 
 type ActiveRecording = {
   config: ReturnType<typeof loadConfig>;
-  proc: ChildProcess;
+  handle: Recording;
   file: string;
   dir: string;
-  stderrChunks: Buffer[];
-  stopping: boolean;
-  maxTimer?: ReturnType<typeof setTimeout>;
   stopPromise: Promise<void> | null;
   cancelRequested: boolean;
   abortController: AbortController;
@@ -331,9 +327,8 @@ class DictationStrip {
   theme: any;
   startedAt: number;
   levels: number[];
+  levelObservations: Map<number, LevelObservation>;
   levelTimer: ReturnType<typeof setInterval> | null;
-  levelGeneration: number;
-  levelReadInFlight: boolean;
 
   constructor(ui: any, label: string, options: StripOptions = {}) {
     this.ui = ui;
@@ -345,9 +340,8 @@ class DictationStrip {
     this.timer = null;
     this.startedAt = Date.now();
     this.levels = [];
+    this.levelObservations = new Map();
     this.levelTimer = null;
-    this.levelGeneration = 0;
-    this.levelReadInFlight = false;
     this.ui.setWidget(
       WIDGET_KEY,
       (tui, theme) => {
@@ -364,7 +358,8 @@ class DictationStrip {
     this.label = label;
     if (options.spinner) this.spinner = resolveSpinner(options.spinner);
     this.animationMode = options.spin ? "spin" : options.blink ? "blink" : "none";
-    if (this.animationMode !== "blink") this.stopLiveLevels();
+    if (this.animationMode === "blink") this.startLiveLevels();
+    else this.stopLiveLevels();
     this.frameIndex = 0;
     this.blinkOn = true;
     if (this.animationMode === "blink") this.startedAt = Date.now();
@@ -393,37 +388,66 @@ class DictationStrip {
     this.tui?.requestRender();
   }
 
-  startLiveLevels(file: string) {
+  startLiveLevels() {
     this.stopLiveLevels();
     this.levels = [];
-    const input = new GrowingPcm16WavInput(file);
-    const analyzer = new LiveLevelAnalyzer();
-    const generation = this.levelGeneration;
-    const poll = async () => {
-      if (this.levelReadInFlight || generation !== this.levelGeneration) return;
-      this.levelReadInFlight = true;
-      try {
-        let samples: Int16Array;
-        try {
-          samples = await input.readNewestInterval(LEVEL_REFRESH_MS);
-        } catch {
-          samples = new Int16Array();
-        }
-        if (generation !== this.levelGeneration || this.animationMode !== "blink") return;
-        this.levels.push(analyzer.update(samples, input.sampleRate));
-        if (this.levels.length > 500) this.levels.splice(0, this.levels.length - 500);
-        this.requestRender();
-      } finally {
-        this.levelReadInFlight = false;
-      }
-    };
-    void poll();
-    this.levelTimer = setInterval(() => void poll(), LEVEL_REFRESH_MS);
+    this.levelObservations.clear();
+    this.levelTimer = setInterval(() => {
+      this.rebuildLevels();
+      this.requestRender();
+    }, LEVEL_REFRESH_MS);
     this.levelTimer.unref?.();
   }
 
+  observeLevel(observation: LevelObservation) {
+    if (this.animationMode !== "blink") return;
+    if (
+      !Number.isInteger(observation.sequence) ||
+      observation.sequence < 0 ||
+      !Number.isFinite(observation.capturedAtMs) ||
+      observation.capturedAtMs !== observation.sequence * LEVEL_REFRESH_MS ||
+      (observation.dbfs !== "silence" && !Number.isFinite(observation.dbfs))
+    ) return;
+    const slot = observation.capturedAtMs / LEVEL_REFRESH_MS;
+    const existing = this.levelObservations.get(slot);
+    if (existing) {
+      if (existing.capturedAtMs === observation.capturedAtMs && existing.dbfs === observation.dbfs) return;
+      return;
+    }
+    this.levelObservations.set(slot, observation);
+    this.rebuildLevels();
+    this.requestRender();
+  }
+
+  rebuildLevels() {
+    const latestSlot = Math.max(0, Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS));
+    const firstSlot = Math.max(0, latestSlot - 499);
+    for (const sequence of this.levelObservations.keys()) {
+      if (sequence < firstSlot) this.levelObservations.delete(sequence);
+    }
+    const levels: number[] = [];
+    let smoothedRms = 0;
+    for (let sequence = firstSlot; sequence <= latestSlot; sequence++) {
+      const observation = this.levelObservations.get(sequence);
+      if (!observation) {
+        smoothedRms = 0;
+        levels.push(0);
+        continue;
+      }
+      if (observation.dbfs === "silence") {
+        smoothedRms = 0;
+        levels.push(0);
+        continue;
+      }
+      const rawRms = 10 ** (observation.dbfs / 20);
+      const coefficient = rawRms > smoothedRms ? 0.82 : 0.45;
+      smoothedRms += (rawRms - smoothedRms) * coefficient;
+      levels.push(levelForDb(20 * Math.log10(smoothedRms)));
+    }
+    this.levels = levels;
+  }
+
   stopLiveLevels() {
-    this.levelGeneration++;
     if (this.levelTimer) clearInterval(this.levelTimer);
     this.levelTimer = null;
   }
@@ -486,7 +510,8 @@ export default function (pi: ExtensionAPI) {
   let recordingPhase: "idle" | "starting" | "recording" | "stopping" = "idle";
   let shuttingDown = false;
   let cancelStartupRequested = false;
-  const recordingProcesses = new Set<ActiveRecording>();
+  let startupAbortController: AbortController | null = null;
+  const activeRecordings = new Set<ActiveRecording>();
   let strip = null;
   let stripHideTimer = null;
 
@@ -527,6 +552,8 @@ export default function (pi: ExtensionAPI) {
     const config = loadConfig();
     let dir = "";
     let ownershipTransferred = false;
+    const startupController = new AbortController();
+    startupAbortController = startupController;
     try {
       if (config.configError) {
         showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
@@ -536,91 +563,68 @@ export default function (pi: ExtensionAPI) {
 
       dir = await mkdtemp(join(tmpdir(), "pi-dictation-"));
       await chmod(dir, 0o700);
-      if (shuttingDown || cancelStartupRequested) return;
+      if (shuttingDown || cancelStartupRequested) {
+        startupController.abort();
+        return;
+      }
       const file = join(dir, "recording.wav");
-      const command = config.recordCommand
-        ? expandFileTemplate(config.recordCommand, file)
-        : await defaultRecordCommand(file);
-      if (shuttingDown || cancelStartupRequested) return;
-      const maxRecordingSeconds = Math.ceil(config.maxRecordingMs / 1000);
-      const watchdog = `trap '' INT TERM HUP; sleep ${maxRecordingSeconds}; kill -INT -\"$pgid\" 2>/dev/null; sleep 5; kill -KILL -\"$pgid\" 2>/dev/null`;
-      const boundedCommand = `pgid=$$; (${watchdog}) & exec /bin/sh -lc ${shellQuote(`exec ${command}`)}`;
-
-      const proc = spawn("/bin/sh", ["-lc", boundedCommand], {
+      let active: ActiveRecording | undefined;
+      let earlyFailure: Error | undefined;
+      const handleFailure = (error: Error) => {
+        if (!active) {
+          earlyFailure = error;
+          return;
+        }
+        if (active.stopPromise || recording !== active) return;
+        recording = null;
+        recordingPhase = "idle";
+        activeRecordings.delete(active);
+        showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
+        ctx.ui.notify(`Dictation failed: ${error.message}`, "error");
+        void rm(dir, { recursive: true, force: true });
+      };
+      const recorder = createRecorder(config.recorder, {
         cwd: ctx.cwd,
-        stdio: ["ignore", "ignore", "pipe"],
-        detached: process.platform !== "win32",
+        onFailure: handleFailure,
       });
-
-      const stderrChunks = [];
-      let stderrBytes = 0;
-      proc.stderr?.on("data", (chunk) => {
-        if (stderrBytes >= MAX_RECORDER_STDERR_BYTES) return;
-        const value = Buffer.from(chunk);
-        const retained = value.subarray(0, MAX_RECORDER_STDERR_BYTES - stderrBytes);
-        stderrChunks.push(retained);
-        stderrBytes += retained.length;
+      const handle = await recorder.start({
+        destination: file,
+        maxDurationMs: config.maxRecordingMs,
+        signal: startupController.signal,
+        onLevel(observation) {
+          strip?.observeLevel(observation);
+        },
       });
-
-      const active: ActiveRecording = {
+      if (shuttingDown || cancelStartupRequested) {
+        await handle.cancel();
+        return;
+      }
+      active = {
         config,
-        proc,
+        handle,
         file,
         dir,
-        stderrChunks,
-        stopping: false,
         stopPromise: null,
         cancelRequested: false,
         abortController: new AbortController(),
       };
       recording = active;
       recordingPhase = "recording";
-      recordingProcesses.add(active);
+      activeRecordings.add(active);
       ownershipTransferred = true;
-
-      active.maxTimer = setTimeout(() => {
-        if (active.stopping) return;
-        void stopProcessGroup(proc).catch(() => {});
-      }, config.maxRecordingMs);
-      active.maxTimer.unref?.();
-
-      let terminationHandled = false;
-      const handleRecorderTermination = (code, signal, error) => {
-        if (terminationHandled) return;
-        terminationHandled = true;
-        clearTimeout(active.maxTimer);
-        if (active.stopping) return;
-        if (processGroupExists(proc)) signalProcessGroup(proc, "SIGKILL");
-        recordingProcesses.delete(active);
-        if (!recording || recording.proc !== proc) {
-          void rm(dir, { recursive: true, force: true });
-          return;
-        }
-        const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
-        recording = null;
-        recordingPhase = "idle";
-        showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
-        ctx.ui.notify(
-          `Voice recording stopped unexpectedly (${error?.message || signal || code}).${stderr ? ` ${stderr}` : ""}`,
-          "error"
-        );
-        void rm(dir, { recursive: true, force: true });
-      };
-      proc.once("error", (error) => handleRecorderTermination(null, null, error));
-      proc.once("exit", (code, signal) => handleRecorderTermination(code, signal, null));
-
       showStrip(ctx, "Recording", { blink: true });
-      strip.startLiveLevels(file);
+      if (earlyFailure) handleFailure(earlyFailure);
     } catch (error) {
       if (!shuttingDown && !cancelStartupRequested) {
         showStrip(ctx, "Dictation failed", { autoHideMs: 2000 });
         ctx.ui.notify(`Dictation failed: ${error.message}`, "error");
       }
     } finally {
+      if (startupAbortController === startupController) startupAbortController = null;
       if (!ownershipTransferred) {
         cancelStartupRequested = false;
         if (!shuttingDown) recordingPhase = "idle";
-        if (dir) void rm(dir, { recursive: true, force: true });
+        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
     }
   }
@@ -630,6 +634,7 @@ export default function (pi: ExtensionAPI) {
     if (!active) {
       if (recordingPhase === "starting") {
         cancelStartupRequested = true;
+        startupAbortController?.abort();
         if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
         return;
       }
@@ -638,32 +643,25 @@ export default function (pi: ExtensionAPI) {
     }
     if (cancel) active.cancelRequested = true;
     if (active.stopPromise) {
-      if (cancel) active.abortController.abort();
+      if (cancel) {
+        active.abortController.abort();
+        await active.handle.cancel();
+      }
       return active.stopPromise;
     }
 
     const config = active.config;
-    active.stopping = true;
     recordingPhase = "stopping";
-    clearTimeout(active.maxTimer);
     if (!shuttingDown) showStrip(ctx, "Processing recording…", { spin: true, spinner: config.spinner });
 
     active.stopPromise = (async () => {
       try {
-        await stopProcessGroup(active.proc, 3000);
+        if (active.cancelRequested || shuttingDown) await active.handle.cancel();
+        else await active.handle.stop();
 
         if (active.cancelRequested || shuttingDown) {
           if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
           return;
-        }
-
-        let size = 0;
-        try {
-          size = (await stat(active.file)).size;
-        } catch {}
-        if (size < 1024) {
-          const stderr = Buffer.concat(active.stderrChunks).toString("utf8").trim();
-          throw new Error(`Recording file is empty or too small.${stderr ? ` ${stderr}` : ""}`);
         }
 
         showStrip(ctx, "Transcribing…", { spin: true, spinner: config.spinner });
@@ -681,7 +679,7 @@ export default function (pi: ExtensionAPI) {
       } finally {
         if (recording === active) recording = null;
         if (!shuttingDown) recordingPhase = "idle";
-        recordingProcesses.delete(active);
+        activeRecordings.delete(active);
         await rm(active.dir, { recursive: true, force: true }).catch(() => {});
       }
     })();
@@ -740,7 +738,7 @@ export default function (pi: ExtensionAPI) {
           ? `OpenAI ${config.openaiModel}`
           : "not configured";
       ctx.ui.notify(
-        `Pi Dictation: shortcut=${config.shortcut}, recorder=${config.recordCommand ? "custom" : "auto"}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
+        `Pi Dictation: shortcut=${config.shortcut}, recorder=${config.recorder.type}${config.recorder.type === "local" && config.recorder.command ? " (custom)" : ""}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
         backend === "not configured" ? "warning" : "info"
       );
     },
@@ -748,17 +746,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    startupAbortController?.abort();
     clearStrip();
     recordingPhase = "stopping";
-    const activeRecordings = [...recordingProcesses];
-    for (const active of activeRecordings) active.abortController.abort();
+    const shutdownRecordings = [...activeRecordings];
+    for (const active of shutdownRecordings) active.abortController.abort();
     await Promise.all(
-      activeRecordings.map(async (active) => {
+      shutdownRecordings.map(async (active) => {
         if (active.stopPromise) return active.stopPromise;
-        active.stopping = true;
-        clearTimeout(active.maxTimer);
-        await stopProcessGroup(active.proc, 1000).catch(() => {});
-        recordingProcesses.delete(active);
+        await active.handle.cancel().catch(() => {});
+        activeRecordings.delete(active);
         await rm(active.dir, { recursive: true, force: true }).catch(() => {});
       })
     );

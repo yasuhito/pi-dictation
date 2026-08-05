@@ -50,9 +50,9 @@ async function statusLines(
   env: NodeJS.ProcessEnv,
   detectRecorder: typeof detectDefaultRecorder
 ): Promise<{ recorder: string; backend: string }> {
-  const recorderSource = configuredSource(env, "PI_DICTATION_RECORD_CMD", persisted.recordCommand);
   let recorder: string;
-  if (recorderSource) recorder = `custom command configured (${recorderSource}; not executed)`;
+  if (persisted.recorder?.type === "bridge") recorder = "Bridge recorder configured";
+  else if (persisted.recorder?.command) recorder = "local custom command configured (not executed)";
   else {
     try {
       recorder = `${await detectRecorder()} auto-detected`;

@@ -14,7 +14,6 @@ const STRING_FIELDS = [
   "$schema",
   "shortcut",
   "language",
-  "recordCommand",
   "transcribeCommand",
   "openaiModel",
   "openaiBaseUrl",
@@ -28,7 +27,7 @@ function validateConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("configuration root must be an object");
   }
-  const knownFields = new Set([...STRING_FIELDS, ...NUMBER_FIELDS]);
+  const knownFields = new Set([...STRING_FIELDS, "recorder", ...NUMBER_FIELDS]);
   if (Object.keys(config).some((field) => !knownFields.has(field))) {
     throw new Error("unknown configuration field");
   }
@@ -47,7 +46,54 @@ function validateConfig(config) {
       throw new Error(`${field} must be an integer from ${MIN_DURATION_MS} to ${MAX_DURATION_MS}`);
     }
   }
+  if (config.recorder !== undefined) validateRecorder(config.recorder);
   return config;
+}
+
+function exactFields(value, fields) {
+  if (Object.keys(value).some((field) => !fields.includes(field))) {
+    throw new Error("unknown Recorder configuration field");
+  }
+}
+
+function validateRecorder(recorder) {
+  if (!recorder || typeof recorder !== "object" || Array.isArray(recorder)) {
+    throw new Error("recorder must be an object");
+  }
+  if (recorder.type === "local") {
+    exactFields(recorder, ["type", "command"]);
+    if (
+      recorder.command !== undefined
+      && (typeof recorder.command !== "string" || recorder.command.length === 0)
+    ) {
+      throw new Error("recorder.command must be a non-empty string");
+    }
+    return;
+  }
+  if (recorder.type !== "bridge") throw new Error("recorder.type must be local or bridge");
+  exactFields(recorder, ["type", "endpoint", "credentialFile"]);
+  if (typeof recorder.credentialFile !== "string" || !recorder.credentialFile.startsWith("/")) {
+    throw new Error("Bridge credentialFile must be an absolute path");
+  }
+  const endpoint = recorder.endpoint;
+  if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) {
+    throw new Error("Bridge endpoint must be an object");
+  }
+  if (endpoint.type === "unix") {
+    exactFields(endpoint, ["type", "path"]);
+    if (typeof endpoint.path !== "string" || !endpoint.path.startsWith("/")) {
+      throw new Error("Bridge Unix endpoint path must be absolute");
+    }
+    return;
+  }
+  if (endpoint.type !== "tcp") throw new Error("Bridge endpoint type must be unix or tcp");
+  exactFields(endpoint, ["type", "host", "port"]);
+  if (endpoint.host !== "127.0.0.1" && endpoint.host !== "::1") {
+    throw new Error("Bridge TCP endpoint host must be loopback");
+  }
+  if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
+    throw new Error("Bridge TCP endpoint port must be from 1 to 65535");
+  }
 }
 
 function readConfig() {
@@ -136,15 +182,17 @@ if (config.error) {
   lines.push(`Config: ok (${config.status})`);
 }
 
-const recordCommand = configuredValue("PI_DICTATION_RECORD_CMD", config.value.recordCommand);
-if (recordCommand) {
-  lines.push("Recorder: ok (custom command configured)");
+const recorder = config.value.recorder || { type: "local" };
+if (recorder.type === "bridge") {
+  lines.push("Recorder: configured (Bridge recording)");
+} else if (recorder.command) {
+  lines.push("Recorder: ok (custom local command configured)");
 } else if (process.platform === "darwin") {
   if (commandExists("ffmpeg")) {
     lines.push("Recorder: ok (ffmpeg AVFoundation auto-detected)");
   } else {
     lines.push("Recorder: unavailable (ffmpeg not found)");
-    issues.push("install ffmpeg or configure PI_DICTATION_RECORD_CMD");
+    issues.push("install ffmpeg or configure recorder.command");
   }
 } else if (process.platform === "linux") {
   if (commandExists("pw-record")) {
@@ -153,7 +201,7 @@ if (recordCommand) {
     lines.push("Recorder: ok (arecord auto-detected)");
   } else {
     lines.push("Recorder: unavailable (pw-record and arecord not found)");
-    issues.push("install pw-record/arecord or configure PI_DICTATION_RECORD_CMD");
+    issues.push("install pw-record/arecord or configure recorder.command");
   }
 } else {
   lines.push(`Recorder: unavailable (no default recorder for ${process.platform})`);

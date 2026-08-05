@@ -18,7 +18,7 @@ test("atomic configuration writes preserve hidden fields and private permissions
   const config = {
     $schema: "schema",
     language: "ja",
-    recordCommand: "PRIVATE_RECORDER",
+    recorder: { type: "local", command: "PRIVATE_RECORDER" },
     transcribeCommand: "PRIVATE_TRANSCRIBER",
     openaiApiKey: "PRIVATE_API_KEY",
     openaiApiKeyCommand: "PRIVATE_KEY_COMMAND",
@@ -55,4 +55,29 @@ test("configuration validation rejects persisted durations outside the contract"
 test("configuration validation rejects fractional persisted durations", async () => {
   const { validateConfigFile } = await configModule();
   assert.throws(() => validateConfigFile({ maxRecordingMs: 1000.5 }), /must be an integer/);
+});
+
+test("an omitted Recorder defaults to local", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-default-recorder-"));
+  const { loadConfig } = await configModule();
+  assert.deepEqual(loadConfig(join(directory, "missing.json"), {}).recorder, { type: "local" });
+});
+
+test("the removed Recorder environment override is ignored", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-recorder-env-"));
+  const { loadConfig } = await configModule();
+  assert.deepEqual(loadConfig(join(directory, "missing.json"), { PI_DICTATION_RECORD_CMD: "PRIVATE" }).recorder, { type: "local" });
+});
+
+test("runtime validation rejects the removed top-level recordCommand", async () => {
+  const { validateConfigFile } = await configModule();
+  assert.throws(() => validateConfigFile({ recordCommand: "capture" }), /Unknown configuration field/);
+});
+
+test("runtime validation rejects non-loopback Bridge endpoints", async () => {
+  const { validateConfigFile } = await configModule();
+  assert.throws(
+    () => validateConfigFile({ recorder: { type: "bridge", endpoint: { type: "tcp", host: "0.0.0.0", port: 1234 }, credentialFile: "/secret" } }),
+    /must be loopback/
+  );
 });

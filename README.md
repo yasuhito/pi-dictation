@@ -142,7 +142,7 @@ You can also start from [`pi-dictation.example.json`](./pi-dictation.example.jso
 | --- | --- | --- |
 | `shortcut` | `insert` | Pi shortcut used to toggle dictation |
 | `language` | unset | Language passed to the OpenAI backend |
-| `recordCommand` | auto-detected | Recorder command; `{file}` is replaced with the WAV path |
+| `recorder` | `{ "type": "local" }` | Discriminated local or Bridge Recorder configuration; local `command` is optional and uses `{file}` as the private staging WAV path |
 | `transcribeCommand` | unset | Local transcription command |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI-compatible transcription model |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
@@ -152,11 +152,10 @@ You can also start from [`pi-dictation.example.json`](./pi-dictation.example.jso
 | `maxRecordingMs` | `600000` | Graceful-stop threshold from `1000`–`3600000` ms, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |
 | `spinner` | `arc` | `cli-spinners` animation name |
 
-Every field can also be set with an environment variable:
+Recorder configuration has no environment override. The remaining runtime settings can also be set with environment variables:
 
 - `PI_DICTATION_SHORTCUT`
 - `PI_DICTATION_LANGUAGE`
-- `PI_DICTATION_RECORD_CMD`
 - `PI_DICTATION_TRANSCRIBE_CMD`
 - `PI_DICTATION_OPENAI_MODEL`
 - `PI_DICTATION_OPENAI_BASE_URL`
@@ -178,7 +177,8 @@ Pi Dictation:
 - bounds subprocess output retained in memory;
 - aborts transcription on cancellation and session shutdown;
 - creates recordings in private (`0700`) temporary directories;
-- removes temporary recordings after normal use, cancellation, and graceful shutdown.
+- commits only validated PCM16 mono WAV output for transcription;
+- removes temporary recordings after normal use, cancellation, failure, and graceful shutdown.
 
 An uncatchable Pi crash (for example, `SIGKILL`) can leave the private recording directory behind for the operating system's temporary-file cleanup.
 

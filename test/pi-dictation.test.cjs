@@ -73,7 +73,17 @@ async function createRuntime({
   const widgetCalls = [];
   let renderRequests = 0;
 
-  process.env.PI_DICTATION_RECORD_CMD = `${process.execPath} ${recorderPath} {file} ${recorderArgs}`.trim();
+  delete process.env.PI_DICTATION_RECORD_CMD;
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
+  try {
+    const persisted = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
+    persisted.recorder = {
+      type: "local",
+      command: `${process.execPath} ${recorderPath} {file} ${recorderArgs}`.trim(),
+    };
+    writeFileSync(configPath, JSON.stringify(persisted));
+  } catch {}
   if (transcribeCommand === null) delete process.env.PI_DICTATION_TRANSCRIBE_CMD;
   else process.env.PI_DICTATION_TRANSCRIBE_CMD = transcribeCommand;
   process.env.PI_DICTATION_MAX_RECORDING_MS = String(maxRecordingMs);
@@ -121,7 +131,7 @@ async function createRuntime({
         );
       },
       setStatus() {
-        throw new Error("dictation must not use the footer status boundary");
+        throw new Error("dictation must use the above-editor Dictation strip boundary");
       },
     },
   };
@@ -294,6 +304,21 @@ test("the Dictation strip renders actual appended PCM as live level history", as
     await t.test("drops level history at the minimum width", () => {
       assert.match(minimumWidth, /^[● ] REC {4}\d\d:\d\d$/);
     });
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("missing Level observations return the Dictation strip to the Silent line", async () => {
+  const paths = testPaths("missing-level-silent-line");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  const runtime = await createRuntime({ recorderArgs: "--growing-wav-one-chunk" });
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => /[▂▃▄▅▆▇█]/.test(runtime.widget().render(32)[0]));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    assert.match(runtime.widget().render(32)[0], /▁  \d\d:\d\d$/);
   } finally {
     await runtime.shutdown();
     rmSync(paths.dir, { recursive: true, force: true });
@@ -564,12 +589,17 @@ test("the external recording limit stops a recorder and its descendants", async 
 test("the external watchdog survives an abrupt Pi exit", async (t) => {
   const paths = testPaths("abrupt-pi");
   const childPidFile = join(paths.dir, "child-pid");
+  const abruptHome = mkdtempSync(join(tmpdir(), "pi-dictation-abrupt-home-"));
+  require("node:fs").mkdirSync(join(abruptHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(abruptHome, ".pi", "agent", "pi-dictation.json"), JSON.stringify({
+    recorder: { type: "local", command: `${process.execPath} ${recorderPath} {file} --ignore-int --spawn-child` },
+  }));
   const harness = spawn(process.execPath, [abruptPiPath], {
     cwd: packageRoot,
     stdio: "ignore",
     env: {
       ...process.env,
-      PI_DICTATION_RECORD_CMD: `${process.execPath} ${recorderPath} {file} --ignore-int --spawn-child`,
+      HOME: abruptHome,
       PI_DICTATION_TRANSCRIBE_CMD: "printf unused",
       PI_DICTATION_MAX_RECORDING_MS: "1000",
       PI_DICTATION_TEST_PID_FILE: paths.pidFile,
@@ -601,6 +631,7 @@ test("the external watchdog survives an abrupt Pi exit", async (t) => {
       }
     }
     rmSync(paths.dir, { recursive: true, force: true });
+    rmSync(abruptHome, { recursive: true, force: true });
   }
 });
 

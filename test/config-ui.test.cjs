@@ -48,7 +48,7 @@ test("the settings UI edits a safe field while preserving hidden configuration",
   const path = join(directory, "pi-dictation.json");
   const original = {
     language: "en",
-    recordCommand: "PRIVATE_RECORDER",
+    recorder: { type: "local", command: "PRIVATE_RECORDER" },
     transcribeCommand: "PRIVATE_TRANSCRIBER",
     openaiApiKey: "PRIVATE_API_KEY",
     openaiApiKeyCommand: "PRIVATE_KEY_COMMAND",
