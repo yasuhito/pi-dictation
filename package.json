@@ -23,11 +23,13 @@
     "macos"
   ],
   "bin": {
+    "pi-dictation": "bin/pi-dictation.mjs",
     "pi-dictation-doctor": "bin/pi-dictation-doctor.mjs"
   },
   "files": [
     "bin",
     "extensions",
+    "native",
     "pi-dictation.schema.json",
     "pi-dictation.example.json",
     "README.md",
