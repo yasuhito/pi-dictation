@@ -35,3 +35,11 @@ _Avoid_: Recording command, capture service
 **Recording lease**:
 The exclusive, capability-owned right to control one active bridge recording. Only the client holding that recording's secret capability may stop, cancel, or retrieve it.
 _Avoid_: Global recording session, active flag
+
+**Think-aloud session**:
+An explicitly started, full-duplex voice conversation with a Realtime model, used to develop an idea before returning to the Pi agent.
+_Avoid_: Always-on assistant, dictation recording, voice chat
+
+**Conversation handoff**:
+The complete, speaker-labelled transcript from one Think-aloud session, inserted into Pi's editor with fixed interpretation instructions for the Pi agent.
+_Avoid_: AI summary, decision record, persistent conversation log
