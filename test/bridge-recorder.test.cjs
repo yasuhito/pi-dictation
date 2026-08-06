@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { fork } = require("node:child_process");
-const { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { once } = require("node:events");
@@ -24,13 +24,16 @@ async function harness(mode = "valid") {
     secret: Buffer.alloc(32, 13).toString("base64"),
   };
   writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
-  const child = fork(companion, [socket, Buffer.from(JSON.stringify(credential)).toString("base64"), mode], {
+  const eventFile = join(directory, "events.log");
+  const child = fork(companion, [socket, Buffer.from(JSON.stringify(credential)).toString("base64"), mode, eventFile], {
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   await once(child, "message");
   const { createRecorder } = await jiti.import(join(root, "extensions", "recorder.ts"));
   return {
     recorder: createRecorder({ type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile }),
+    eventFile,
+    events() { return existsSync(eventFile) ? readFileSync(eventFile, "utf8").trim().split("\n") : []; },
     startOptions: {
       destination: join(directory, "recording.wav"),
       maxDurationMs: 10000,
@@ -131,6 +134,160 @@ test("two authenticated Bridge clients share one companion without sharing a Rec
     child.kill("SIGTERM");
     await once(child, "exit").catch(() => {});
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Bridge cancellation after acknowledgement begins is a no-op", async (t) => {
+  const instance = await harness("ack-delay");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const stopping = recording.stop();
+    while (!instance.events().includes("acknowledge")) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    await recording.cancel();
+    await stopping;
+    await t.test("preserves the acknowledged destination", () => assert.equal(existsSync(instance.startOptions.destination), true));
+    await t.test("does not send a late remote cancellation", () => assert.equal(instance.events().includes("cancel"), false));
+  } finally { await instance.cleanup(); }
+});
+
+test("Bridge cancellation retries remotely when acknowledgement fails", async (t) => {
+  const instance = await harness("ack-failure");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const stopping = recording.stop().catch((error) => error);
+    while (!instance.events().includes("acknowledge")) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    await recording.cancel();
+    const stopError = await stopping;
+    await t.test("does not report the failed stop as successful", () => assert.equal(stopError.code, "recording-failed"));
+    await t.test("sends authenticated cancellation after the failure", () => assert.equal(instance.events().includes("cancel"), true));
+    await t.test("leaves no transcribable destination", () => assert.equal(existsSync(instance.startOptions.destination), false));
+  } finally { await instance.cleanup(); }
+});
+
+test("repeated concurrent Bridge lifecycle calls are idempotent", async (t) => {
+  const stoppingInstance = await harness();
+  const cancellingInstance = await harness();
+  try {
+    const stoppingRecording = await stoppingInstance.recorder.start(stoppingInstance.startOptions);
+    await Promise.all([stoppingRecording.stop(), stoppingRecording.stop(), stoppingRecording.stop()]);
+    const cancellingRecording = await cancellingInstance.recorder.start(cancellingInstance.startOptions);
+    await Promise.all([cancellingRecording.cancel(), cancellingRecording.cancel(), cancellingRecording.cancel()]);
+    await t.test("finalizes only once", () => assert.equal(stoppingInstance.events().filter((event) => event === "stop").length, 1));
+    await t.test("cancels only once", () => assert.equal(cancellingInstance.events().filter((event) => event === "cancel").length, 1));
+  } finally {
+    await stoppingInstance.cleanup();
+    await cancellingInstance.cleanup();
+  }
+});
+
+test("Bridge cancellation interrupts finalization immediately", async (t) => {
+  const instance = await harness("slow-finalization");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const stopping = recording.stop().catch((error) => error);
+    while (!instance.events().includes("status")) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    const startedAt = Date.now();
+    await recording.cancel();
+    const stopError = await stopping;
+    await t.test("does not wait for the finalization deadline", () => assert.equal(Date.now() - startedAt < 1000, true));
+    await t.test("classifies the interrupted stop as cancelled", () => assert.equal(stopError.code, "cancelled"));
+    await t.test("leaves no Pi partial file", () => assert.equal(readdirSync(resolve(instance.startOptions.destination, "..")).some((name) => name.includes(".partial-")), false));
+  } finally { await instance.cleanup(); }
+});
+
+test("Bridge cancellation interrupts a stalled WAV transfer", async (t) => {
+  const instance = await harness("fetch-stall");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const stopping = recording.stop().catch((error) => error);
+    while (!instance.events().includes("fetch")) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    const startedAt = Date.now();
+    const cancelling = recording.cancel();
+    const stopError = await stopping;
+    const stopElapsed = Date.now() - startedAt;
+    await cancelling;
+    await t.test("does not wait for the transfer deadline", () => assert.equal(stopElapsed < 1000, true));
+    await t.test("classifies the interrupted transfer as cancelled", () => assert.equal(stopError.code, "cancelled"));
+    await t.test("leaves no transcribable destination", () => assert.equal(existsSync(instance.startOptions.destination), false));
+  } finally { await instance.cleanup(); }
+});
+
+test("Bridge cancellation interrupts WAV validation", async (t) => {
+  const instance = await harness("validation-large");
+  instance.startOptions.maxDurationMs = 1000000;
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const stopping = recording.stop().catch((error) => error);
+    const directory = resolve(instance.startOptions.destination, "..");
+    let partial;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      partial = readdirSync(directory).find((name) => name.includes(".partial-"));
+      if (partial && statSync(join(directory, partial)).size >= 30 * 1024 * 1024) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+    }
+    await recording.cancel();
+    const stopError = await stopping;
+    await t.test("classifies validation interruption as cancelled", () => assert.equal(stopError.code, "cancelled"));
+    await t.test("removes the validation partial", () => assert.equal(readdirSync(directory).some((name) => name.includes(".partial-")), false));
+  } finally { await instance.cleanup(); }
+});
+
+test("unconfirmed Bridge cancellation is bounded and safe", async (t) => {
+  const instance = await harness("cancel-unconfirmed");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const startedAt = Date.now();
+    const error = await recording.cancel().catch((value) => value);
+    const elapsed = Date.now() - startedAt;
+    await t.test("reports the owner-liveness risk", () => assert.equal(error.code, "cancellation-unconfirmed"));
+    await t.test("returns at the five-second bound", () => assert.equal(elapsed >= 4500 && elapsed < 6000, true));
+    await t.test("leaves no transcribable destination", () => assert.equal(existsSync(instance.startOptions.destination), false));
+  } finally { await instance.cleanup(); }
+});
+
+for (const [mode, label] of [["companion-duration-disabled", "Pi"], ["mac-duration-early", "Mac companion"]]) {
+  test(`${label} independently enforces the Bridge duration limit`, async (t) => {
+    const instance = await harness(mode);
+    instance.startOptions.maxDurationMs = 160;
+    try {
+      const recording = await instance.recorder.start(instance.startOptions);
+      if (mode === "mac-duration-early") await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      else await new Promise((resolveWait) => setTimeout(resolveWait, 220));
+      const error = await recording.stop().catch((value) => value);
+      await t.test("returns the duration-limit result", () => assert.equal(error.code, "duration-limit-reached"));
+      await t.test("fetches the recoverable result", () => assert.equal(instance.events().includes("fetch"), true));
+      await t.test("acknowledges retained audio for cleanup", () => assert.equal(instance.events().includes("acknowledge"), true));
+      await t.test("never commits audio for transcription", () => assert.equal(existsSync(instance.startOptions.destination), false));
+    } finally { await instance.cleanup(); }
+  });
+}
+
+test("Pi's duration deadline includes delayed Bridge startup", async () => {
+  const instance = await harness("pi-start-delay");
+  instance.startOptions.maxDurationMs = 160;
+  try {
+    const startedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    const error = await recording.stop().catch((value) => value);
+    assert.deepEqual({ code: error.code, bounded: Date.now() - startedAt < 350 }, {
+      code: "duration-limit-reached", bounded: true,
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("Bridge WAV validation distinguishes digital silence from quiet input", async (t) => {
+  const silent = await harness("all-zero");
+  const quiet = await harness("quiet-nonzero");
+  try {
+    const silentError = await silent.recorder.start(silent.startOptions).then((recording) => recording.stop()).catch((error) => error);
+    const quietRecording = await quiet.recorder.start(quiet.startOptions);
+    await quietRecording.stop();
+    await t.test("rejects an all-zero completed WAV", () => assert.equal(silentError.code, "invalid-audio"));
+    await t.test("accepts a quiet non-zero completed WAV", () => assert.equal(existsSync(quiet.startOptions.destination), true));
+  } finally {
+    await silent.cleanup();
+    await quiet.cleanup();
   }
 });
 

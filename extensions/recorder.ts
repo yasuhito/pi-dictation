@@ -34,7 +34,8 @@ export type Recorder = {
 
 export type RecorderErrorCode =
   | "cancelled"
-  | "duration-limit"
+  | "cancellation-unconfirmed"
+  | "duration-limit-reached"
   | "invalid-audio"
   | "recorder-busy"
   | "recorder-unavailable"
@@ -42,7 +43,8 @@ export type RecorderErrorCode =
 
 const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   cancelled: "Recording was cancelled.",
-  "duration-limit": "Recording reached the maximum duration.",
+  "cancellation-unconfirmed": "Cancellation could not be confirmed within five seconds; the recording owner may remain live on the companion.",
+  "duration-limit-reached": "Recording reached the maximum duration.",
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
   "recorder-busy": "Another Bridge recording is already in progress.",
   "recorder-unavailable": "No supported local recorder is available.",
@@ -190,7 +192,11 @@ function rmsDbfs(samples: Int16Array): number | "silence" {
   return 20 * Math.log10(Math.sqrt(sum / samples.length));
 }
 
-export async function validatePcm16MonoWav(path: string): Promise<void> {
+export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): Promise<void> {
+  const checkCancellation = () => {
+    if (signal?.aborted) throw new RecorderError("cancelled");
+  };
+  checkCancellation();
   const size = (await stat(path)).size;
   if (size < 44) throw new RecorderError("invalid-audio");
   const handle = await open(path, "r");
@@ -214,6 +220,7 @@ export async function validatePcm16MonoWav(path: string): Promise<void> {
     let dataSize = 0;
     let chunkOffset = 12;
     for (; chunkOffset + 8 <= riffEnd; ) {
+      checkCancellation();
       const header = await readAt(chunkOffset, 8);
       const chunkSize = header.readUInt32LE(4);
       const body = chunkOffset + 8;
@@ -245,6 +252,7 @@ export async function validatePcm16MonoWav(path: string): Promise<void> {
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let hasSignal = false;
     for (let position = dataOffset; position < dataOffset + dataSize; ) {
+      checkCancellation();
       const length = Math.min(buffer.length, dataOffset + dataSize - position);
       const { bytesRead } = await handle.read(buffer, 0, length, position);
       if (!bytesRead) throw new RecorderError("invalid-audio");
@@ -339,7 +347,7 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
         unexpected = true;
         state = "failed";
         void cleanup();
-        options.onFailure?.(new RecorderError(durationReached ? "duration-limit" : "recording-failed"));
+        options.onFailure?.(new RecorderError(durationReached ? "duration-limit-reached" : "recording-failed"));
       });
 
       const onStartupAbort = () => {
@@ -352,7 +360,7 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
           if (state === "stopped") return Promise.resolve();
           if (state === "cancelled") return Promise.reject(new RecorderError("cancelled"));
           if (state === "failed" || unexpected) {
-            return Promise.reject(new RecorderError(durationReached ? "duration-limit" : "recording-failed"));
+            return Promise.reject(new RecorderError(durationReached ? "duration-limit-reached" : "recording-failed"));
           }
           if (stopPromise) return stopPromise;
           state = "stopping";
@@ -360,7 +368,7 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
             try {
               await stopProcessGroup(proc);
               if (cancellationRequested) throw new RecorderError("cancelled");
-              if (durationReached) throw new RecorderError("duration-limit");
+              if (durationReached) throw new RecorderError("duration-limit-reached");
               await validatePcm16MonoWav(partial);
               if (cancellationRequested) throw new RecorderError("cancelled");
               await rename(partial, startOptions.destination);

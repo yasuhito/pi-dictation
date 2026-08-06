@@ -36,7 +36,7 @@ function frame(value) {
 }
 
 function wav() {
-  const dataBytes = 3200;
+  const dataBytes = mode === "validation-large" ? 30 * 1024 * 1024 : 3200;
   const result = Buffer.alloc(44 + dataBytes);
   result.write("RIFF", 0);
   result.writeUInt32LE(36 + dataBytes, 4);
@@ -50,7 +50,8 @@ function wav() {
   result.writeUInt16LE(16, 34);
   result.write("data", 36);
   result.writeUInt32LE(dataBytes, 40);
-  for (let offset = 44; offset < result.length; offset += 2) result.writeInt16LE(1200, offset);
+  const sample = mode === "all-zero" ? 0 : mode === "quiet-nonzero" ? 1 : 1200;
+  for (let offset = 44; offset < result.length; offset += 2) result.writeInt16LE(sample, offset);
   if (mode === "invalid-wav") result.writeUInt16LE(2, 22);
   if (mode === "trailing-data") return Buffer.concat([result, Buffer.from([1])]);
   return result;
@@ -77,12 +78,14 @@ function statusPayload(recording) {
   if (recording.state === "result-ready") {
     result.length = recording.audio.length;
     result.sha256 = createHash("sha256").update(recording.audio).digest("hex");
+    result.completion = recording.completion;
   }
   return result;
 }
 
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
   sockets.add(socket);
+  socket.on("error", () => {});
   socket.once("close", () => sockets.delete(socket));
   const challenge = randomBytes(32);
   socket.write(frame({ type: "challenge", version: protocolVersion, challenge: challenge.toString("base64") }));
@@ -100,6 +103,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const actual = Buffer.from(request.hmac, "hex");
       if (mode === "auth-failure" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("auth");
       const payload = JSON.parse(payloadBytes.toString("utf8"));
+      if (eventFile) require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
+      if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
       const replayKey = `${credential.id}:${request.requestId}`;
       const content = createHash("sha256").update(request.operation).update(Buffer.from([0])).update(payloadBytes).digest("hex");
       const previous = replay.get(replayKey);
@@ -126,9 +131,19 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else if (leaseHash.length !== 32) {
             status = "failed";
           } else {
-            const recording = { id: payload.recordingId, owner: credential.id, leaseHash, state: "recording", audio: wav() };
+            const recording = { id: payload.recordingId, owner: credential.id, leaseHash, state: "recording", audio: wav(), completion: "stopped" };
             recordings.set(recording.id, recording);
             activeId = recording.id;
+            if (!["companion-duration-disabled", "pi-start-delay"].includes(mode)) {
+              const companionDuration = mode === "mac-duration-early" ? Math.max(1, Math.floor(payload.maxDurationMs / 2)) : payload.maxDurationMs;
+              const durationTimer = setTimeout(() => {
+                if (recording.state !== "recording") return;
+                recording.completion = "duration-limit";
+                recording.state = "result-ready";
+                if (activeId === recording.id) activeId = undefined;
+              }, companionDuration);
+              durationTimer.unref();
+            }
             responsePayload = statusPayload(recording);
           }
         } else {
@@ -141,6 +156,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else if (request.operation === "status") {
             responsePayload = statusPayload(recording);
           } else if (request.operation === "stop") {
+            let initiatedFinalization = false;
             if (recording.state === "recording" && mode === "ambiguous-stop") {
               recording.state = "finalizing";
               setTimeout(() => {
@@ -151,10 +167,23 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
               throw new Error("ambiguous stop");
             }
             if (recording.state === "recording") {
-              recording.state = "result-ready";
-              if (activeId === recording.id) activeId = undefined;
+              initiatedFinalization = true;
+              recording.completion = "stopped";
+              if (mode === "slow-finalization") {
+                recording.state = "finalizing";
+                const finalizer = setTimeout(() => {
+                  if (recording.state !== "finalizing") return;
+                  recording.state = "result-ready";
+                  if (activeId === recording.id) activeId = undefined;
+                }, 2000);
+                finalizer.unref();
+              } else {
+                recording.state = "result-ready";
+                if (activeId === recording.id) activeId = undefined;
+              }
             }
-            if (recording.state !== "result-ready") status = "invalid-state";
+            if (recording.state === "finalizing" && !initiatedFinalization) status = "invalid-state";
+            else if (recording.state !== "result-ready" && recording.state !== "finalizing") status = "invalid-state";
             else responsePayload = statusPayload(recording);
           } else if (request.operation === "fetch") {
             if (recording.state !== "result-ready") status = "invalid-state";
@@ -164,6 +193,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
                 recordingId: recording.id,
                 length: mode === "oversized" ? 999999999 : audio.length,
                 sha256: mode === "hash-mismatch" ? "0".repeat(64) : createHash("sha256").update(audio).digest("hex"),
+                completion: recording.completion,
               };
             }
           } else if (request.operation === "acknowledge") {
@@ -188,6 +218,20 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const responseTag = tag(credential.secret, ["response", protocolVersion, challenge, credential.id, request.requestId, `${request.operation}:${status}`, responseBytes]);
       const response = frame({ type: "response", version: protocolVersion, requestId: request.requestId, status, payload: responseBytes.toString("base64"), hmac: responseTag.toString("hex") });
       if (request.operation === "fetch" && mode === "early-eof" && audio) audio = audio.subarray(0, audio.length - 1);
+      if (request.operation === "fetch" && mode === "fetch-stall" && audio) {
+        socket.write(Buffer.concat([response, audio.subarray(0, 100)]));
+        return;
+      }
+      if (request.operation === "start" && mode === "pi-start-delay") {
+        const delayed = setTimeout(() => socket.end(response), 220);
+        delayed.unref();
+        return;
+      }
+      if (request.operation === "acknowledge" && mode === "ack-delay") {
+        const delayed = setTimeout(() => socket.end(response), 150);
+        delayed.unref();
+        return;
+      }
       socket.end(audio ? Buffer.concat([response, audio]) : response);
     } catch { socket.destroy(); }
   });

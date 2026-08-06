@@ -124,6 +124,21 @@ test("two authenticated clients agree with the Recording lease reference model",
   } finally { await cleanup(instance); }
 });
 
+test("concurrent stop and cancel leave the Recording lease cancelled before acknowledgement", async () => {
+  const instance = await setup("slow-finalization");
+  try {
+    const owner = instance.credentials[0];
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await Promise.all([
+      request(instance.socket, owner, "stop", lease),
+      request(instance.socket, owner, "cancel", lease),
+    ]);
+    const status = await request(instance.socket, owner, "status", lease);
+    assert.equal(status.payload.state, "cancelled");
+  } finally { await cleanup(instance); }
+});
+
 test("the simulated companion matches every Recording lease transition row", async (t) => {
   const instance = await setup();
   const owner = instance.credentials[0];
@@ -160,6 +175,17 @@ test("the simulated companion matches every Recording lease transition row", asy
         assert.deepEqual(actual, expected);
       });
     }
+  } finally { await cleanup(instance); }
+});
+
+test("the Mac duration limit releases the active Recording lease slot", async () => {
+  const instance = await setup("mac-duration-early");
+  try {
+    const owner = instance.credentials[0];
+    await request(instance.socket, owner, "start", { ...capability(), maxDurationMs: 100 });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 80));
+    const next = await request(instance.socket, owner, "start", { ...capability(), maxDurationMs: 100 });
+    assert.equal(next.status, "ok");
   } finally { await cleanup(instance); }
 });
 

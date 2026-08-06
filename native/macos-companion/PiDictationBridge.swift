@@ -437,6 +437,7 @@ private final class BridgeRecording {
     var state = "recording"
     var length: Int?
     var sha256: String?
+    var completion = "stopped"
     var observations: [[String: Any]] = []
     var sequence = 0
     var levelTimer: DispatchSourceTimer?
@@ -528,7 +529,7 @@ private final class RecordingManager {
         levels.resume()
         let expiry = DispatchWorkItem { [weak self, weak current] in
             guard let self, let current else { return }
-            self.finalize(current)
+            self.finalize(current, completion: "duration-limit")
         }
         current.durationTimer = expiry
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(maximumDurationMs), execute: expiry)
@@ -575,7 +576,7 @@ private final class RecordingManager {
             lock.unlock()
             throw CompanionFailure.invalidState
         }
-        beginFinalizationLocked(current)
+        beginFinalizationLocked(current, completion: "stopped")
         lock.unlock()
         completeFinalization(current)
         lock.lock()
@@ -600,7 +601,9 @@ private final class RecordingManager {
         guard ["recording", "finalizing", "result-ready"].contains(current.state) else { throw CompanionFailure.invalidState }
         current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         current.recorder.stop()
-        try? FileManager.default.removeItem(at: current.url)
+        if FileManager.default.fileExists(atPath: current.url.path) {
+            try FileManager.default.removeItem(at: current.url)
+        }
         if activeId == current.id { activeId = nil }
         current.state = "cancelled"; current.length = nil; current.sha256 = nil
         return statusPayload(current)
@@ -629,20 +632,21 @@ private final class RecordingManager {
     private func statusPayload(_ current: BridgeRecording) -> [String: Any] {
         var payload: [String: Any] = ["recordingId": current.id, "state": current.state]
         if current.state == "result-ready", let length = current.length, let sha256 = current.sha256 {
-            payload["length"] = length; payload["sha256"] = sha256
+            payload["length"] = length; payload["sha256"] = sha256; payload["completion"] = current.completion
         }
         return payload
     }
 
-    private func finalize(_ current: BridgeRecording) {
+    private func finalize(_ current: BridgeRecording, completion: String) {
         lock.lock()
         guard current.state == "recording" else { lock.unlock(); return }
-        beginFinalizationLocked(current)
+        beginFinalizationLocked(current, completion: completion)
         lock.unlock()
         completeFinalization(current)
     }
 
-    private func beginFinalizationLocked(_ current: BridgeRecording) {
+    private func beginFinalizationLocked(_ current: BridgeRecording, completion: String) {
+        current.completion = completion
         current.state = "finalizing"
         current.durationTimer?.cancel(); current.levelTimer?.cancel(); current.recorder.stop()
     }

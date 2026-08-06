@@ -22,7 +22,7 @@ The statuses are `ok`, `busy`, `not-found`, `request-conflict`, `invalid-state`,
 
 ## States and disclosure
 
-Owner-authenticated `status` returns `recordingId` and one of `recording`, `finalizing`, `result-ready`, `acknowledged`, `cancelled`, `expired`, or `failed`. Only `result-ready` adds `length` and `sha256`. `fetch` returns those result metadata followed by the WAV bytes; other operations do not transfer audio.
+Owner-authenticated `status` returns `recordingId` and one of `recording`, `finalizing`, `result-ready`, `acknowledged`, `cancelled`, `expired`, or `failed`. Only `result-ready` adds `length`, `sha256`, and `completion`, where `completion` is `stopped` or `duration-limit`. `fetch` returns those result metadata followed by the WAV bytes; other operations do not transfer audio.
 
 The active slot is occupied only by `recording` and `finalizing`. A completed result releases it after the WAV is safely finalized. Before accepting another start, the companion checks that storage can reserve that request's maximum result size. There is no wait queue.
 
@@ -40,7 +40,9 @@ The active slot is occupied only by `recording` and `finalizing`. A completed re
 | expired | ok | invalid-state | invalid-state | invalid-state | invalid-state | invalid-state |
 | failed | ok | invalid-state | invalid-state | invalid-state | invalid-state | invalid-state |
 
-A duration limit follows the same recording → finalizing → result-ready path as `stop`. Result retention expiry removes audio and produces an `expired` tombstone. Finalization failure removes partial audio and produces `failed`.
+A duration limit follows the same recording → finalizing → result-ready path as `stop`, with `completion: duration-limit`. Pi may fetch, validate, and acknowledge that result for cleanup, but must never commit or transcribe it. The companion and Pi independently enforce the same configured deadline. Result retention expiry removes audio and produces an `expired` tombstone. Finalization failure removes partial audio and produces `failed`.
+
+Cancellation is serialized with acknowledgement by the companion lock: whichever authenticated operation is accepted first determines the terminal state. Pi records cancellation intent synchronously before opening its separate cancel connection and must not begin acknowledgement after that intent. It aborts finalization polling and transfer immediately. If authenticated cancellation cannot be confirmed within five seconds, Pi removes local partial audio, reports that the recording owner may remain live, and never submits audio for transcription.
 
 ## Consequences
 

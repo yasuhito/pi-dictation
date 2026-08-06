@@ -393,6 +393,72 @@ test("one simulated Bridge recording crosses the Pi command flow through transcr
   }
 });
 
+test("a duration-limited Bridge result is never submitted for transcription", async (t) => {
+  const paths = { dir: mkdtempSync(join("/tmp", "pi-duration-")) };
+  const socketDirectory = join(paths.dir, "socket");
+  require("node:fs").mkdirSync(socketDirectory, { mode: 0o700 });
+  const socket = join(socketDirectory, "listener.sock");
+  const credentialFile = join(paths.dir, "credential.json");
+  const events = join(paths.dir, "events");
+  const transcriptionMarker = join(paths.dir, "transcribed");
+  const credential = { id: "99999999-9999-4999-8999-999999999999", secret: Buffer.alloc(32, 15).toString("base64") };
+  writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
+  const companion = fork(join(packageRoot, "test", "fixtures", "fake-bridge-companion.cjs"), [
+    socket, Buffer.from(JSON.stringify(credential)).toString("base64"), "mac-duration-early", events,
+  ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await once(companion, "message");
+  const runtime = await createRuntime({
+    maxRecordingMs: 1000,
+    recorderConfig: { type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile },
+    transcribeCommand: `touch '${transcriptionMarker}'; printf should-not-run`,
+  });
+  try {
+    await runtime.commands.dictate("", runtime.ctx);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 650));
+    await runtime.commands.dictate("", runtime.ctx);
+    await t.test("does not invoke the transcription backend", () => assert.equal(existsSync(transcriptionMarker), false));
+    await t.test("does not paste transcription output", () => assert.equal(runtime.pasted(), ""));
+    await t.test("still acknowledges remote audio cleanup", () => assert.match(readFileSync(events, "utf8"), /acknowledged/));
+  } finally {
+    await runtime.shutdown();
+    companion.kill("SIGTERM");
+    await once(companion, "exit").catch(() => {});
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("unconfirmed Bridge cancellation never reaches transcription", async (t) => {
+  const paths = { dir: mkdtempSync(join("/tmp", "pi-cancel-risk-")) };
+  const socketDirectory = join(paths.dir, "socket");
+  require("node:fs").mkdirSync(socketDirectory, { mode: 0o700 });
+  const socket = join(socketDirectory, "listener.sock");
+  const credentialFile = join(paths.dir, "credential.json");
+  const events = join(paths.dir, "events");
+  const transcriptionMarker = join(paths.dir, "transcribed");
+  const credential = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", secret: Buffer.alloc(32, 16).toString("base64") };
+  writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
+  const companion = fork(join(packageRoot, "test", "fixtures", "fake-bridge-companion.cjs"), [
+    socket, Buffer.from(JSON.stringify(credential)).toString("base64"), "cancel-unconfirmed", events,
+  ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await once(companion, "message");
+  const runtime = await createRuntime({
+    recorderConfig: { type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile },
+    transcribeCommand: `touch '${transcriptionMarker}'; printf should-not-run`,
+  });
+  try {
+    await runtime.commands.dictate("", runtime.ctx);
+    await runtime.commands["dictate-cancel"]("", runtime.ctx);
+    await t.test("does not invoke the transcription backend", () => assert.equal(existsSync(transcriptionMarker), false));
+    await t.test("does not paste transcription output", () => assert.equal(runtime.pasted(), ""));
+    await t.test("attempts remote cancellation", () => assert.match(readFileSync(events, "utf8"), /cancel/));
+  } finally {
+    await runtime.shutdown();
+    companion.kill("SIGTERM");
+    await once(companion, "exit").catch(() => {});
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
 test("normal dictation pastes the transcription", async (t) => {
   const paths = testPaths("normal");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
