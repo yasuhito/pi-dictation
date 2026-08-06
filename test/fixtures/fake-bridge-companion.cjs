@@ -6,12 +6,45 @@ const decoded = JSON.parse(Buffer.from(process.argv[3], "base64").toString("utf8
 const credentials = new Map((Array.isArray(decoded) ? decoded : [decoded]).map((value) => [value.id, value]));
 const mode = process.argv[4] || "valid";
 const eventFile = process.argv[5];
+const stateFile = process.argv[6];
 const protocolVersion = 2;
-const recordings = new Map();
-const replay = new Map();
-const busyStarts = new Set();
+let persisted = {};
+if (stateFile && require("node:fs").existsSync(stateFile)) persisted = JSON.parse(require("node:fs").readFileSync(stateFile, "utf8"));
+const recordings = new Map((persisted.recordings || []).map((value) => [value.id, {
+  ...value,
+  leaseHash: Buffer.from(value.leaseHash, "base64"),
+  audio: value.audio === undefined ? undefined : Buffer.from(value.audio, "base64"),
+}]));
+const replay = new Map(persisted.replay || []);
+const busyStarts = new Set(persisted.busyStarts || []);
 const sockets = new Set();
-let activeId;
+const droppedResponses = new Set(persisted.droppedResponses || []);
+let activeId = persisted.activeId;
+
+function persistState() {
+  if (!stateFile) return;
+  const state = {
+    recordings: [...recordings.values()].map((value) => ({
+      ...value,
+      leaseHash: value.leaseHash.toString("base64"),
+      audio: value.audio?.toString("base64"),
+    })),
+    replay: [...replay], busyStarts: [...busyStarts], droppedResponses: [...droppedResponses], activeId,
+  };
+  const temporary = `${stateFile}.tmp`;
+  require("node:fs").writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
+  require("node:fs").renameSync(temporary, stateFile);
+}
+
+if (mode === "restart-recovery") {
+  for (const recording of recordings.values()) {
+    if (!["recording", "finalizing"].includes(recording.state)) continue;
+    recording.state = "failed";
+    recording.audio = undefined;
+    if (activeId === recording.id) activeId = undefined;
+  }
+  persistState();
+}
 
 function authEncoding(fields) {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
@@ -214,12 +247,28 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else status = "failed";
         }
       }
+      persistState();
       const responseBytes = Buffer.from(JSON.stringify(responsePayload));
       const responseTag = tag(credential.secret, ["response", protocolVersion, challenge, credential.id, request.requestId, `${request.operation}:${status}`, responseBytes]);
       const response = frame({ type: "response", version: protocolVersion, requestId: request.requestId, status, payload: responseBytes.toString("base64"), hmac: responseTag.toString("hex") });
       if (request.operation === "fetch" && mode === "early-eof" && audio) audio = audio.subarray(0, audio.length - 1);
       if (request.operation === "fetch" && mode === "fetch-stall" && audio) {
         socket.write(Buffer.concat([response, audio.subarray(0, 100)]));
+        return;
+      }
+      const droppedOperation = mode.startsWith("drop-") && mode.endsWith("-response")
+        ? mode.slice("drop-".length, -"-response".length)
+        : undefined;
+      if (request.operation === droppedOperation && !droppedResponses.has(request.operation)) {
+        droppedResponses.add(request.operation);
+        persistState();
+        socket.destroy();
+        return;
+      }
+      if (request.operation === "fetch" && mode === "fetch-interrupted-once" && audio && !droppedResponses.has("fetch")) {
+        droppedResponses.add("fetch");
+        persistState();
+        socket.write(Buffer.concat([response, audio.subarray(0, 100)]), () => socket.destroy());
         return;
       }
       if (request.operation === "start" && mode === "pi-start-delay") {
@@ -243,14 +292,25 @@ server.listen(endpoint, () => {
 });
 
 process.on("message", (message) => {
-  if (message?.type !== "force-state") return;
-  const recording = recordings.get(message.recordingId);
-  if (recording) {
+  const recording = recordings.get(message?.recordingId);
+  if (message?.type === "force-state" && recording) {
     recording.state = message.state;
     activeId = ["recording", "finalizing"].includes(message.state) ? recording.id :
       (activeId === recording.id ? undefined : activeId);
+    persistState();
+    process.send?.({ forced: message.recordingId });
+  } else if (message?.type === "expire" && recording) {
+    recording.state = "expired";
+    recording.audio = undefined;
+    if (activeId === recording.id) activeId = undefined;
+    persistState();
+    process.send?.({ expired: message.recordingId });
+  } else if (message?.type === "purge" && recording) {
+    recordings.delete(message.recordingId);
+    if (activeId === recording.id) activeId = undefined;
+    persistState();
+    process.send?.({ purged: message.recordingId });
   }
-  process.send?.({ forced: message.recordingId });
 });
 
 process.on("SIGTERM", () => {
