@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import net from "node:net";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
-export const BRIDGE_PROTOCOL_VERSION = 1;
+export const BRIDGE_PROTOCOL_VERSION = 2;
 const packageRoot = new URL("..", import.meta.url);
 const supervisorPath = fileURLToPath(new URL("./pi-dictation-tunnel.mjs", import.meta.url));
 

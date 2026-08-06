@@ -1,13 +1,17 @@
-const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
+const { createHash, createHmac, randomBytes, timingSafeEqual } = require("node:crypto");
 const net = require("node:net");
 
 const endpoint = process.argv[2];
-const credential = JSON.parse(Buffer.from(process.argv[3], "base64").toString("utf8"));
+const decoded = JSON.parse(Buffer.from(process.argv[3], "base64").toString("utf8"));
+const credentials = new Map((Array.isArray(decoded) ? decoded : [decoded]).map((value) => [value.id, value]));
 const mode = process.argv[4] || "valid";
 const eventFile = process.argv[5];
-const protocolVersion = 1;
+const protocolVersion = 2;
 const recordings = new Map();
+const replay = new Map();
+const busyStarts = new Set();
 const sockets = new Set();
+let activeId;
 
 function authEncoding(fields) {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
@@ -20,8 +24,8 @@ function authEncoding(fields) {
   return Buffer.concat(pieces);
 }
 
-function tag(fields) {
-  return createHmac("sha256", Buffer.from(credential.secret, "base64")).update(authEncoding(fields)).digest();
+function tag(secret, fields) {
+  return createHmac("sha256", Buffer.from(secret, "base64")).update(authEncoding(fields)).digest();
 }
 
 function frame(value) {
@@ -54,8 +58,27 @@ function wav() {
 
 function exactRequest(value) {
   return value && value.type === "request" && value.version === protocolVersion &&
-    value.credentialId === credential.id && typeof value.requestId === "string" &&
+    typeof value.credentialId === "string" && typeof value.requestId === "string" &&
     typeof value.operation === "string" && typeof value.payload === "string" && typeof value.hmac === "string";
+}
+
+function digestSecret(value) { return createHash("sha256").update(Buffer.from(value, "base64")).digest(); }
+
+function owned(owner, payload) {
+  const recording = recordings.get(payload.recordingId);
+  const supplied = typeof payload.leaseSecret === "string" ? digestSecret(payload.leaseSecret) : Buffer.alloc(32);
+  const expected = recording?.leaseHash || Buffer.alloc(32, 1);
+  const matches = supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  return recording && recording.owner === owner && matches ? recording : undefined;
+}
+
+function statusPayload(recording) {
+  const result = { recordingId: recording.id, state: recording.state };
+  if (recording.state === "result-ready") {
+    result.length = recording.audio.length;
+    result.sha256 = createHash("sha256").update(recording.audio).digest("hex");
+  }
+  return result;
 }
 
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
@@ -70,53 +93,120 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       if (input.length < 4 || input.length !== input.readUInt32BE(0) + 4) throw new Error("frame");
       const request = JSON.parse(input.subarray(4).toString("utf8"));
       if (!exactRequest(request)) throw new Error("request");
+      const credential = credentials.get(request.credentialId);
+      if (!credential) throw new Error("credential");
       const payloadBytes = Buffer.from(request.payload, "base64");
-      const expected = tag(["request", protocolVersion, challenge, credential.id, request.requestId, request.operation, payloadBytes]);
+      const expected = tag(credential.secret, ["request", protocolVersion, challenge, credential.id, request.requestId, request.operation, payloadBytes]);
       const actual = Buffer.from(request.hmac, "hex");
       if (mode === "auth-failure" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("auth");
       const payload = JSON.parse(payloadBytes.toString("utf8"));
-      let responsePayload;
+      const replayKey = `${credential.id}:${request.requestId}`;
+      const content = createHash("sha256").update(request.operation).update(Buffer.from([0])).update(payloadBytes).digest("hex");
+      const previous = replay.get(replayKey);
+      let status = "ok";
+      let responsePayload = {};
       let audio;
-      if (request.operation === "start") {
-        const lease = randomBytes(32).toString("base64");
-        recordings.set(payload.recordingId, { lease });
-        responsePayload = { recordingId: payload.recordingId, lease };
+      if (previous && previous !== content) {
+        status = "request-conflict";
       } else {
-        const recording = recordings.get(payload.recordingId);
-        if (!recording || recording.lease !== payload.lease) throw new Error("lease");
-        if (request.operation === "levels") {
-          responsePayload = { observations: [{ sequence: 0, capturedAtMs: 0, dbfs: -20 }] };
-        } else if (request.operation === "stop") {
-          audio = wav();
-          responsePayload = {
-            recordingId: payload.recordingId,
-            length: mode === "oversized" ? 999999999 : audio.length,
-            sha256: mode === "hash-mismatch" ? "0".repeat(64) : createHash("sha256").update(audio).digest("hex"),
-          };
-        } else if (request.operation === "acknowledge") {
-          if (mode === "ack-failure") throw new Error("acknowledgement");
-          recordings.delete(payload.recordingId);
-          if (eventFile) require("node:fs").appendFileSync(eventFile, "acknowledged\n");
-          responsePayload = { acknowledged: true };
-        } else if (request.operation === "cancel") {
-          recordings.delete(payload.recordingId);
-          responsePayload = { cancelled: true };
-        } else throw new Error("operation");
+        replay.set(replayKey, content);
+        if (request.operation === "start") {
+          const existing = recordings.get(payload.recordingId);
+          const leaseHash = typeof payload.leaseSecret === "string" ? digestSecret(payload.leaseSecret) : Buffer.alloc(0);
+          if (busyStarts.has(replayKey)) {
+            status = "busy";
+          } else if (existing) {
+            if (existing.owner !== credential.id || leaseHash.length !== existing.leaseHash.length || !timingSafeEqual(leaseHash, existing.leaseHash)) status = "not-found";
+            else responsePayload = statusPayload(existing);
+          } else if (activeId) {
+            busyStarts.add(replayKey);
+            status = "busy";
+          } else if (mode === "storage-full") {
+            status = "failed";
+          } else if (leaseHash.length !== 32) {
+            status = "failed";
+          } else {
+            const recording = { id: payload.recordingId, owner: credential.id, leaseHash, state: "recording", audio: wav() };
+            recordings.set(recording.id, recording);
+            activeId = recording.id;
+            responsePayload = statusPayload(recording);
+          }
+        } else {
+          const recording = owned(credential.id, payload);
+          if (!recording) {
+            status = "not-found";
+          } else if (request.operation === "levels") {
+            if (recording.state !== "recording") status = "invalid-state";
+            else responsePayload = { observations: [{ sequence: 0, capturedAtMs: 0, dbfs: -20 }] };
+          } else if (request.operation === "status") {
+            responsePayload = statusPayload(recording);
+          } else if (request.operation === "stop") {
+            if (recording.state === "recording" && mode === "ambiguous-stop") {
+              recording.state = "finalizing";
+              setTimeout(() => {
+                if (recording.state !== "finalizing") return;
+                recording.state = "result-ready";
+                if (activeId === recording.id) activeId = undefined;
+              }, 50);
+              throw new Error("ambiguous stop");
+            }
+            if (recording.state === "recording") {
+              recording.state = "result-ready";
+              if (activeId === recording.id) activeId = undefined;
+            }
+            if (recording.state !== "result-ready") status = "invalid-state";
+            else responsePayload = statusPayload(recording);
+          } else if (request.operation === "fetch") {
+            if (recording.state !== "result-ready") status = "invalid-state";
+            else {
+              audio = recording.audio;
+              responsePayload = {
+                recordingId: recording.id,
+                length: mode === "oversized" ? 999999999 : audio.length,
+                sha256: mode === "hash-mismatch" ? "0".repeat(64) : createHash("sha256").update(audio).digest("hex"),
+              };
+            }
+          } else if (request.operation === "acknowledge") {
+            if (mode === "ack-failure") throw new Error("acknowledgement");
+            if (recording.state === "result-ready" || recording.state === "acknowledged") {
+              recording.state = "acknowledged";
+              recording.audio = undefined;
+              if (eventFile) require("node:fs").appendFileSync(eventFile, "acknowledged\n");
+              responsePayload = statusPayload(recording);
+            } else status = "invalid-state";
+          } else if (request.operation === "cancel") {
+            if (["recording", "finalizing", "result-ready", "cancelled"].includes(recording.state)) {
+              recording.state = "cancelled";
+              recording.audio = undefined;
+              if (activeId === recording.id) activeId = undefined;
+              responsePayload = statusPayload(recording);
+            } else status = "invalid-state";
+          } else status = "failed";
+        }
       }
       const responseBytes = Buffer.from(JSON.stringify(responsePayload));
-      const responseTag = tag(["response", protocolVersion, challenge, credential.id, request.requestId, `${request.operation}:ok`, responseBytes]);
-      const response = frame({ type: "response", version: protocolVersion, requestId: request.requestId, status: "ok", payload: responseBytes.toString("base64"), hmac: responseTag.toString("hex") });
-      if (request.operation === "stop" && mode === "early-eof") audio = audio.subarray(0, audio.length - 1);
+      const responseTag = tag(credential.secret, ["response", protocolVersion, challenge, credential.id, request.requestId, `${request.operation}:${status}`, responseBytes]);
+      const response = frame({ type: "response", version: protocolVersion, requestId: request.requestId, status, payload: responseBytes.toString("base64"), hmac: responseTag.toString("hex") });
+      if (request.operation === "fetch" && mode === "early-eof" && audio) audio = audio.subarray(0, audio.length - 1);
       socket.end(audio ? Buffer.concat([response, audio]) : response);
-    } catch {
-      socket.destroy();
-    }
+    } catch { socket.destroy(); }
   });
 });
 
 server.listen(endpoint, () => {
   require("node:fs").chmodSync(endpoint, 0o600);
   if (process.send) process.send({ ready: true });
+});
+
+process.on("message", (message) => {
+  if (message?.type !== "force-state") return;
+  const recording = recordings.get(message.recordingId);
+  if (recording) {
+    recording.state = message.state;
+    activeId = ["recording", "finalizing"].includes(message.state) ? recording.id :
+      (activeId === recording.id ? undefined : activeId);
+  }
+  process.send?.({ forced: message.recordingId });
 });
 
 process.on("SIGTERM", () => {

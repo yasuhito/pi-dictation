@@ -22,6 +22,7 @@ import { spawnSync } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 import {
+  BRIDGE_PROTOCOL_VERSION,
   BridgeHostError,
   hostStatus,
   installHost,
@@ -33,7 +34,6 @@ import {
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
 const APP_NAME = "PiDictationBridge";
-const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 64 * 1024;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = join(packageRoot, "native", "macos-companion", "PiDictationBridge.swift");
@@ -561,26 +561,26 @@ async function healthAt(endpoint, credential) {
     const challengeFrame = await readFrame(socket);
     const challengeMessage = challengeFrame.value;
     if (!exactObject(challengeMessage, ["type", "version", "challenge"]) ||
-        challengeMessage.type !== "challenge" || challengeMessage.version !== PROTOCOL_VERSION) {
-      throw new CliError(`Companion protocol mismatch; Pi Dictation requires exact version ${PROTOCOL_VERSION}.`);
+        challengeMessage.type !== "challenge" || challengeMessage.version !== BRIDGE_PROTOCOL_VERSION) {
+      throw new CliError(`Companion protocol mismatch; Pi Dictation requires exact version ${BRIDGE_PROTOCOL_VERSION}.`);
     }
     const challenge = Buffer.from(challengeMessage.challenge, "base64");
     if (challenge.length !== 32) throw new CliError("The companion sent an invalid authentication challenge.");
     const requestId = randomUUID();
     const payload = Buffer.from("{}", "utf8");
-    const tag = hmac(secret, ["request", PROTOCOL_VERSION, challenge, credential.id, requestId, "health", payload]);
+    const tag = hmac(secret, ["request", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, "health", payload]);
     socket.end(frame({
-      type: "request", version: PROTOCOL_VERSION, credentialId: credential.id,
+      type: "request", version: BRIDGE_PROTOCOL_VERSION, credentialId: credential.id,
       requestId, operation: "health", payload: payload.toString("base64"), hmac: tag.toString("hex"),
     }));
     const responseFrame = await readFrame(socket, 5000, true);
     const response = responseFrame.value;
     if (!exactObject(response, ["type", "version", "requestId", "status", "payload", "hmac"]) ||
-        response.type !== "response" || response.version !== PROTOCOL_VERSION || response.requestId !== requestId || response.status !== "ok") {
+        response.type !== "response" || response.version !== BRIDGE_PROTOCOL_VERSION || response.requestId !== requestId || response.status !== "ok") {
       throw new CliError("The companion returned an invalid authenticated health response.");
     }
     const responsePayload = Buffer.from(response.payload, "base64");
-    const expected = hmac(secret, ["response", PROTOCOL_VERSION, challenge, credential.id, requestId, "health:ok", responsePayload]);
+    const expected = hmac(secret, ["response", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, "health:ok", responsePayload]);
     const actual = Buffer.from(response.hmac, "hex");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
       throw new CliError("The companion health response could not be authenticated.");
@@ -606,7 +606,7 @@ async function authenticatedHealth() {
   inspectSocket(p.socket);
   const credential = readJsonOwned(p.credential, "bridge credential");
   const health = await healthAt({ type: "unix", path: p.socket }, credential);
-  console.log(`Protocol: ok (exact version ${PROTOCOL_VERSION})`);
+  console.log(`Protocol: ok (exact version ${BRIDGE_PROTOCOL_VERSION})`);
   console.log(`Authenticated health: ok`);
   console.log(`Microphone permission: ${health.permission}`);
   console.log(`Default input: ${health.defaultInputAvailable ? "available" : "unavailable"}`);

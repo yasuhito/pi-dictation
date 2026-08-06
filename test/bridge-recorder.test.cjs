@@ -4,6 +4,7 @@ const { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync }
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { once } = require("node:events");
+const { randomBytes, randomUUID } = require("node:crypto");
 const { test } = require("node:test");
 const { createJiti } = require("jiti");
 const { runRecorderContract } = require("./recorder-contract.cjs");
@@ -79,6 +80,59 @@ for (const [mode, code] of [
     } finally { await instance.cleanup(); }
   });
 }
+
+test("the Bridge recording adapter reconciles an ambiguous stop through owner status", async () => {
+  const instance = await harness("ambiguous-stop");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("two authenticated Bridge clients share one companion without sharing a Recording lease", async (t) => {
+  const directory = mkdtempSync(join("/tmp", "pi-db-shared-"));
+  const socketDirectory = join(directory, "socket");
+  mkdirSync(socketDirectory, { mode: 0o700 });
+  const socket = join(socketDirectory, "listener.sock");
+  const credentials = [0, 1].map(() => ({ id: randomUUID(), secret: randomBytes(32).toString("base64") }));
+  const credentialFiles = credentials.map((credential, index) => {
+    const path = join(directory, `credential-${index}.json`);
+    writeFileSync(path, JSON.stringify(credential), { mode: 0o600 });
+    return path;
+  });
+  const child = fork(companion, [socket, Buffer.from(JSON.stringify(credentials)).toString("base64"), "valid"], {
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  await once(child, "message");
+  try {
+    const { createRecorder } = await jiti.import(join(root, "extensions", "recorder.ts"));
+    const recorders = credentialFiles.map((credentialFile) => createRecorder({
+      type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile,
+    }));
+    const options = (name) => ({
+      destination: join(directory, name), maxDurationMs: 10000,
+      signal: new AbortController().signal, onLevel() {},
+    });
+    const first = await recorders[0].start(options("first.wav"));
+    const secondError = await recorders[1].start(options("second.wav")).catch((error) => error);
+    await first.stop();
+
+    await t.test("the competing client receives only the safe busy classification", () => {
+      assert.equal(secondError.code, "recorder-busy");
+    });
+    await t.test("the owner still retrieves its result", () => {
+      assert.equal(existsSync(join(directory, "first.wav")), true);
+    });
+    await t.test("the competing client creates no result", () => {
+      assert.equal(existsSync(join(directory, "second.wav")), false);
+    });
+  } finally {
+    child.kill("SIGTERM");
+    await once(child, "exit").catch(() => {});
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("the Bridge recording adapter refuses a Unix socket outside a private directory", async () => {
   const instance = await harness();

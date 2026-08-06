@@ -36,6 +36,7 @@ export type RecorderErrorCode =
   | "cancelled"
   | "duration-limit"
   | "invalid-audio"
+  | "recorder-busy"
   | "recorder-unavailable"
   | "recording-failed";
 
@@ -43,6 +44,7 @@ const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   cancelled: "Recording was cancelled.",
   "duration-limit": "Recording reached the maximum duration.",
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
+  "recorder-busy": "Another Bridge recording is already in progress.",
   "recorder-unavailable": "No supported local recorder is available.",
   "recording-failed": "Voice recording stopped unexpectedly.",
 };
