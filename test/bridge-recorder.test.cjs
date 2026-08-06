@@ -58,7 +58,90 @@ test("the Recorder transports authenticated Bridge recording Level observations"
     const deadline = Date.now() + 3000;
     while (observations.length === 0 && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
     await recording.cancel();
-    assert.deepEqual(observations[0], { sequence: 0, capturedAtMs: 0, dbfs: -20 });
+    assert.deepEqual(observations.find(({ type }) => type === "observation"), {
+      type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -20,
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Level subscription replays the fixed thirty-second history", async () => {
+  const instance = await harness("replay-600");
+  const observations = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => observations.push(event) });
+    const deadline = Date.now() + 3000;
+    while (observations.filter(({ type }) => type === "observation").length < 600 && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    const replay = observations.filter(({ type }) => type === "observation").slice(0, 600);
+    assert.deepEqual({ count: replay.length, first: replay[0]?.sequence, last: replay.at(-1)?.sequence }, {
+      count: 600, first: 0, last: 599,
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Level subscription accepts in-window out-of-order observations", async () => {
+  const instance = await harness("out-of-order");
+  const observations = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => observations.push(event) });
+    const deadline = Date.now() + 3000;
+    while (observations.filter(({ type }) => type === "observation").length < 2 && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.deepEqual(observations.filter(({ type }) => type === "observation").slice(0, 2).map(({ sequence }) => sequence), [1, 0]);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Level subscription reports observations lost beyond replay", async () => {
+  const instance = await harness("replay-gap");
+  const observations = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => observations.push(event) });
+    const deadline = Date.now() + 3000;
+    while (!observations.some(({ type }) => type === "gap") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.deepEqual(observations.find(({ type }) => type === "gap"), { type: "gap", fromSequence: 0, toSequence: 4 });
+  } finally { await instance.cleanup(); }
+});
+
+test("Level transport failure does not change Bridge recording success", async () => {
+  const instance = await harness("level-disconnect");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge retries a failed Level connection with bounded backoff only while recording", async () => {
+  const instance = await harness("level-disconnect");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 380));
+    const subscriptionsWhileRecording = instance.events().filter((event) => event === "subscribe-levels").length;
+    await recording.cancel();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    const subscriptionsAfterCancel = instance.events().filter((event) => event === "subscribe-levels").length;
+    assert.equal(subscriptionsWhileRecording >= 2 && subscriptionsWhileRecording <= 4 && subscriptionsAfterCancel === subscriptionsWhileRecording, true);
+  } finally { await instance.cleanup(); }
+});
+
+test("measurement unavailability remains explicit on the Recorder boundary", async () => {
+  const instance = await harness("level-unavailable");
+  const observations = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => observations.push(event) });
+    const deadline = Date.now() + 3000;
+    while (!observations.some(({ type }) => type === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.equal(observations.some(({ type }) => type === "unavailable"), true);
   } finally { await instance.cleanup(); }
 });
 

@@ -1,7 +1,7 @@
 const { createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const net = require("node:net");
 
-const version = 2;
+const version = 3;
 function encode(fields) {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
   for (const field of fields) {

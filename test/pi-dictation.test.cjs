@@ -327,6 +327,39 @@ test("missing Level observations return the Dictation strip to the Silent line",
   }
 });
 
+test("the Dictation strip preserves truthful Level slot states", async (t) => {
+  const paths = testPaths("truthful-level-slots");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  const runtime = await createRuntime({ recorderArgs: "--growing-wav-one-chunk" });
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    const strip = runtime.widget();
+    strip.levelObservations.clear();
+    strip.startedAt = Date.now() - 110;
+    strip.observeLevel({ type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -10 });
+    strip.observeLevel({ type: "observation", sequence: 2, capturedAtMs: 100, dbfs: -31 });
+    const beforeDelayed = strip.levels.at(-1);
+    strip.observeLevel({ type: "observation", sequence: 1, capturedAtMs: 50, dbfs: -10 });
+    const afterDelayed = strip.levels.at(-1);
+    strip.observeLevel({ type: "unavailable", sequence: 1, capturedAtMs: 50 });
+    const conflictDiagnosis = strip.levelDiagnosis;
+
+    await t.test("a missing interval resets smoothing", () => {
+      assert.equal(beforeDelayed, 0);
+    });
+    await t.test("an in-window delayed observation recomputes visible history", () => {
+      assert.equal(afterDelayed > beforeDelayed, true);
+    });
+    await t.test("a conflicting duplicate is rejected diagnostically", () => {
+      assert.equal(conflictDiagnosis, "conflicting-duplicate");
+    });
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
 test("one Dictation strip transitions through processing, transcribing, ready, and auto-hide", async (t) => {
   const paths = testPaths("strip-lifecycle");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;

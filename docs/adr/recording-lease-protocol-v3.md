@@ -1,8 +1,8 @@
-# ADR: Recording lease protocol version 2
+# ADR: Recording lease and Level subscription protocol version 3
 
 ## Decision
 
-Bridge protocol version 2 makes each Bridge recording a capability-owned **Recording lease**. Pi generates a UUID recording identity and a cryptographically random 32-byte lease secret before `start`. The companion binds the lease to the authenticated client credential and retains only `SHA-256(lease secret)`.
+Bridge protocol version 3 makes each Bridge recording a capability-owned **Recording lease** and adds a separate authenticated Level subscription. Pi generates a UUID recording identity and a cryptographically random 32-byte lease secret before `start`. The companion binds the lease to the authenticated client credential and retains only `SHA-256(lease secret)`.
 
 Every request has an authenticated UUID request identity. The response HMAC covers the actual response status. Reusing a request identity with identical operation and payload is replay-safe; changing either returns `request-conflict` without applying an operation.
 
@@ -10,7 +10,7 @@ Every request has an authenticated UUID request identity. The response HMAC cove
 
 - `start { recordingId, leaseSecret, maxDurationMs }`
 - `status { recordingId, leaseSecret }`
-- `levels { recordingId, leaseSecret, afterSequence }`
+- `subscribe-levels { recordingId, leaseSecret, afterSequence }` opens the separate authenticated Level connection and streams replay bounds followed by retained and live observations
 - `stop { recordingId, leaseSecret }`
 - `fetch { recordingId, leaseSecret }`
 - `cancel { recordingId, leaseSecret }`
@@ -30,7 +30,7 @@ The active slot is occupied only by `recording` and `finalizing`. A completed re
 
 `ok` includes an idempotent replay of the already-reached state.
 
-| Current state | status | levels | stop | fetch | cancel | acknowledge |
+| Current state | status | subscribe-levels | stop | fetch | cancel | acknowledge |
 |---|---|---|---|---|---|---|
 | recording | ok | ok | result-ready | invalid-state | cancelled | invalid-state |
 | finalizing | ok | invalid-state | invalid-state | invalid-state | cancelled | invalid-state |
@@ -46,4 +46,4 @@ Cancellation is serialized with acknowledgement by the companion lock: whichever
 
 ## Consequences
 
-Protocol version 2 is intentionally incompatible with version 1. Stop and transfer are separate, so an ambiguous network failure can be reconciled through status and a repeated fetch. A result is acknowledged only after Pi validates its bounded length, SHA-256 digest, and PCM16 mono WAV structure.
+Protocol version 3 is intentionally incompatible with earlier versions. Stop and transfer are separate, so an ambiguous network failure can be reconciled through status and a repeated fetch. A result is acknowledged only after Pi validates its bounded length, SHA-256 digest, and PCM16 mono WAV structure.

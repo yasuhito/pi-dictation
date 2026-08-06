@@ -11,16 +11,30 @@ const execFileAsync = promisify(execFile);
 const LEVEL_INTERVAL_MS = 50;
 
 export type LevelObservation = {
+  type: "observation";
   sequence: number;
   capturedAtMs: number;
   dbfs: number | "silence";
+};
+
+export type LevelEvent = LevelObservation | {
+  type: "unavailable";
+  sequence: number;
+  capturedAtMs: number;
+} | {
+  type: "gap";
+  fromSequence: number;
+  toSequence: number;
+} | {
+  type: "transport";
+  state: "connected" | "unavailable";
 };
 
 export type RecorderStartOptions = {
   destination: string;
   maxDurationMs: number;
   signal: AbortSignal;
-  onLevel(observation: LevelObservation): void;
+  onLevel(event: LevelEvent): void;
 };
 
 export type Recording = {
@@ -309,13 +323,27 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
         levelReadInFlight = true;
         try {
           const samples = await input.readNewestInterval(LEVEL_INTERVAL_MS);
-          if (!samples.length || state !== "active") return;
-          startOptions.onLevel({
+          if (state !== "active") return;
+          if (!samples.length) {
+            startOptions.onLevel({
+              type: "unavailable",
+              sequence: currentSequence,
+              capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
+            });
+          } else {
+            startOptions.onLevel({
+              type: "observation",
+              sequence: currentSequence,
+              capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
+              dbfs: rmsDbfs(samples),
+            });
+          }
+        } catch {
+          if (state === "active") startOptions.onLevel({
+            type: "unavailable",
             sequence: currentSequence,
             capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
-            dbfs: rmsDbfs(samples),
           });
-        } catch {
         } finally {
           levelReadInFlight = false;
         }
