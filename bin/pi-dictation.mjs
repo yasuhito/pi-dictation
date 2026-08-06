@@ -21,6 +21,15 @@ import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
+import {
+  BridgeHostError,
+  hostStatus,
+  installHost,
+  remoteHealth,
+  remoteInfo,
+  remoteListener,
+  remotePrepare,
+} from "./bridge-host.mjs";
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
 const APP_NAME = "PiDictationBridge";
@@ -542,17 +551,12 @@ function exactObject(value, keys) {
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 }
 
-async function authenticatedHealth() {
-  const { p, receipt } = verifyInstallation();
-  const ready = readJsonOwned(p.preflight, "preflight receipt");
-  if (ready.product !== LABEL || ready.installId !== receipt.installId || ready.executableSha256 !== executableDigest(p)) {
-    throw new CliError("The installed build has not passed real-audio preflight.");
-  }
-  inspectSocket(p.socket);
-  const credential = readJsonOwned(p.credential, "bridge credential");
+async function healthAt(endpoint, credential) {
   const secret = Buffer.from(credential.secret, "base64");
   if (secret.length !== 32) throw new CliError("Refusing invalid bridge credential.");
-  const socket = net.createConnection({ path: p.socket });
+  const socket = endpoint.type === "unix"
+    ? net.createConnection({ path: endpoint.path })
+    : net.createConnection({ host: endpoint.host, port: endpoint.port });
   try {
     const challengeFrame = await readFrame(socket);
     const challengeMessage = challengeFrame.value;
@@ -586,14 +590,26 @@ async function authenticatedHealth() {
     if (!exactObject(health, ["permission", "defaultInputAvailable"]) || typeof health.defaultInputAvailable !== "boolean") {
       throw new CliError("The companion returned invalid health data.");
     }
-    console.log(`Protocol: ok (exact version ${PROTOCOL_VERSION})`);
-    console.log(`Authenticated health: ok`);
-    console.log(`Microphone permission: ${health.permission}`);
-    console.log(`Default input: ${health.defaultInputAvailable ? "available" : "unavailable"}`);
+    return health;
   } finally {
     socket.end();
     socket.destroy();
   }
+}
+
+async function authenticatedHealth() {
+  const { p, receipt } = verifyInstallation();
+  const ready = readJsonOwned(p.preflight, "preflight receipt");
+  if (ready.product !== LABEL || ready.installId !== receipt.installId || ready.executableSha256 !== executableDigest(p)) {
+    throw new CliError("The installed build has not passed real-audio preflight.");
+  }
+  inspectSocket(p.socket);
+  const credential = readJsonOwned(p.credential, "bridge credential");
+  const health = await healthAt({ type: "unix", path: p.socket }, credential);
+  console.log(`Protocol: ok (exact version ${PROTOCOL_VERSION})`);
+  console.log(`Authenticated health: ok`);
+  console.log(`Microphone permission: ${health.permission}`);
+  console.log(`Default input: ${health.defaultInputAvailable ? "available" : "unavailable"}`);
 }
 
 function build(args) {
@@ -607,7 +623,7 @@ function build(args) {
 }
 
 function usage() {
-  console.log("Usage: pi-dictation bridge <build|install|preflight|health>");
+  console.log("Usage: pi-dictation bridge <build|install [ssh-alias]|preflight|health|status ssh-alias>");
 }
 
 async function main() {
@@ -618,8 +634,14 @@ async function main() {
   }
   if (command === "build") return build(args);
   if (command === "install" && args.length === 0) return install();
+  if (command === "install" && args.length >= 1) return installHost(args[0], args.slice(1));
+  if (command === "status" && args.length === 1) return hostStatus(args[0]);
   if (command === "preflight" && args.length === 0) return preflight();
   if (command === "health" && args.length === 0) return authenticatedHealth();
+  if (command === "remote-info" && args.length === 0) return remoteInfo();
+  if (command === "remote-prepare" && args.length === 2) return remotePrepare(args[0], args[1]);
+  if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
+  if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);
   usage();
   throw new CliError("Unknown bridge command.");
 }
@@ -627,7 +649,7 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  const message = error instanceof CliError ? error.message : "Pi Dictation Bridge failed unexpectedly.";
+  const message = error instanceof CliError || error instanceof BridgeHostError ? error.message : "Pi Dictation Bridge failed unexpectedly.";
   console.error(`Error: ${message}`);
   process.exitCode = 1;
 }

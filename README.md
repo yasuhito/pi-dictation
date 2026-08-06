@@ -167,6 +167,26 @@ Recorder configuration has no environment override. The remaining runtime settin
 
 Environment variables take precedence over the configuration file. The package-specific `PI_DICTATION_OPENAI_API_KEY` takes precedence over `OPENAI_API_KEY` when both are set.
 
+## Install an SSH bridge
+
+After installing and preflighting the native Mac companion, install a bridge by using the SSH alias you already use for the Pi host:
+
+```bash
+pi-dictation bridge install my-pi
+pi-dictation bridge status my-pi
+```
+
+Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently.
+
+A TCP listener is never selected automatically. If the SSH server cannot forward Unix sockets, explicitly opt in to one exact loopback bind:
+
+```bash
+pi-dictation bridge install my-pi --transport tcp --allow-loopback --bind 127.0.0.1:43123
+# or: --bind '[::1]:43123'
+```
+
+Wildcard and non-loopback binds are refused. The installer does not install or update packages remotely; an incompatible remote package produces the exact `npm install` command needed before rerunning the same install.
+
 ## Safety
 
 Pi Dictation:

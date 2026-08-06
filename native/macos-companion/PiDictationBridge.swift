@@ -185,11 +185,11 @@ private func requestPermissionIfNeeded() -> AVAuthorizationStatus {
     return status
 }
 
-private func fixedPaths() -> (root: String, runtime: String, socket: String, credential: String) {
+private func fixedPaths() -> (root: String, runtime: String, socket: String, credential: String, hostCredentials: String) {
     let home = NSHomeDirectory()
     let root = home + "/Library/Application Support/pi-dictation/bridge"
     let runtime = home + "/Library/Caches/pi-dictation/bridge"
-    return (root, runtime, runtime + "/companion.sock", root + "/credential.json")
+    return (root, runtime, runtime + "/companion.sock", root + "/credential.json", root + "/hosts")
 }
 
 private func writeExclusive(_ data: Data, to path: String) throws {
@@ -252,6 +252,35 @@ private func readCredential(_ path: String) throws -> Credential {
           let secret = Data(base64Encoded: credential.secret),
           secret.count == 32 else { throw CompanionFailure.invalidCredential }
     return credential
+}
+
+private func readCredentials(primary: String, hosts: String) throws -> [String: Credential] {
+    let primaryCredential = try readCredential(primary)
+    var credentials = [primaryCredential.id: primaryCredential]
+    var hostDirectory = stat()
+    if lstat(hosts, &hostDirectory) != 0 {
+        guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
+        return credentials
+    }
+    try verifyDirectory(hosts)
+    let names = try FileManager.default.contentsOfDirectory(atPath: hosts)
+    for name in names {
+        guard name.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil else {
+            throw CompanionFailure.unsafeStorage
+        }
+        let directory = hosts + "/" + name
+        try verifyDirectory(directory)
+        let credentialPath = directory + "/credential.json"
+        var credentialInfo = stat()
+        if lstat(credentialPath, &credentialInfo) != 0 {
+            guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
+            continue
+        }
+        let credential = try readCredential(credentialPath)
+        guard credentials[credential.id] == nil else { throw CompanionFailure.invalidCredential }
+        credentials[credential.id] = credential
+    }
+    return credentials
 }
 
 private func executableDigest() throws -> String {
@@ -383,8 +412,7 @@ private func exactKeys(_ object: [String: Any], _ keys: Set<String>) -> Bool {
     Set(object.keys) == keys
 }
 
-private func handleHealth(_ descriptor: Int32, credential: Credential) throws {
-    guard let secret = Data(base64Encoded: credential.secret) else { throw CompanionFailure.invalidCredential }
+private func handleHealth(_ descriptor: Int32, credentials: [String: Credential]) throws {
     let challenge = try randomChallenge()
     try writeFrame(descriptor, object: [
         "type": "challenge", "version": protocolVersion, "challenge": challenge.base64EncodedString()
@@ -395,7 +423,9 @@ private func handleHealth(_ descriptor: Int32, credential: Credential) throws {
     guard exactKeys(request, required),
           request["type"] as? String == "request",
           request["version"] as? Int == protocolVersion,
-          request["credentialId"] as? String == credential.id,
+          let credentialId = request["credentialId"] as? String,
+          let credential = credentials[credentialId],
+          let secret = Data(base64Encoded: credential.secret),
           let requestId = request["requestId"] as? String,
           UUID(uuidString: requestId) != nil,
           request["operation"] as? String == "health",
@@ -494,7 +524,7 @@ private func serve() throws {
     try verifyDirectory(paths.root)
     try verifyDirectory(paths.runtime)
     try verifyPreflightReceipt(root: paths.root)
-    let credential = try readCredential(paths.credential)
+    let credentials = try readCredentials(primary: paths.credential, hosts: paths.hostCredentials)
     try removeStaleSocketIfSafe(path: paths.socket)
     let listener = try makeUnixListener(path: paths.socket)
     signal(SIGTERM, SIG_IGN)
@@ -522,7 +552,7 @@ private func serve() throws {
         if client < 0 { continue }
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        do { try handleHealth(client, credential: credential) } catch { }
+        do { try handleHealth(client, credentials: credentials) } catch { }
         shutdown(client, SHUT_RDWR)
         Darwin.close(client)
     }
