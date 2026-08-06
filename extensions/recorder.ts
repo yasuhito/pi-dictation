@@ -2,8 +2,10 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { open, rename, rm, stat } from "node:fs/promises";
 import { promisify } from "node:util";
+import type { RecorderConfig } from "./config.js";
 import { GrowingPcm16WavInput } from "./live-level.js";
 import { shellQuote } from "./shell.js";
+import { createBridgeRecorder } from "./bridge-recorder.js";
 
 const execFileAsync = promisify(execFile);
 const LEVEL_INTERVAL_MS = 50;
@@ -35,8 +37,7 @@ export type RecorderErrorCode =
   | "duration-limit"
   | "invalid-audio"
   | "recorder-unavailable"
-  | "recording-failed"
-  | "unsupported-recorder";
+  | "recording-failed";
 
 const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   cancelled: "Recording was cancelled.",
@@ -44,7 +45,6 @@ const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
   "recorder-unavailable": "No supported local recorder is available.",
   "recording-failed": "Voice recording stopped unexpectedly.",
-  "unsupported-recorder": "This recorder type is not available yet.",
 };
 
 export class RecorderError extends Error {
@@ -188,7 +188,7 @@ function rmsDbfs(samples: Int16Array): number | "silence" {
   return 20 * Math.log10(Math.sqrt(sum / samples.length));
 }
 
-async function validatePcm16MonoWav(path: string): Promise<void> {
+export async function validatePcm16MonoWav(path: string): Promise<void> {
   const size = (await stat(path)).size;
   if (size < 44) throw new RecorderError("invalid-audio");
   const handle = await open(path, "r");
@@ -406,7 +406,10 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
   };
 }
 
-export function createRecorder(config: { type: "local"; command?: string } | { type: "bridge" }, options: Omit<LocalRecorderOptions, "command"> = {}): Recorder {
+export function createRecorder(
+  config: RecorderConfig,
+  options: Omit<LocalRecorderOptions, "command"> = {}
+): Recorder {
   if (config.type === "local") return createLocalRecorder({ ...options, command: config.command });
-  return { async start() { throw new RecorderError("unsupported-recorder"); } };
+  return createBridgeRecorder(config);
 }

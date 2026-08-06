@@ -11,15 +11,17 @@ export const DEFAULT_TIMEOUT_MS = 120000;
 export const DEFAULT_MAX_RECORDING_MS = 10 * 60 * 1000;
 export const DEFAULT_SPINNER = "arc";
 
-export type RecorderConfig =
-  | { type: "local"; command?: string }
-  | {
-      type: "bridge";
-      endpoint:
-        | { type: "unix"; path: string }
-        | { type: "tcp"; host: "127.0.0.1" | "::1"; port: number };
-      credentialFile: string;
-    };
+export type LocalRecorderConfig = { type: "local"; command?: string };
+
+export type BridgeRecorderConfig = {
+  type: "bridge";
+  endpoint:
+    | { type: "unix"; path: string }
+    | { type: "tcp"; host: "127.0.0.1" | "::1"; port: number };
+  credentialFile: string;
+};
+
+export type RecorderConfig = LocalRecorderConfig | BridgeRecorderConfig;
 
 export type DictationConfigFile = {
   $schema?: string;

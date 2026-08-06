@@ -187,6 +187,12 @@ pi-dictation bridge install my-pi --transport tcp --allow-loopback --bind 127.0.
 
 Wildcard and non-loopback binds are refused. The installer does not install or update packages remotely; an incompatible remote package produces the exact `npm install` command needed before rerunning the same install.
 
+### Bridge smoke test
+
+1. On the Mac, confirm `pi-dictation bridge status my-pi` reports the tunnel, listener, and authenticated health as ready.
+2. In an interactive Pi session on `my-pi`, run `/dictate`, speak a recognizable phrase into the Mac microphone, then run `/dictate` again.
+3. Confirm the phrase is inserted into Pi. A successful stop means Pi authenticated the companion, bounded and verified the complete WAV, transcribed it on the Pi host, acknowledged Mac cleanup, and removed its own temporary audio.
+
 ## Safety
 
 Pi Dictation:

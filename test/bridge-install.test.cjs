@@ -140,6 +140,7 @@ test("tunnel configuration reuses required alias policy while disabling unrelate
     const tunnel = JSON.parse(readFileSync(join(host, "tunnel.json"), "utf8"));
     const values = tunnel.sshArguments;
     await t.test("uses an isolated configuration with forwarding-only behavior", () => assert.deepEqual(values.filter((value) => ["/dev/null", "-N", "-T", "RemoteCommand=none", "ForwardAgent=no", "ForwardX11=no", "ControlMaster=no"].includes(value)), ["/dev/null", "RemoteCommand=none", "ForwardAgent=no", "ForwardX11=no", "ControlMaster=no", "-N", "-T"]));
+    await t.test("preserves the one explicit remote forward", () => assert.deepEqual(values.filter((value) => value === "-R" || value.startsWith("ClearAllForwardings=")), ["-R"]));
     await t.test("retains strict host-key verification", () => assert.ok(values.includes("StrictHostKeyChecking=true")));
     await t.test("retains ProxyJump routing without enabling unrelated forwarding", () => assert.match(values.find((value) => value.startsWith("ProxyCommand=")), /bastion/));
   } finally { rmSync(f.home, { recursive: true, force: true }); }

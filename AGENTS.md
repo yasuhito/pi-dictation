@@ -9,6 +9,11 @@
 
 - Backward compatibility is not a project constraint. Prefer the cleanest current interface and configuration, even when this requires existing users to migrate.
 
+## macOS verification
+
+- For issues requiring macOS validation, use `ssh mac` and perform every automatable setup, build, test, and diagnostic step on the Mac yourself.
+- Ask the human only for actions that require physical presence or macOS UI interaction, such as speaking into the microphone or granting permission. Give the exact action and wait condition when requesting it.
+
 ## Agent skills
 
 ### Issue tracker

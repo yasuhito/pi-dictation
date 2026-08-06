@@ -253,7 +253,7 @@ function resolvedTunnelArguments(alias, transport, companionSocket) {
   arguments_.push(
     "-o", "RequestTTY=no", "-o", "RemoteCommand=none", "-o", "ForwardAgent=no",
     "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ControlMaster=no",
-    "-o", "ControlPath=none", "-o", "ControlPersist=no", "-o", "ClearAllForwardings=yes",
+    "-o", "ControlPath=none", "-o", "ControlPersist=no",
     "-o", "ExitOnForwardFailure=yes",
     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
     "-N", "-T", "-R", `${transport.remoteForward}:${companionSocket}`, hostname,

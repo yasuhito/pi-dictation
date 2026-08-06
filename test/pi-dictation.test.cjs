@@ -3,7 +3,8 @@ const { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
-const { spawn, spawnSync } = require("node:child_process");
+const { fork, spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { createJiti } = require("jiti");
 const { visibleWidth } = require("@earendil-works/pi-tui");
 
@@ -62,6 +63,7 @@ async function createRuntime({
   timeoutMs,
   maxRecordingMs = 10000,
   ansiTheme = false,
+  recorderConfig,
 } = {}) {
   const extension = await loadExtension();
   const commands = {};
@@ -78,7 +80,7 @@ async function createRuntime({
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
   try {
     const persisted = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-    persisted.recorder = {
+    persisted.recorder = recorderConfig || {
       type: "local",
       command: `${process.execPath} ${recorderPath} {file} ${recorderArgs}`.trim(),
     };
@@ -354,6 +356,39 @@ test("one Dictation strip transitions through processing, transcribing, ready, a
     await waitFor(() => runtime.widget() === undefined, 2000);
   } finally {
     await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("one simulated Bridge recording crosses the Pi command flow through transcription and cleanup", async (t) => {
+  const paths = { dir: mkdtempSync(join("/tmp", "pi-de-")) };
+  const socketDirectory = join(paths.dir, "socket");
+  require("node:fs").mkdirSync(socketDirectory, { mode: 0o700 });
+  const socket = join(socketDirectory, "listener.sock");
+  const credentialFile = join(paths.dir, "credential.json");
+  const events = join(paths.dir, "events");
+  const recordingDirectoryFile = join(paths.dir, "recording-directory");
+  const credential = { id: "88888888-8888-4888-8888-888888888888", secret: Buffer.alloc(32, 14).toString("base64") };
+  writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
+  const companion = fork(join(packageRoot, "test", "fixtures", "fake-bridge-companion.cjs"), [
+    socket, Buffer.from(JSON.stringify(credential)).toString("base64"), "valid", events,
+  ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await once(companion, "message");
+  const runtime = await createRuntime({
+    recorderConfig: { type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile },
+    transcribeCommand: `dirname {file} > '${recordingDirectoryFile}'; test -f {file}; printf bridge-ok`,
+  });
+  try {
+    await runtime.commands.dictate("", runtime.ctx);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    await runtime.commands.dictate("", runtime.ctx);
+    await t.test("pastes the Pi-side transcription", () => assert.equal(runtime.pasted(), "bridge-ok"));
+    await t.test("acknowledges validated audio for Mac cleanup", () => assert.match(readFileSync(events, "utf8"), /acknowledged/));
+    await t.test("deletes Pi temporary audio after transcription", () => assert.equal(existsSync(readFileSync(recordingDirectoryFile, "utf8").trim()), false));
+  } finally {
+    await runtime.shutdown();
+    companion.kill("SIGTERM");
+    await once(companion, "exit").catch(() => {});
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
