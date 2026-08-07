@@ -604,16 +604,16 @@ private final class RecordingManager {
         let requestKey = ownerId + ":" + requestId
         if busyStartRequests.contains(requestKey) { throw CompanionFailure.busy }
         let leaseHash = Data(SHA256.hash(data: leaseSecret))
-        if let existing = recordings[id] {
-            guard existing.ownerId == ownerId, constantTimeEqual(existing.leaseHash, leaseHash) else {
-                throw CompanionFailure.notFound
-            }
+        if let existing = recordings[id],
+           existing.ownerId == ownerId,
+           constantTimeEqual(existing.leaseHash, leaseHash) {
             return statusPayload(existing)
         }
         guard activeId == nil else {
             busyStartRequests.insert(requestKey)
             throw CompanionFailure.busy
         }
+        guard recordings[id] == nil else { throw CompanionFailure.notFound }
         guard maximumDurationMs >= 1000,
               maximumDurationMs <= 60 * 60 * 1000 else { throw CompanionFailure.failed }
 #if !PROTOCOL_TESTING

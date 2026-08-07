@@ -90,6 +90,12 @@ test("production companion rejects adversarial traffic without changing an unrel
     const start = await request(owner, "start", { ...lease, maxDurationMs: 60000 });
     await t.test("owner establishes the unrelated valid lease", () => assert.equal(start.status, "ok"));
 
+    const crossOwnerStart = await request(competitor, "start", { ...lease, maxDurationMs: 60000 });
+    const absentStart = await request(competitor, "start", { ...foreignLease, maxDurationMs: 60000 });
+    await t.test("cross-owner and absent starts are indistinguishable while the owner lease is active", () => {
+      assert.deepEqual([crossOwnerStart.status, absentStart.status], ["busy", "busy"]);
+    });
+
     for (const operation of ["health", "start", "status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
       const malformed = await rawRequest(competitor, operation, Buffer.from('{"unexpected":true,"unexpected":false}'));
       const ownerStatus = await request(owner, "status", lease);
