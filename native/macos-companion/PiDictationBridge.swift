@@ -11,7 +11,10 @@ private let protocolVersion = 2
 private let maximumFrameBytes = 64 * 1024
 private let challengeBytes = 32
 private let resultRetentionSeconds: TimeInterval = 10 * 60
-private let requestReceiptRetentionSeconds: TimeInterval = 20 * 60
+private let requestReceiptRetentionSeconds = resultRetentionSeconds
+private let validRequestOperations: Set<String> = [
+    "health", "start", "levels", "status", "stop", "fetch", "cancel", "acknowledge",
+]
 private let maximumObservationRequestReceipts = 256
 private let maximumControlRequestReceipts = 4096
 private let maximumRequestRegistryBytes = 32 * 1024 * 1024
@@ -516,16 +519,26 @@ private final class RecordingManager {
         pruneRequestReceiptsLocked()
         if let previous = requests[key] {
             guard previous.contentHash == contentHash else { throw CompanionFailure.requestConflict }
-            let deadline = Date().addingTimeInterval(30)
-            while requests[key]?.responseStatus == nil {
-                guard lock.wait(until: deadline) else { throw CompanionFailure.failed }
+            let leaseOperations = ["levels", "status", "stop", "fetch", "cancel", "acknowledge"]
+            if leaseOperations.contains(operation), !receiptLeaseExistsLocked(ownerId: ownerId, payload: payload) {
+                requests.removeValue(forKey: key)
+                do { try persistRequestReceiptsLocked() }
+                catch {
+                    requests[key] = previous
+                    throw error
+                }
+            } else {
+                let deadline = Date().addingTimeInterval(30)
+                while requests[key]?.responseStatus == nil {
+                    guard lock.wait(until: deadline) else { throw CompanionFailure.failed }
+                }
+                guard let completed = requests[key], let status = completed.responseStatus,
+                      let payload = completed.responsePayload,
+                      let object = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+                    throw CompanionFailure.failed
+                }
+                return (status, object)
             }
-            guard let completed = requests[key], let status = completed.responseStatus,
-                  let payload = completed.responsePayload,
-                  let object = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
-                throw CompanionFailure.failed
-            }
-            return (status, object)
         }
         let observationOperations = ["health", "levels", "status"]
         if !observationOperations.contains(operation) {
@@ -542,6 +555,15 @@ private final class RecordingManager {
             throw error
         }
         return nil
+    }
+
+    private func receiptLeaseExistsLocked(ownerId: String, payload: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let id = object["recordingId"] as? String,
+              let secretText = object["leaseSecret"] as? String,
+              let secret = Data(base64Encoded: secretText), secret.count == 32,
+              let current = recordings[id], current.ownerId == ownerId else { return false }
+        return constantTimeEqual(current.leaseHash, Data(SHA256.hash(data: secret)))
     }
 
     func recordResponse(ownerId: String, requestId: String, status: String, payload: [String: Any]) throws {
@@ -996,8 +1018,8 @@ private final class RecordingManager {
             let data = try readPrivateData(requestReceiptsPath, maximumBytes: maximumRequestRegistryBytes)
             let registry = try JSONDecoder().decode(PersistedRequestRegistry.self, from: data)
             guard registry.schemaVersion == 2 else { throw CompanionFailure.unsafeStorage }
-            let validOperations = ["health", "start", "levels", "status", "stop", "fetch", "cancel", "acknowledge"]
             let validStatuses = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed"]
+            var restoredKeys = Set<String>()
             for receipt in registry.receipts {
                 let key = receipt.ownerId + ":" + receipt.requestId
                 let responseShapeIsValid = receipt.responseStatus == nil && receipt.responsePayload == nil ||
@@ -1007,23 +1029,22 @@ private final class RecordingManager {
                 } ?? true
                 guard UUID(uuidString: receipt.ownerId) != nil,
                       UUID(uuidString: receipt.requestId) != nil,
-                      validOperations.contains(receipt.operation),
+                      validRequestOperations.contains(receipt.operation),
                       receipt.contentHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
                       receipt.receivedAt.isFinite,
                       receipt.receivedAt <= Date().timeIntervalSince1970 + 60,
                       responseShapeIsValid, responsePayloadIsValid,
                       receipt.responsePayload.map({ $0.count <= maximumFrameBytes }) ?? true,
-                      requests[key] == nil else { throw CompanionFailure.unsafeStorage }
-                requests[key] = receipt
+                      restoredKeys.insert(key).inserted else { throw CompanionFailure.unsafeStorage }
+                if receipt.responseStatus != nil { requests[key] = receipt }
             }
             let observationOperations = ["health", "levels", "status"]
             guard requests.values.filter({ observationOperations.contains($0.operation) }).count <= maximumObservationRequestReceipts,
                   requests.values.filter({ !observationOperations.contains($0.operation) }).count <= maximumControlRequestReceipts else {
                 throw CompanionFailure.unsafeStorage
             }
-            let restoredCount = requests.count
             pruneRequestReceiptsLocked()
-            if requests.count != restoredCount { try persistRequestReceiptsLocked() }
+            if requests.count != registry.receipts.count { try persistRequestReceiptsLocked() }
         }
         let metadataNames = names.filter {
             $0.range(of: "^recording-[0-9A-Fa-f-]{36}\\.json$", options: .regularExpression) != nil
@@ -1208,6 +1229,10 @@ private func handleRequest(
     recordings: RecordingManager
 ) throws {
     let request = try readAuthenticatedRequest(descriptor, credentials: credentials)
+    guard validRequestOperations.contains(request.operation) else {
+        try writeAuthenticatedResponse(descriptor, request: request, status: "failed", payloadObject: [:])
+        return
+    }
     let replay: (String, [String: Any])?
     do {
         replay = try recordings.register(ownerId: request.credential.id, requestId: request.requestId,

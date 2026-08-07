@@ -114,6 +114,26 @@ for (const operation of ["start", "status", "stop", "acknowledge", "cancel"]) {
   });
 }
 
+test("a deterministic local fetch write failure does not enter transport recovery", async (t) => {
+  const instance = await harness();
+  instance.startOptions.destination = join(resolve(instance.startOptions.destination, ".."), "missing", "recording.wav");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const startedAt = Date.now();
+    const error = await recording.stop().catch((value) => value);
+    const elapsed = Date.now() - startedAt;
+    await t.test("returns the deterministic recording failure classification", () => {
+      assert.equal(error.code, "recording-failed");
+    });
+    await t.test("fails without consuming the recovery window", () => {
+      assert.equal(elapsed < 1000, true);
+    });
+    await t.test("does not retry the successful remote fetch", () => {
+      assert.equal(instance.events().filter((event) => event === "fetch").length, 1);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("an interrupted Bridge fetch restarts from byte zero", async (t) => {
   const instance = await harness("fetch-interrupted-once");
   try {

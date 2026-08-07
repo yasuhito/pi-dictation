@@ -24,6 +24,9 @@ let activeId = persisted.activeId;
 let unappliedStopFailures = 0;
 let unappliedStopRequestId;
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
+const requestReceiptRetentionMs = retentionMs;
+const knownOperations = new Set(["health", "start", "levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
+const leaseOperations = new Set(["levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
 
 function audioPath(recording) { return stateFile ? `${stateFile}.${recording.id}.wav` : undefined; }
 function writeAudio(recording) {
@@ -79,6 +82,16 @@ function persistState() {
   writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
   renameSync(temporary, stateFile);
 }
+
+let restoredReplayChanged = false;
+for (const [key, receipt] of replay) {
+  if (typeof receipt === "string" || !Number.isFinite(receipt.receivedAt) ||
+      receipt.receivedAt < Date.now() - requestReceiptRetentionMs) {
+    replay.delete(key);
+    restoredReplayChanged = true;
+  }
+}
+if (restoredReplayChanged) persistState();
 
 for (const recording of recordings.values()) scheduleRetention(recording);
 
@@ -200,19 +213,29 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       }
       const replayKey = `${credential.id}:${request.requestId}`;
       const content = createHash("sha256").update(request.operation).update(Buffer.from([0])).update(payloadBytes).digest("hex");
+      for (const [key, receipt] of replay) {
+        if (typeof receipt !== "string" && receipt.receivedAt < Date.now() - requestReceiptRetentionMs) replay.delete(key);
+      }
       const previous = replay.get(replayKey);
       const previousContent = typeof previous === "string" ? previous : previous?.content;
       let status = "ok";
       let responsePayload = {};
       let audio;
-      if (previousContent && previousContent !== content) {
+      if (!knownOperations.has(request.operation)) {
+        status = "failed";
+      } else if (previousContent && previousContent !== content) {
         status = "request-conflict";
-      } else if (previous?.status) {
+      } else if (previous?.status && (!leaseOperations.has(request.operation) || owned(credential.id, payload))) {
         status = previous.status;
         responsePayload = previous.payload;
         if (request.operation === "fetch" && status === "ok") audio = owned(credential.id, payload)?.audio;
       } else {
         replay.set(replayKey, content);
+        if (mode === "crash-before-fetch-dispatch" && request.operation === "fetch") {
+          persistState();
+          socket.destroy();
+          return;
+        }
         if (request.operation === "start") {
           const existing = recordings.get(payload.recordingId);
           const leaseHash = typeof payload.leaseSecret === "string" ? digestSecret(payload.leaseSecret) : Buffer.alloc(0);
@@ -312,8 +335,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else status = "failed";
         }
       }
-      if (status !== "request-conflict") {
-        replay.set(replayKey, { content, operation: request.operation, status, payload: responsePayload });
+      if (knownOperations.has(request.operation) && status !== "request-conflict") {
+        replay.set(replayKey, {
+          content, operation: request.operation, status, payload: responsePayload,
+          receivedAt: typeof previous === "object" && Number.isFinite(previous.receivedAt) ? previous.receivedAt : Date.now(),
+        });
         const observationOperations = new Set(["health", "levels", "status"]);
         const observations = [...replay].filter(([, value]) => observationOperations.has(value.operation));
         while (observations.length > 256) replay.delete(observations.shift()[0]);

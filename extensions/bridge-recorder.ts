@@ -275,6 +275,11 @@ function leasePayload(recordingId: string, leaseSecret: string): { recordingId: 
   return { recordingId, leaseSecret };
 }
 
+async function localFileOperation<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new RecorderError("recording-failed", { cause: error }); }
+}
+
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolveWait, reject) => {
     if (signal.aborted) {
@@ -417,7 +422,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
               let response: ResponseFrame | undefined;
               try {
                 ensureNotCancelled();
-                await rm(partial, { force: true });
+                await localFileOperation(() => rm(partial, { force: true }));
                 response = await authenticatedRequest(
                   config, credential, fetchRequestId, "fetch", owned, recoverySignal, FETCH_NO_PROGRESS_TIMEOUT_MS
                 );
@@ -429,19 +434,19 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                     typeof metadata.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(metadata.sha256) ||
                     !["stopped", "duration-limit"].includes(String(metadata.completion))) throw new BridgeAudioError();
                 if (metadata.completion === "duration-limit") resultCompletion = "duration-limit";
-                handle = await open(partial, "wx", 0o600);
+                handle = await localFileOperation(() => open(partial, "wx", 0o600));
                 const digest = createHash("sha256");
                 let remaining = Number(metadata.length);
                 while (remaining > 0) {
                   ensureNotCancelled();
                   const chunk = await response.reader.readExactly(Math.min(64 * 1024, remaining));
-                  await handle.write(chunk);
+                  await localFileOperation(() => handle!.write(chunk));
                   digest.update(chunk);
                   remaining -= chunk.length;
                 }
                 await response.reader.requireEnd();
-                await handle.sync();
-                await handle.close();
+                await localFileOperation(() => handle!.sync());
+                await localFileOperation(() => handle!.close());
                 handle = undefined;
                 if (digest.digest("hex") !== metadata.sha256) throw new BridgeAudioError();
                 fetched = true;

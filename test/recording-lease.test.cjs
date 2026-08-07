@@ -166,6 +166,53 @@ test("authenticated request receipts remain replay-safe across companion restart
   } finally { await cleanup(instance); }
 });
 
+test("startup discards an orphaned pending fetch receipt so replay can execute", async () => {
+  const instance = await persistentSetup("crash-before-fetch-dispatch");
+  const owner = instance.credentials[0];
+  const lease = capability();
+  const fetchRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    await request(instance.socket, owner, "fetch", lease, fetchRequestId).catch(() => {});
+    await restart(instance);
+    const recovered = await request(instance.socket, owner, "fetch", lease, fetchRequestId);
+    assert.equal(recovered.body.length, recovered.payload.length);
+  } finally { await cleanup(instance); }
+});
+
+test("an authenticated unknown operation cannot poison persisted receipts", async () => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const requestId = randomUUID();
+  const lease = capability();
+  try {
+    await request(instance.socket, owner, "unknown", lease, requestId);
+    await restart(instance);
+    const reused = await request(instance.socket, owner, "status", lease, requestId);
+    assert.equal(reused.status, "not-found");
+  } finally { await cleanup(instance); }
+});
+
+test("a cached terminal response is not replayed after its lease tombstone is purged", async () => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const lease = capability();
+  const statusRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    await request(instance.socket, owner, "acknowledge", lease);
+    await request(instance.socket, owner, "status", lease, statusRequestId);
+    await new Promise((resolvePurge) => {
+      instance.child.once("message", resolvePurge);
+      instance.child.send({ type: "purge", recordingId: lease.recordingId });
+    });
+    const replayed = await request(instance.socket, owner, "status", lease, statusRequestId);
+    assert.equal(replayed.status, "not-found");
+  } finally { await cleanup(instance); }
+});
+
 test("control request receipts survive observation churn and preserve non-success outcomes", async (t) => {
   const instance = await setup();
   const [owner, competitor] = instance.credentials;
