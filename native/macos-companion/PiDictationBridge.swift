@@ -11,6 +11,8 @@ private let protocolVersion = 2
 private let maximumFrameBytes = 64 * 1024
 private let challengeBytes = 32
 private let resultRetentionSeconds: TimeInterval = 10 * 60
+private let requestReceiptRetentionSeconds: TimeInterval = 20 * 60
+private let maximumRequestReceipts = 256
 
 private struct Credential: Decodable {
     let id: String
@@ -440,6 +442,19 @@ private struct PersistedRecording: Codable {
     var terminalAt: TimeInterval?
 }
 
+private struct PersistedRequestReceipt: Codable {
+    let ownerId: String
+    let requestId: String
+    let contentHash: String
+    let receivedAt: TimeInterval
+    var outcome: String?
+}
+
+private struct PersistedRequestRegistry: Codable {
+    let schemaVersion: Int
+    let receipts: [PersistedRequestReceipt]
+}
+
 private final class BridgeRecording {
     let id: String
     let ownerId: String
@@ -478,8 +493,7 @@ private final class RecordingManager {
     private let lock = NSLock()
     private var recordings: [String: BridgeRecording] = [:]
     private var activeId: String?
-    private var requests: [String: Data] = [:]
-    private var busyStartRequests: Set<String> = []
+    private var requests: [String: PersistedRequestReceipt] = [:]
 
     init(runtime: String) throws {
         self.runtime = runtime
@@ -491,22 +505,31 @@ private final class RecordingManager {
         digest.update(data: Data(operation.utf8))
         digest.update(data: Data([0]))
         digest.update(data: payload)
-        let content = Data(digest.finalize())
+        let contentHash = Data(digest.finalize()).hex
         let key = ownerId + ":" + requestId
         lock.lock()
         defer { lock.unlock() }
+        pruneRequestReceiptsLocked()
         if let previous = requests[key] {
-            guard constantTimeEqual(previous, content) else { throw CompanionFailure.requestConflict }
+            guard previous.contentHash == contentHash else { throw CompanionFailure.requestConflict }
             return
         }
-        requests[key] = content
+        requests[key] = PersistedRequestReceipt(
+            ownerId: ownerId, requestId: requestId, contentHash: contentHash,
+            receivedAt: Date().timeIntervalSince1970, outcome: nil
+        )
+        do { try persistRequestReceiptsLocked() }
+        catch {
+            requests.removeValue(forKey: key)
+            throw error
+        }
     }
 
     func start(id: String, ownerId: String, requestId: String, leaseSecret: Data, maximumDurationMs: Int) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
         let requestKey = ownerId + ":" + requestId
-        if busyStartRequests.contains(requestKey) { throw CompanionFailure.busy }
+        if requests[requestKey]?.outcome == "busy" { throw CompanionFailure.busy }
         let leaseHash = Data(SHA256.hash(data: leaseSecret))
         if let existing = recordings[id] {
             guard existing.ownerId == ownerId, constantTimeEqual(existing.leaseHash, leaseHash) else {
@@ -515,7 +538,15 @@ private final class RecordingManager {
             return statusPayload(existing)
         }
         guard activeId == nil else {
-            busyStartRequests.insert(requestKey)
+            guard var receipt = requests[requestKey] else { throw CompanionFailure.failed }
+            receipt.outcome = "busy"
+            requests[requestKey] = receipt
+            do { try persistRequestReceiptsLocked() }
+            catch {
+                receipt.outcome = nil
+                requests[requestKey] = receipt
+                throw error
+            }
             throw CompanionFailure.busy
         }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
@@ -645,13 +676,14 @@ private final class RecordingManager {
             return statusPayload(current)
         }
         guard ["recording", "finalizing", "result-ready"].contains(current.state) else { throw CompanionFailure.invalidState }
+        let terminalAt = Date().timeIntervalSince1970
+        try persistTransitionLocked(current, state: "cancelled", terminalAt: terminalAt)
         current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         current.recorder?.stop()
         current.recorder = nil
         if activeId == current.id { activeId = nil }
         current.state = "cancelled"; current.length = nil; current.sha256 = nil
-        current.terminalAt = Date().timeIntervalSince1970
-        try persistLocked(current)
+        current.terminalAt = terminalAt
         do { try removeAudioLocked(current) }
         catch { scheduleCleanupRetryLocked(current); throw error }
         scheduleRetentionLocked(current)
@@ -668,10 +700,11 @@ private final class RecordingManager {
             return statusPayload(current)
         }
         guard current.state == "result-ready" else { throw CompanionFailure.invalidState }
+        let terminalAt = Date().timeIntervalSince1970
+        try persistTransitionLocked(current, state: "acknowledged", terminalAt: terminalAt)
         current.retentionTimer?.cancel()
         current.state = "acknowledged"; current.length = nil; current.sha256 = nil
-        current.terminalAt = Date().timeIntervalSince1970
-        try persistLocked(current)
+        current.terminalAt = terminalAt
         do { try removeAudioLocked(current) }
         catch { scheduleCleanupRetryLocked(current); throw error }
         scheduleRetentionLocked(current)
@@ -850,18 +883,55 @@ private final class RecordingManager {
     }
 
     private func metadataPath(_ id: String) -> String { runtime + "/recording-" + id + ".json" }
+    private var requestReceiptsPath: String { runtime + "/request-receipts.json" }
 
-    private func persistLocked(_ current: BridgeRecording) throws {
-        let value = PersistedRecording(
+    private func persistedValue(_ current: BridgeRecording) -> PersistedRecording {
+        PersistedRecording(
             schemaVersion: 1, id: current.id, ownerId: current.ownerId,
             leaseHash: current.leaseHash.base64EncodedString(), state: current.state,
             length: current.length, sha256: current.sha256,
             completion: ["recording", "finalizing", "result-ready"].contains(current.state) ? current.completion : nil,
             terminalAt: current.terminalAt
         )
+    }
+
+    private func persistTransitionLocked(_ current: BridgeRecording, state: String, terminalAt: TimeInterval) throws {
+        let value = PersistedRecording(
+            schemaVersion: 1, id: current.id, ownerId: current.ownerId,
+            leaseHash: current.leaseHash.base64EncodedString(), state: state,
+            length: nil, sha256: nil, completion: nil, terminalAt: terminalAt
+        )
+        try persistLocked(value, id: current.id)
+    }
+
+    private func persistLocked(_ current: BridgeRecording) throws {
+        try persistLocked(persistedValue(current), id: current.id)
+    }
+
+    private func persistLocked(_ value: PersistedRecording, id: String) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        try atomicWrite(encoder.encode(value), to: metadataPath(current.id))
+        try atomicWrite(encoder.encode(value), to: metadataPath(id))
+    }
+
+    private func pruneRequestReceiptsLocked() {
+        let cutoff = Date().timeIntervalSince1970 - requestReceiptRetentionSeconds
+        requests = requests.filter { $0.value.receivedAt >= cutoff }
+        if requests.count > maximumRequestReceipts {
+            let retained = requests.values.sorted { $0.receivedAt > $1.receivedAt }.prefix(maximumRequestReceipts)
+            requests = Dictionary(uniqueKeysWithValues: retained.map { ($0.ownerId + ":" + $0.requestId, $0) })
+        }
+    }
+
+    private func persistRequestReceiptsLocked() throws {
+        pruneRequestReceiptsLocked()
+        let value = PersistedRequestRegistry(
+            schemaVersion: 1,
+            receipts: requests.values.sorted { $0.receivedAt < $1.receivedAt }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try atomicWrite(encoder.encode(value), to: requestReceiptsPath)
     }
 
     private func atomicWrite(_ data: Data, to path: String) throws {
@@ -885,11 +955,34 @@ private final class RecordingManager {
         let manager = FileManager.default
         let names = try manager.contentsOfDirectory(atPath: runtime)
         var removedTemporary = false
-        for name in names where name.range(of: "^recording-[0-9A-Fa-f-]{36}\\.json\\.tmp-[0-9A-Fa-f-]{36}$", options: .regularExpression) != nil {
+        for name in names where
+            name.range(of: "^recording-[0-9A-Fa-f-]{36}\\.json\\.tmp-[0-9A-Fa-f-]{36}$", options: .regularExpression) != nil ||
+            name.range(of: "^request-receipts\\.json\\.tmp-[0-9A-Fa-f-]{36}$", options: .regularExpression) != nil {
             try manager.removeItem(atPath: runtime + "/" + name)
             removedTemporary = true
         }
         if removedTemporary { try syncRuntimeDirectory() }
+        if manager.fileExists(atPath: requestReceiptsPath) {
+            let data = try readPrivateData(requestReceiptsPath, maximumBytes: maximumFrameBytes)
+            let registry = try JSONDecoder().decode(PersistedRequestRegistry.self, from: data)
+            guard registry.schemaVersion == 1, registry.receipts.count <= maximumRequestReceipts else {
+                throw CompanionFailure.unsafeStorage
+            }
+            for receipt in registry.receipts {
+                let key = receipt.ownerId + ":" + receipt.requestId
+                guard UUID(uuidString: receipt.ownerId) != nil,
+                      UUID(uuidString: receipt.requestId) != nil,
+                      receipt.contentHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                      receipt.receivedAt.isFinite,
+                      receipt.receivedAt <= Date().timeIntervalSince1970 + 60,
+                      receipt.outcome == nil || receipt.outcome == "busy",
+                      requests[key] == nil else { throw CompanionFailure.unsafeStorage }
+                requests[key] = receipt
+            }
+            let restoredCount = requests.count
+            pruneRequestReceiptsLocked()
+            if requests.count != restoredCount { try persistRequestReceiptsLocked() }
+        }
         let metadataNames = names.filter {
             $0.range(of: "^recording-[0-9A-Fa-f-]{36}\\.json$", options: .regularExpression) != nil
         }
@@ -1049,6 +1142,14 @@ private func requestLease(_ payload: [String: Any]) throws -> (id: String, lease
     return (id, leaseSecret)
 }
 
+private func setSendTimeout(_ descriptor: Int32, seconds: Int) throws {
+    var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+    guard setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                     socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+        throw CompanionFailure.invalidSocket
+    }
+}
+
 private func streamFile(_ descriptor: Int32, url: URL) throws {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
@@ -1105,6 +1206,7 @@ private func handleRequest(
             guard exactKeys(request.payload, ["recordingId", "leaseSecret"]) else { throw CompanionFailure.invalidFrame }
             let owned = try requestLease(request.payload)
             let result = try recordings.fetch(id: owned.id, ownerId: request.credential.id, leaseSecret: owned.leaseSecret)
+            try setSendTimeout(descriptor, seconds: 10)
             try writeAuthenticatedResponse(descriptor, request: request, payloadObject: result.payload)
             try streamFile(descriptor, url: result.url)
         case "cancel":

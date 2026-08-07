@@ -1,4 +1,5 @@
 const { createHash, createHmac, randomBytes, timingSafeEqual } = require("node:crypto");
+const { existsSync, readFileSync, renameSync, rmSync, writeFileSync } = require("node:fs");
 const net = require("node:net");
 
 const endpoint = process.argv[2];
@@ -9,7 +10,7 @@ const eventFile = process.argv[5];
 const stateFile = process.argv[6];
 const protocolVersion = 2;
 let persisted = {};
-if (stateFile && require("node:fs").existsSync(stateFile)) persisted = JSON.parse(require("node:fs").readFileSync(stateFile, "utf8"));
+if (stateFile && existsSync(stateFile)) persisted = JSON.parse(readFileSync(stateFile, "utf8"));
 const recordings = new Map((persisted.recordings || []).map((value) => [value.id, {
   ...value,
   leaseHash: Buffer.from(value.leaseHash, "base64"),
@@ -20,6 +21,47 @@ const busyStarts = new Set(persisted.busyStarts || []);
 const sockets = new Set();
 const droppedResponses = new Set(persisted.droppedResponses || []);
 let activeId = persisted.activeId;
+const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
+
+function audioPath(recording) { return stateFile ? `${stateFile}.${recording.id}.wav` : undefined; }
+function writeAudio(recording) {
+  const path = audioPath(recording);
+  if (path && recording.audio) writeFileSync(path, recording.audio, { mode: 0o600 });
+}
+function removeAudio(recording) {
+  recording.audio = undefined;
+  const path = audioPath(recording);
+  if (path) rmSync(path, { force: true });
+}
+function scheduleRetention(recording) {
+  if (!recording.terminalAt || !["result-ready", "acknowledged", "cancelled", "expired", "failed"].includes(recording.state)) return;
+  const expectedState = recording.state;
+  const delay = Math.max(0, recording.terminalAt + retentionMs - Date.now());
+  const timer = setTimeout(() => {
+    if (recording.state !== expectedState) return;
+    if (recording.state === "result-ready") {
+      recording.state = "expired";
+      recording.terminalAt += retentionMs;
+      removeAudio(recording);
+      persistState();
+      scheduleRetention(recording);
+    } else {
+      recordings.delete(recording.id);
+      if (activeId === recording.id) activeId = undefined;
+      removeAudio(recording);
+      persistState();
+    }
+  }, delay);
+  timer.unref();
+}
+function markResultReady(recording, completion = recording.completion) {
+  recording.completion = completion;
+  recording.state = "result-ready";
+  recording.terminalAt = Date.now();
+  if (activeId === recording.id) activeId = undefined;
+  persistState();
+  scheduleRetention(recording);
+}
 
 function persistState() {
   if (!stateFile) return;
@@ -32,16 +74,20 @@ function persistState() {
     replay: [...replay], busyStarts: [...busyStarts], droppedResponses: [...droppedResponses], activeId,
   };
   const temporary = `${stateFile}.tmp`;
-  require("node:fs").writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
-  require("node:fs").renameSync(temporary, stateFile);
+  writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
+  renameSync(temporary, stateFile);
 }
+
+for (const recording of recordings.values()) scheduleRetention(recording);
 
 if (mode === "restart-recovery") {
   for (const recording of recordings.values()) {
     if (!["recording", "finalizing"].includes(recording.state)) continue;
     recording.state = "failed";
-    recording.audio = undefined;
+    recording.terminalAt = Date.now();
+    removeAudio(recording);
     if (activeId === recording.id) activeId = undefined;
+    scheduleRetention(recording);
   }
   persistState();
 }
@@ -167,13 +213,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             const recording = { id: payload.recordingId, owner: credential.id, leaseHash, state: "recording", audio: wav(), completion: "stopped" };
             recordings.set(recording.id, recording);
             activeId = recording.id;
+            writeAudio(recording);
             if (!["companion-duration-disabled", "pi-start-delay"].includes(mode)) {
               const companionDuration = mode === "mac-duration-early" ? Math.max(1, Math.floor(payload.maxDurationMs / 2)) : payload.maxDurationMs;
               const durationTimer = setTimeout(() => {
                 if (recording.state !== "recording") return;
-                recording.completion = "duration-limit";
-                recording.state = "result-ready";
-                if (activeId === recording.id) activeId = undefined;
+                markResultReady(recording, "duration-limit");
               }, companionDuration);
               durationTimer.unref();
             }
@@ -194,8 +239,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
               recording.state = "finalizing";
               setTimeout(() => {
                 if (recording.state !== "finalizing") return;
-                recording.state = "result-ready";
-                if (activeId === recording.id) activeId = undefined;
+                markResultReady(recording);
               }, 50);
               throw new Error("ambiguous stop");
             }
@@ -206,13 +250,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
                 recording.state = "finalizing";
                 const finalizer = setTimeout(() => {
                   if (recording.state !== "finalizing") return;
-                  recording.state = "result-ready";
-                  if (activeId === recording.id) activeId = undefined;
+                  markResultReady(recording);
                 }, 2000);
                 finalizer.unref();
               } else {
-                recording.state = "result-ready";
-                if (activeId === recording.id) activeId = undefined;
+                markResultReady(recording);
               }
             }
             if (recording.state === "finalizing" && !initiatedFinalization) status = "invalid-state";
@@ -232,15 +274,19 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else if (request.operation === "acknowledge") {
             if (mode === "ack-failure") throw new Error("acknowledgement");
             if (recording.state === "result-ready" || recording.state === "acknowledged") {
+              if (recording.state === "result-ready") recording.terminalAt = Date.now();
               recording.state = "acknowledged";
-              recording.audio = undefined;
+              removeAudio(recording);
+              scheduleRetention(recording);
               if (eventFile) require("node:fs").appendFileSync(eventFile, "acknowledged\n");
               responsePayload = statusPayload(recording);
             } else status = "invalid-state";
           } else if (request.operation === "cancel") {
             if (["recording", "finalizing", "result-ready", "cancelled"].includes(recording.state)) {
+              if (recording.state !== "cancelled") recording.terminalAt = Date.now();
               recording.state = "cancelled";
-              recording.audio = undefined;
+              removeAudio(recording);
+              scheduleRetention(recording);
               if (activeId === recording.id) activeId = undefined;
               responsePayload = statusPayload(recording);
             } else status = "invalid-state";
@@ -301,7 +347,8 @@ process.on("message", (message) => {
     process.send?.({ forced: message.recordingId });
   } else if (message?.type === "expire" && recording) {
     recording.state = "expired";
-    recording.audio = undefined;
+    recording.terminalAt = Date.now();
+    removeAudio(recording);
     if (activeId === recording.id) activeId = undefined;
     persistState();
     process.send?.({ expired: message.recordingId });
