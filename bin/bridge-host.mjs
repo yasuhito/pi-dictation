@@ -458,6 +458,11 @@ function localCompanionEndpoint(paths) {
   return { type: "unix", path: paths.companionSocket };
 }
 
+function administrationRequestId(credentialId, operation) {
+  const hex = createHash("sha256").update(`${PRODUCT}\0${credentialId}\0${operation}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 function validateCredentialEffects(value) {
   const keys = ["connections", "activeRecordingLease", "incompleteAudio", "retainedWav"];
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== keys.sort().join() ||
@@ -557,7 +562,10 @@ export async function rotateHost(alias, companionRequestAt) {
     if (rotation.phase === "staged") {
       const oldCredential = optionalCredential(paths.credential, "host credential");
       if (!oldCredential || oldCredential.id !== rotation.oldCredentialId) throw new BridgeHostError("Refusing rotation without the old credential.");
-      validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle"));
+      validateCredentialEffects(await companionRequestAt(
+        localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle",
+        administrationRequestId(oldCredential.id, "credential-revoke-if-idle"),
+      ));
       testInterruption("after-revoke");
       rotation = writeRotation(paths, rotation, "old-revoked");
     }
@@ -605,7 +613,10 @@ export async function revokeHost(alias, confirmed, companionRequestAt) {
       console.log(`Preview only. Rerun with: pi-dictation bridge revoke ${alias} --confirm`);
       return;
     }
-    validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), credential, "credential-revoke"));
+    validateCredentialEffects(await companionRequestAt(
+      localCompanionEndpoint(paths), credential, "credential-revoke",
+      administrationRequestId(credential.id, "credential-revoke"),
+    ));
     const domain = `gui/${ownerUid()}`;
     spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
     renameSync(paths.credential, paths.revokedCredential);

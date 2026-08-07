@@ -59,14 +59,19 @@ async function nativeHarness() {
     }
     if (!existsSync(socket)) throw new Error(`native companion did not start: ${companionError.trim()}`);
   }
+  async function stop() {
+    child.kill("SIGTERM");
+    await new Promise((resolveWait) => child.once("exit", resolveWait));
+  }
   await launch();
   return {
     home, runtime, socket, primary, owners,
     async restart() {
-      child.kill("SIGTERM");
-      await new Promise((resolveWait) => child.once("exit", resolveWait));
+      await stop();
       await launch();
     },
+    stop,
+    start: launch,
     async cleanup() {
       if (child.exitCode === null) {
         child.kill("SIGTERM");
@@ -122,12 +127,21 @@ test("native companion coordinates concurrent host owners", macOnly, async (t) =
       request(instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId),
       request(instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId),
     ]);
+    const retiredBeforeRestart = await request(
+      instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId,
+    );
+    await instance.restart();
+    const retiredAfterRestart = await request(
+      instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId,
+    );
     renameSync(join(first.directory, "credential.next.json"), join(first.directory, "credential.json"));
     const committedHealth = await request(instance.socket, replacement, "health", {});
     await t.test("replacement authenticates during peer activity", () => assert.equal(replacementHealth.status, "ok"));
     await t.test("peer remains healthy during rotation", () => assert.equal(peerDuringRotation.status, "ok"));
     await t.test("retired credential is revoked while idle", () => assert.equal(retired.status, "ok"));
-    await t.test("identical revocation replays its original outcome", () => assert.deepEqual(retiredReplay.payload, retired.payload));
+    await t.test("concurrent identical revocation replays its original outcome", () => assert.deepEqual(retiredReplay.payload, retired.payload));
+    await t.test("interrupted rotation retries revocation before restart", () => assert.deepEqual(retiredBeforeRestart.payload, retired.payload));
+    await t.test("interrupted rotation retries revocation after restart", () => assert.deepEqual(retiredAfterRestart.payload, retired.payload));
     await t.test("replacement authenticates after commit", () => assert.equal(committedHealth.status, "ok"));
 
     const ownedLease = capability();
@@ -158,7 +172,7 @@ test("native companion preserves recording ownership across restart", macOnly, a
       request(instance.socket, second.credential, "credential-effects", {}),
     ]);
     await t.test("preview restores the first owner's retained WAV", () => assert.equal(retainedEffects.payload.retainedWav, 1));
-    await t.test("preview restores the second owner's incomplete WAV", () => assert.equal(incompleteEffects.payload.incompleteAudio, 1));
+    await t.test("restart clears the second owner's incomplete WAV", () => assert.equal(incompleteEffects.payload.incompleteAudio, 0));
 
     const firstWav = join(instance.runtime, `recording-${retainedLease.recordingId}.wav`);
     const secondWav = join(instance.runtime, `recording-${incompleteLease.recordingId}.wav`);
@@ -168,8 +182,36 @@ test("native companion preserves recording ownership across restart", macOnly, a
     ]);
     await t.test("revocation reports only the target owner's retained WAV", () => assert.equal(revoked.payload.retainedWav, 1));
     await t.test("revocation deletes the target owner's WAV", () => assert.equal(existsSync(firstWav), false));
-    await t.test("revocation preserves the other owner's WAV", () => assert.equal(existsSync(secondWav), true));
+    await t.test("restart deletes the other owner's partial WAV", () => assert.equal(existsSync(secondWav), false));
     await t.test("revocation preserves the other owner's credential", () => assert.equal(survivor.status, "ok"));
+  } finally { await instance.cleanup(); }
+});
+
+test("native companion restores bounded result retention across restart", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [first] = instance.owners;
+    const scheduledLease = capability();
+    await request(instance.socket, first.credential, "start", { ...scheduledLease, maxDurationMs: 10000 });
+    await request(instance.socket, first.credential, "stop", scheduledLease);
+    await instance.restart();
+    const scheduledWav = join(instance.runtime, `recording-${scheduledLease.recordingId}.wav`);
+    const restored = existsSync(scheduledWav);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1200));
+    const removedByRestoredDeadline = !existsSync(scheduledWav);
+
+    const expiredLease = capability();
+    await request(instance.socket, first.credential, "start", { ...expiredLease, maxDurationMs: 10000 });
+    await request(instance.socket, first.credential, "stop", expiredLease);
+    const expiredWav = join(instance.runtime, `recording-${expiredLease.recordingId}.wav`);
+    await instance.stop();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1200));
+    await instance.start();
+    const removedDuringRestart = !existsSync(expiredWav);
+
+    await t.test("restores a result before its deadline", () => assert.equal(restored, true));
+    await t.test("schedules only the remaining retention", () => assert.equal(removedByRestoredDeadline, true));
+    await t.test("deletes a result whose deadline passed before restart", () => assert.equal(removedDuringRestart, true));
   } finally { await instance.cleanup(); }
 });
 

@@ -556,7 +556,7 @@ function exactObject(value, keys) {
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 }
 
-async function companionRequestAt(endpoint, credential, operation) {
+async function companionRequestAt(endpoint, credential, operation, fixedRequestId) {
   const secret = Buffer.from(credential.secret, "base64");
   if (secret.length !== 32) throw new CliError("Refusing invalid bridge credential.");
   const socket = endpoint.type === "unix"
@@ -571,7 +571,7 @@ async function companionRequestAt(endpoint, credential, operation) {
     }
     const challenge = Buffer.from(challengeMessage.challenge, "base64");
     if (challenge.length !== 32) throw new CliError("The companion sent an invalid authentication challenge.");
-    const requestId = randomUUID();
+    const requestId = fixedRequestId || randomUUID();
     const payload = Buffer.from("{}", "utf8");
     const tag = hmac(secret, ["request", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, operation, payload]);
     socket.end(frame({
