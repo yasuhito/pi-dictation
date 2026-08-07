@@ -96,6 +96,14 @@ test("production companion rejects adversarial traffic without changing an unrel
       assert.deepEqual([crossOwnerStart.status, absentStart.status], ["busy", "busy"]);
     });
 
+    const unknownCredential = { id: randomUUID(), secret: randomBytes(32).toString("base64") };
+    const badHmacCredential = { ...competitor, secret: randomBytes(32).toString("base64") };
+    const unknownCredentialFailure = await request(unknownCredential, "health", {});
+    const badHmacFailure = await request(badHmacCredential, "health", {});
+    await t.test("unknown credentials and bad HMACs have the same production-socket failure", () => {
+      assert.deepEqual([unknownCredentialFailure.closed, badHmacFailure.closed], [true, true]);
+    });
+
     for (const operation of ["health", "start", "status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
       const malformed = await rawRequest(competitor, operation, Buffer.from('{"unexpected":true,"unexpected":false}'));
       const ownerStatus = await request(owner, "status", lease);

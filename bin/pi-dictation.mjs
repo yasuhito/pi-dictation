@@ -675,8 +675,9 @@ async function healthAt(endpoint, credential) {
     if (response.version !== BRIDGE_PROTOCOL_VERSION) {
       throw new CliError("The companion returned invalid authenticated version data.");
     }
+    const permissionValues = ["authorized", "denied", "restricted", "not-determined", "unknown"];
     if (!exactObject(health, ["permission", "defaultInputAvailable"]) ||
-        typeof health.permission !== "string" || health.permission.length > 32 ||
+        !permissionValues.includes(health.permission) ||
         typeof health.defaultInputAvailable !== "boolean") {
       throw new CliError("The companion returned invalid health data.");
     }

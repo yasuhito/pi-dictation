@@ -10,6 +10,7 @@ private let productIdentifier = "com.yasuhito.pi-dictation.bridge"
 private let protocolVersion = 3
 private let maximumFrameBytes = 64 * 1024
 private let challengeBytes = 32
+private let unknownCredentialSecret = Data(repeating: 0, count: 32).base64EncodedString()
 private let resultRetentionSeconds: TimeInterval = 5 * 60
 
 private struct Credential: Decodable {
@@ -835,8 +836,7 @@ private func readAuthenticatedRequest(_ descriptor: Int32, credentials: [String:
           request["type"] as? String == "request",
           let clientVersion = jsonInteger(request["version"]), clientVersion > 0,
           let credentialId = request["credentialId"] as? String,
-          let credential = credentials[credentialId],
-          let secret = canonicalBase64(credential.secret, bytes: 32),
+          canonicalUUID(credentialId),
           let requestId = request["requestId"] as? String,
           canonicalUUID(requestId),
           let operation = request["operation"] as? String,
@@ -845,11 +845,15 @@ private func readAuthenticatedRequest(_ descriptor: Int32, credentials: [String:
           let payload = try? strictJSONObject(payloadData),
           let tagText = request["hmac"] as? String,
           let tag = Data(hex: tagText) else { throw CompanionFailure.authentication }
+    let credential = credentials[credentialId] ?? Credential(id: credentialId, secret: unknownCredentialSecret)
+    guard let secret = canonicalBase64(credential.secret, bytes: 32) else { throw CompanionFailure.authentication }
     let expected = authenticationTag(secret: secret, fields: [
         utf8("request"), utf8(String(clientVersion)), challenge, utf8(credential.id),
         utf8(requestId), utf8(operation), payloadData
     ])
-    guard constantTimeEqual(tag, expected) else { throw CompanionFailure.authentication }
+    guard constantTimeEqual(tag, expected), credentials[credentialId] != nil else {
+        throw CompanionFailure.authentication
+    }
     return AuthenticatedRequest(
         credential: credential, clientVersion: clientVersion, secret: secret, challenge: challenge,
         requestId: requestId, operation: operation, payloadData: payloadData, payload: payload

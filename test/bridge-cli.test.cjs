@@ -413,7 +413,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
     const status = mode === "wrong-version" ? "version-mismatch" : "ok";
     const body = mode === "wrong-version"
       ? { clientVersion: 3, companionVersion: 2 }
-      : { permission: "authorized", defaultInputAvailable: true };
+      : {
+          permission: mode === "control-permission" ? "authorized\u001b[31m" :
+            mode === "unknown-permission" ? "unexpected" : "authorized",
+          defaultInputAvailable: true,
+        };
     const responsePayload = Buffer.from(JSON.stringify(body));
     const responseTag = mode === "bad-response-hmac"
       ? Buffer.alloc(32)
@@ -487,6 +491,28 @@ test("bridge health rejects an unauthenticated response", () => {
     }
   })();
 });
+
+for (const [mode, description] of [
+  ["control-permission", "control characters in permission diagnostics"],
+  ["unknown-permission", "unknown permission diagnostics"],
+]) {
+  test(`bridge health rejects ${description}`, async () => {
+    const home = temporaryHome();
+    const tools = fakeToolchain(home);
+    let server;
+    try {
+      const installed = runBridge(home, ["install"], { PATH: tools });
+      if (installed.status !== 0) throw new Error(installed.stderr);
+      markPreflightReady(home);
+      server = await startHealthServer(home, mode);
+      const result = runBridge(home, ["health"]);
+      assert.match(result.stderr, /invalid health data/);
+    } finally {
+      server?.kill();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
 
 test("bridge health rejects trailing response bytes delivered separately", () => {
   return (async () => {
