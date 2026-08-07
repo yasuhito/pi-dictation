@@ -652,7 +652,7 @@ async function main() {
   if (command === "health" && args.length === 0) return authenticatedHealth();
   if (command === "remote-info" && args.length === 0) return remoteInfo();
   if (command === "remote-prepare" && args.length === 2) return remotePrepare(args[0], args[1]);
-  if (command === "remote-credential-commit" && args.length === 2) return remoteCredentialCommit(args[0], args[1]);
+  if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
   if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
   if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);

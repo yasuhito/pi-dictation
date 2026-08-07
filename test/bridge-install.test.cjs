@@ -137,6 +137,35 @@ test("credential rotation verifies the replacement before retiring the old crede
   }
 });
 
+for (const interruption of ["after-revoke", "after-old-rename", "after-new-rename", "after-remote-commit"]) {
+  test(`credential rotation resumes ${interruption}`, async (t) => {
+    const f = fixture();
+    let server;
+    try {
+      const installed = run(f, ["install", "resume-rotation-pi"]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+      const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+      const oldCredential = JSON.parse(readFileSync(join(host, "credential.json"), "utf8"));
+      server = await startCredentialServer(f);
+      const interrupted = run(f, ["rotate", "resume-rotation-pi"], { NODE_ENV: "test", PI_DICTATION_TEST_INTERRUPT: interruption });
+      const resumed = run(f, ["rotate", "resume-rotation-pi"], { NODE_ENV: "test" });
+      const current = JSON.parse(readFileSync(join(host, "credential.json"), "utf8"));
+
+      await t.test("observes the requested interruption", () => assert.notEqual(interrupted.status, 0));
+      await t.test("completes on retry", () => assert.equal(resumed.status, 0, resumed.stderr));
+      await t.test("preserves the replacement identity", () => assert.notEqual(current.id, oldCredential.id));
+      await t.test("reconciles all transaction artifacts", () => assert.deepEqual(
+        ["credential.next.json", "credential.previous.json", "credential.rotation.json"].filter((name) => existsSync(join(host, name))),
+        [],
+      ));
+    } finally {
+      server?.kill("SIGTERM");
+      if (server) await once(server, "exit").catch(() => {});
+      rmSync(f.home, { recursive: true, force: true });
+    }
+  });
+}
+
 test("credential revocation previews and scopes deletion to one host", async (t) => {
   const f = fixture();
   let server;
@@ -156,6 +185,32 @@ test("credential revocation previews and scopes deletion to one host", async (t)
     await t.test("confirmation succeeds", () => assert.equal(confirmed.status, 0, confirmed.stderr));
     await t.test("confirmation deletes the target host", () => assert.equal(existsSync(join(f.bridge, "hosts", revokeId)), false));
     await t.test("confirmation preserves another host", () => assert.equal(existsSync(join(f.bridge, "hosts", keepId)), true));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("credential revocation resumes after LaunchAgent deletion", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    const installed = run(f, ["install", "resume-revoke-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const plist = require("node:fs").readdirSync(join(f.home, "Library", "LaunchAgents"))[0];
+    server = await startCredentialServer(f);
+    const interrupted = run(f, ["revoke", "resume-revoke-pi", "--confirm"], { NODE_ENV: "test", PI_DICTATION_TEST_INTERRUPT: "after-plist-removal" });
+    const plistRemoved = !existsSync(join(f.home, "Library", "LaunchAgents", plist));
+    const cleanupStatePreserved = existsSync(host);
+    const resumed = run(f, ["revoke", "resume-revoke-pi", "--confirm"], { NODE_ENV: "test" });
+
+    await t.test("interrupts after removing the LaunchAgent", () => assert.equal(plistRemoved, true));
+    await t.test("preserves owned cleanup state", () => assert.equal(cleanupStatePreserved, true));
+    await t.test("reports the simulated interruption", () => assert.notEqual(interrupted.status, 0));
+    await t.test("finishes cleanup on retry", () => assert.equal(resumed.status, 0, resumed.stderr));
+    await t.test("removes the host directory", () => assert.equal(existsSync(host), false));
   } finally {
     server?.kill("SIGTERM");
     if (server) await once(server, "exit").catch(() => {});
@@ -313,6 +368,32 @@ test("remote prepare installs private Recorder endpoint state without a package 
     await t.test("configures the Recorder file consumed by Pi", () => assert.deepEqual(runtimeConfig.recorder, recorder));
     await t.test("keeps host state private", () => assert.equal(require("node:fs").lstatSync(host).mode & 0o777, 0o700));
     await t.test("keeps the shared credential private", () => assert.equal(require("node:fs").lstatSync(join(host, "credential.json")).mode & 0o777, 0o600));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote credential commit is replay-safe after the credential rename", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-commit-"));
+  const id = "fedcba9876543210";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const endpoint = { type: "unix", path: join(hostRoot, "listener.sock") };
+  const oldCredential = { id: "77777777-7777-4777-8777-777777777777", secret: Buffer.alloc(32, 17).toString("base64") };
+  const nextCredential = { id: "88888888-8888-4888-8888-888888888888", secret: Buffer.alloc(32, 18).toString("base64"), createdAt: new Date().toISOString() };
+  const invokePrepare = (value, stagedCredential = false) => spawnSync(process.execPath, [
+    cli, "bridge", "remote-prepare", id,
+    Buffer.from(JSON.stringify({ ...endpoint, ...(stagedCredential ? { stagedCredential: true } : {}) })).toString("base64"),
+  ], { cwd: root, encoding: "utf8", input: JSON.stringify(value), env: { ...process.env, HOME: home } });
+  try {
+    const prepared = invokePrepare(oldCredential);
+    if (prepared.status !== 0) throw new Error(prepared.stderr);
+    const staged = invokePrepare(nextCredential, true);
+    if (staged.status !== 0) throw new Error(staged.stderr);
+    const commit = () => spawnSync(process.execPath, [cli, "bridge", "remote-credential-commit", id, oldCredential.id, nextCredential.id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    const initialCommit = commit();
+    if (initialCommit.status !== 0) throw new Error(initialCommit.stderr);
+    const replay = commit();
+    assert.equal(replay.status, 0, replay.stderr);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

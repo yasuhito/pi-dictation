@@ -11,6 +11,11 @@ private let protocolVersion = 2
 private let maximumFrameBytes = 64 * 1024
 private let challengeBytes = 32
 private let resultRetentionSeconds: TimeInterval = 5 * 60
+#if PI_DICTATION_INTEGRATION_TEST
+private let usesSyntheticCapture = true
+#else
+private let usesSyntheticCapture = false
+#endif
 
 private struct Credential: Decodable {
     let id: String
@@ -283,13 +288,14 @@ private func readCredentials(primary: String, hosts: String) throws -> [String: 
                 guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
                 continue
             }
+            let credential: Credential
             do {
-                let credential = try readCredential(credentialPath)
-                guard credentials[credential.id] == nil else { throw CompanionFailure.invalidCredential }
-                credentials[credential.id] = credential
+                credential = try readCredential(credentialPath)
             } catch {
                 continue
             }
+            guard credentials[credential.id] == nil else { throw CompanionFailure.invalidCredential }
+            credentials[credential.id] = credential
         }
     }
     return credentials
@@ -506,6 +512,9 @@ private final class RecordingManager {
     func revokeCredential(ownerId: String, currentDescriptor: Int32, onlyIfIdle: Bool) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
+        if onlyIfIdle && revokedOwners.contains(ownerId) {
+            return ["connections": 0, "activeRecordingLease": 0, "incompleteAudio": 0, "retainedWav": 0]
+        }
         let (owned, ownedConnections, result) = effects(ownerId: ownerId, currentDescriptor: currentDescriptor)
         if onlyIfIdle && ((result["activeRecordingLease"] as? Int ?? 0) > 0 ||
                           (result["incompleteAudio"] as? Int ?? 0) > 0 ||
@@ -546,7 +555,10 @@ private final class RecordingManager {
         let key = ownerId + ":" + requestId
         lock.lock()
         defer { lock.unlock() }
-        if revokedOwners.contains(ownerId) { throw CompanionFailure.notFound }
+        if revokedOwners.contains(ownerId) {
+            if operation == "credential-revoke-if-idle" { return }
+            throw CompanionFailure.notFound
+        }
         if let previous = requests[key] {
             guard constantTimeEqual(previous, content) else { throw CompanionFailure.requestConflict }
             return
@@ -571,10 +583,11 @@ private final class RecordingManager {
             busyStartRequests.insert(requestKey)
             throw CompanionFailure.busy
         }
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
-              AVCaptureDevice.default(for: .audio) != nil,
-              maximumDurationMs >= 1000,
-              maximumDurationMs <= 60 * 60 * 1000 else { throw CompanionFailure.failed }
+        guard maximumDurationMs >= 1000, maximumDurationMs <= 60 * 60 * 1000,
+              usesSyntheticCapture || (AVCaptureDevice.authorizationStatus(for: .audio) == .authorized &&
+                                       AVCaptureDevice.default(for: .audio) != nil) else {
+            throw CompanionFailure.failed
+        }
         let maximumBytes = Int64(maximumDurationMs) * 32 + Int64(maximumFrameBytes)
         let capacity = try URL(fileURLWithPath: runtime).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
         guard capacity >= maximumBytes else { throw CompanionFailure.failed }
@@ -588,7 +601,16 @@ private final class RecordingManager {
         ]
         let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
         audioRecorder.isMeteringEnabled = true
-        guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0, audioRecorder.record() else {
+        if usesSyntheticCapture {
+            let syntheticWav = Data([
+                0x52, 0x49, 0x46, 0x46, 0x26, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+                0x66, 0x6d, 0x74, 0x20, 0x10, 0, 0, 0, 1, 0, 1, 0,
+                0x80, 0x3e, 0, 0, 0, 0x7d, 0, 0, 2, 0, 0x10, 0,
+                0x64, 0x61, 0x74, 0x61, 2, 0, 0, 0, 1, 0,
+            ])
+            try syntheticWav.write(to: url)
+            guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else { throw CompanionFailure.failed }
+        } else if !audioRecorder.prepareToRecord() || chmod(url.path, S_IRUSR | S_IWUSR) != 0 || !audioRecorder.record() {
             try? FileManager.default.removeItem(at: url)
             throw CompanionFailure.failed
         }
@@ -1067,5 +1089,8 @@ if !arguments.allSatisfy({ $0.hasPrefix("-psn_") }) { exit(EXIT_FAILURE) }
 do {
     try serve()
 } catch {
+#if PI_DICTATION_INTEGRATION_TEST
+    FileHandle.standardError.write(Data("\(error)\n".utf8))
+#endif
     exit(EXIT_FAILURE)
 }

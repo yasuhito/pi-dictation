@@ -13,7 +13,7 @@ const root = resolve(__dirname, "..");
 const companion = join(root, "test", "fixtures", "fake-bridge-companion.cjs");
 const jiti = createJiti(__filename, { interopDefault: true });
 
-async function harness(mode = "valid") {
+async function harness(mode = "valid", credentialMetadata = {}) {
   const directory = mkdtempSync(join("/tmp", "pi-db-"));
   const socketDirectory = join(directory, "socket");
   mkdirSync(socketDirectory, { mode: 0o700 });
@@ -22,6 +22,7 @@ async function harness(mode = "valid") {
   const credential = {
     id: "77777777-7777-4777-8777-777777777777",
     secret: Buffer.alloc(32, 13).toString("base64"),
+    ...credentialMetadata,
   };
   writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
   const eventFile = join(directory, "events.log");
@@ -49,6 +50,15 @@ async function harness(mode = "valid") {
 }
 
 runRecorderContract("bridge recording", () => harness());
+
+test("the Recorder starts with an install or rotation credential containing creation metadata", async () => {
+  const instance = await harness("valid", { createdAt: new Date().toISOString() });
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    assert.equal(instance.events().includes("start"), true);
+  } finally { await instance.cleanup(); }
+});
 
 test("the Recorder transports authenticated Bridge recording Level observations", async () => {
   const instance = await harness();

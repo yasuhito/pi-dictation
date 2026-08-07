@@ -93,6 +93,7 @@ function localPaths(alias) {
     credential: join(root, "credential.json"),
     nextCredential: join(root, "credential.next.json"),
     previousCredential: join(root, "credential.previous.json"),
+    rotation: join(root, "credential.rotation.json"),
     revokedCredential: join(root, "credential.revoked.json"),
     endpoint: join(root, "endpoint.json"),
     state: join(root, "setup.json"),
@@ -282,7 +283,7 @@ function assertOwnedHost(paths, alias) {
   if (ownership.product !== PRODUCT || ownership.hostId !== paths.id || ownership.sshAlias !== alias) {
     throw new BridgeHostError("Refusing host artifacts whose ownership cannot be proven.");
   }
-  for (const [path, description] of [[paths.credential, "host credential"], [paths.nextCredential, "staged host credential"], [paths.previousCredential, "previous host credential"], [paths.revokedCredential, "revoked host credential"], [paths.endpoint, "host endpoint"], [paths.state, "host setup state"], [paths.tunnel, "host tunnel configuration"]]) {
+  for (const [path, description] of [[paths.credential, "host credential"], [paths.nextCredential, "staged host credential"], [paths.previousCredential, "previous host credential"], [paths.rotation, "credential rotation state"], [paths.revokedCredential, "revoked host credential"], [paths.endpoint, "host endpoint"], [paths.state, "host setup state"], [paths.tunnel, "host tunnel configuration"]]) {
     if (existsSync(path)) inspect(path, "file", 0o600, description);
   }
   if (existsSync(paths.plist)) {
@@ -466,32 +467,122 @@ function validateCredentialEffects(value) {
   return value;
 }
 
+const rotationPhases = new Set(["staged", "old-revoked", "promoted", "remote-committed"]);
+
+function writeRotation(paths, rotation, phase) {
+  atomicWrite(paths.rotation, `${JSON.stringify({ ...rotation, phase })}\n`);
+  return { ...rotation, phase };
+}
+
+function readRotation(paths) {
+  if (!existsSync(paths.rotation)) return undefined;
+  const rotation = readOwnedJson(paths.rotation, "credential rotation state");
+  if (rotation.product !== PRODUCT || rotation.hostId !== paths.id ||
+      typeof rotation.oldCredentialId !== "string" || typeof rotation.nextCredentialId !== "string" ||
+      rotation.oldCredentialId === rotation.nextCredentialId || !rotationPhases.has(rotation.phase)) {
+    throw new BridgeHostError("Refusing invalid credential rotation state.");
+  }
+  return rotation;
+}
+
+function optionalCredential(path, description) {
+  return existsSync(path) ? validateCredential(readOwnedJson(path, description), description) : undefined;
+}
+
+function reconcilePromotedCredential(paths, rotation) {
+  let current = optionalCredential(paths.credential, "host credential");
+  let next = optionalCredential(paths.nextCredential, "staged host credential");
+  let previous = optionalCredential(paths.previousCredential, "previous host credential");
+  if (current?.id === rotation.oldCredentialId && next?.id === rotation.nextCredentialId && !previous) {
+    renameSync(paths.credential, paths.previousCredential);
+    current = undefined;
+    previous = optionalCredential(paths.previousCredential, "previous host credential");
+  }
+  if (!current && next?.id === rotation.nextCredentialId && previous?.id === rotation.oldCredentialId) {
+    renameSync(paths.nextCredential, paths.credential);
+    current = optionalCredential(paths.credential, "host credential");
+    next = undefined;
+  }
+  if (current?.id !== rotation.nextCredentialId || previous?.id !== rotation.oldCredentialId || next) {
+    throw new BridgeHostError("Refusing an inconsistent interrupted credential rotation.");
+  }
+  return current;
+}
+
+function testInterruption(name) {
+  if (process.env.NODE_ENV === "test" && process.env.PI_DICTATION_TEST_INTERRUPT === name) {
+    throw new BridgeHostError(`Simulated interruption at ${name}.`);
+  }
+}
+
 export async function rotateHost(alias, companionRequestAt) {
   const paths = localPaths(alias);
   assertOwnedHost(paths, alias);
-  const recovering = existsSync(paths.previousCredential);
-  const oldCredential = validateCredential(readOwnedJson(recovering ? paths.previousCredential : paths.credential, recovering ? "previous host credential" : "host credential"), recovering ? "previous host credential" : "host credential");
-  const endpoint = readOwnedJson(paths.endpoint, "host endpoint");
-  const next = recovering
-    ? validateCredential(readOwnedJson(paths.credential, "host credential"), "host credential")
-    : existsSync(paths.nextCredential)
-      ? validateCredential(readOwnedJson(paths.nextCredential, "staged host credential"), "staged host credential")
-      : { id: randomUUID(), secret: randomBytes(32).toString("base64"), createdAt: new Date().toISOString() };
-  if (!recovering && !existsSync(paths.nextCredential)) atomicWrite(paths.nextCredential, `${JSON.stringify(next)}\n`);
-  try {
-    ssh(alias, ["pi-dictation", "bridge", "remote-prepare", paths.id, Buffer.from(JSON.stringify({ ...endpoint, stagedCredential: true })).toString("base64")], {
-      input: `${JSON.stringify(next)}\n`, failure: "The new remote credential could not be installed",
-    });
-    waitForRemoteHealth(alias, paths.id);
-    if (!recovering) {
-      validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle"));
-      renameSync(paths.credential, paths.previousCredential);
-      renameSync(paths.nextCredential, paths.credential);
+  let rotation = readRotation(paths);
+  if (!rotation) {
+    const previous = optionalCredential(paths.previousCredential, "previous host credential");
+    const current = optionalCredential(paths.credential, "host credential");
+    const staged = optionalCredential(paths.nextCredential, "staged host credential");
+    if (previous) {
+      const replacement = current || staged;
+      if (!replacement) throw new BridgeHostError("Refusing an interrupted rotation without a replacement credential.");
+      rotation = writeRotation(paths, {
+        product: PRODUCT, hostId: paths.id,
+        oldCredentialId: previous.id, nextCredentialId: replacement.id,
+      }, "old-revoked");
+    } else {
+      if (!current) throw new BridgeHostError("Refusing rotation without a current host credential.");
+      const replacement = staged || { id: randomUUID(), secret: randomBytes(32).toString("base64"), createdAt: new Date().toISOString() };
+      if (!staged) atomicWrite(paths.nextCredential, `${JSON.stringify(replacement)}\n`);
+      rotation = writeRotation(paths, {
+        product: PRODUCT, hostId: paths.id,
+        oldCredentialId: current.id, nextCredentialId: replacement.id,
+      }, "staged");
     }
-    ssh(alias, ["pi-dictation", "bridge", "remote-credential-commit", paths.id, oldCredential.id], {
-      failure: "The verified remote credential could not be committed",
-    });
-    rmSync(paths.previousCredential);
+  }
+  try {
+    const current = optionalCredential(paths.credential, "host credential");
+    const staged = optionalCredential(paths.nextCredential, "staged host credential");
+    const replacement = current?.id === rotation.nextCredentialId ? current : staged;
+    if (!replacement || replacement.id !== rotation.nextCredentialId) {
+      throw new BridgeHostError("Refusing rotation without the recorded replacement credential.");
+    }
+    const endpoint = readOwnedJson(paths.endpoint, "host endpoint");
+    if (rotation.phase === "staged" || rotation.phase === "old-revoked") {
+      ssh(alias, ["pi-dictation", "bridge", "remote-prepare", paths.id, Buffer.from(JSON.stringify({ ...endpoint, stagedCredential: true })).toString("base64")], {
+        input: `${JSON.stringify(replacement)}\n`, failure: "The new remote credential could not be installed",
+      });
+      waitForRemoteHealth(alias, paths.id);
+    }
+    if (rotation.phase === "staged") {
+      const oldCredential = optionalCredential(paths.credential, "host credential");
+      if (!oldCredential || oldCredential.id !== rotation.oldCredentialId) throw new BridgeHostError("Refusing rotation without the old credential.");
+      validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle"));
+      testInterruption("after-revoke");
+      rotation = writeRotation(paths, rotation, "old-revoked");
+    }
+    if (rotation.phase === "old-revoked") {
+      if (existsSync(paths.credential) && !existsSync(paths.previousCredential)) {
+        renameSync(paths.credential, paths.previousCredential);
+        testInterruption("after-old-rename");
+      }
+      if (!existsSync(paths.credential) && existsSync(paths.nextCredential)) {
+        renameSync(paths.nextCredential, paths.credential);
+        testInterruption("after-new-rename");
+      }
+      reconcilePromotedCredential(paths, rotation);
+      rotation = writeRotation(paths, rotation, "promoted");
+    }
+    if (rotation.phase === "promoted") {
+      ssh(alias, ["pi-dictation", "bridge", "remote-credential-commit", paths.id, rotation.oldCredentialId, rotation.nextCredentialId], {
+        failure: "The verified remote credential could not be committed",
+      });
+      testInterruption("after-remote-commit");
+      rotation = writeRotation(paths, rotation, "remote-committed");
+    }
+    if (existsSync(paths.previousCredential)) rmSync(paths.previousCredential);
+    if (existsSync(paths.nextCredential)) rmSync(paths.nextCredential);
+    rmSync(paths.rotation);
     console.log(`Credential rotated for SSH alias '${alias}'.`);
   } catch (error) {
     throw new BridgeHostError(`${error instanceof Error ? error.message : "Credential rotation failed"} The staged credential was preserved for a safe retry.`);
@@ -526,8 +617,11 @@ export async function revokeHost(alias, confirmed, companionRequestAt) {
   } catch (error) {
     throw new BridgeHostError(`${error instanceof Error ? error.message : "Remote credential revocation failed"}. The local credential and tunnel remain disabled; rerun with --confirm to finish remote cleanup.`);
   }
-  inspect(paths.plist, "file", 0o600, "host tunnel LaunchAgent");
-  rmSync(paths.plist);
+  if (existsSync(paths.plist)) {
+    inspect(paths.plist, "file", 0o600, "host tunnel LaunchAgent");
+    rmSync(paths.plist);
+  }
+  testInterruption("after-plist-removal");
   rmSync(paths.root, { recursive: true });
   console.log(`Credential revoked for SSH alias '${alias}'.`);
 }
@@ -659,8 +753,11 @@ export function remotePrepare(id, encodedEndpoint) {
   console.log(JSON.stringify({ configured: true }));
 }
 
-export function remoteCredentialCommit(id, oldCredentialId) {
-  if (typeof oldCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(oldCredentialId)) throw new BridgeHostError("Invalid old credential identity.");
+export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
+  if (typeof oldCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(oldCredentialId) ||
+      typeof nextCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(nextCredentialId) || oldCredentialId === nextCredentialId) {
+    throw new BridgeHostError("Invalid credential rotation identities.");
+  }
   const root = remoteRoot(id);
   inspect(root, "directory", 0o700, "remote host bridge directory");
   const ownership = readOwnedJson(join(root, "ownership.json"), "remote bridge ownership receipt");
@@ -668,10 +765,12 @@ export function remoteCredentialCommit(id, oldCredentialId) {
   const currentPath = join(root, "credential.json");
   const nextPath = join(root, "credential.next.json");
   const current = validateCredential(readOwnedJson(currentPath, "remote bridge credential"), "remote bridge credential");
-  const next = validateCredential(readOwnedJson(nextPath, "staged remote bridge credential"), "staged remote bridge credential");
-  if (current.id === oldCredentialId) renameSync(nextPath, currentPath);
-  else if (current.id === next.id) rmSync(nextPath);
-  else throw new BridgeHostError("Remote credential changed during rotation.");
+  const next = existsSync(nextPath)
+    ? validateCredential(readOwnedJson(nextPath, "staged remote bridge credential"), "staged remote bridge credential")
+    : undefined;
+  if (current.id === oldCredentialId && next?.id === nextCredentialId) renameSync(nextPath, currentPath);
+  else if (current.id === nextCredentialId && next?.id === nextCredentialId) rmSync(nextPath);
+  else if (current.id !== nextCredentialId || next) throw new BridgeHostError("Remote credential changed during rotation.");
   const endpointPath = join(root, "endpoint.json");
   const staged = readOwnedJson(endpointPath, "remote Recorder endpoint configuration");
   const recorder = { ...staged, credentialFile: currentPath };
