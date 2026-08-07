@@ -34,6 +34,8 @@ case "$*" in
   *" remote-prepare "*) cat >/dev/null; printf '{"configured":true}\\n'; exit 0 ;;
   *" remote-listener "*) printf '{"listener":"established"}\\n'; exit 0 ;;
   *" remote-health "*) printf '{"protocolVersion":2,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
+  *" remote-credential-commit "*) printf '{"committed":true}\\n'; exit 0 ;;
+  *" remote-credential-revoke "*) printf '{"revoked":true}\\n'; exit 0 ;;
 esac
 exit 2
 `);
@@ -52,6 +54,29 @@ function run(f, args, extra = {}) {
 function hostDirectories(bridge) {
   const hosts = join(bridge, "hosts");
   return existsSync(hosts) ? require("node:fs").readdirSync(hosts) : [];
+}
+
+async function startCredentialServer(f, effects = { connections: 0, activeRecordingLease: 0, incompleteAudio: 0, retainedWav: 0 }) {
+  const script = join(f.home, "credential-server.cjs");
+  const socket = join(f.home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
+  mkdirSync(join(socket, ".."), { recursive: true, mode: 0o700 });
+  writeFileSync(script, String.raw`
+const { createHmac, randomBytes } = require("node:crypto");
+const { chmodSync, readFileSync, readdirSync, rmSync } = require("node:fs");
+const { join } = require("node:path");
+const net = require("node:net");
+const [bridge, socket, effectsText] = process.argv.slice(2);
+const effects = JSON.parse(Buffer.from(effectsText, "base64").toString());
+function encode(fields) { const pieces=[Buffer.from("pi-dictation-bridge-auth-v1\0")]; for (const field of fields) { const value=Buffer.isBuffer(field)?field:Buffer.from(String(field)); const length=Buffer.alloc(4); length.writeUInt32BE(value.length); pieces.push(length,value); } return Buffer.concat(pieces); }
+function tag(secret, fields) { return createHmac("sha256", Buffer.from(secret,"base64")).update(encode(fields)).digest(); }
+function frame(value) { const body=Buffer.from(JSON.stringify(value)); const header=Buffer.alloc(4); header.writeUInt32BE(body.length); return Buffer.concat([header,body]); }
+function credentials() { const result=new Map(); for (const id of readdirSync(join(bridge,"hosts"))) for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,"hosts",id,name))); result.set(value.id,value); } catch {} } return result; }
+const server=net.createServer({allowHalfOpen:true}, socketClient => { const challenge=randomBytes(32); socketClient.write(frame({type:"challenge",version:2,challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); socketClient.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return socketClient.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",2,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return socketClient.destroy(); const output=Buffer.from(JSON.stringify(effects)); const responseTag=tag(credential.secret,["response",2,challenge,credential.id,request.requestId,request.operation+":ok",output]); socketClient.end(frame({type:"response",version:2,requestId:request.requestId,status:"ok",payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
+rmSync(socket,{force:true}); server.listen(socket,()=>{chmodSync(socket,0o600);if(process.send)process.send("ready");});
+`);
+  const child = spawn(process.execPath, [script, f.bridge, socket, Buffer.from(JSON.stringify(effects)).toString("base64")], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await once(child, "message");
+  return child;
 }
 
 test("bridge install establishes the default private Unix listener through an existing SSH alias", async (t) => {
@@ -84,6 +109,77 @@ test("each SSH alias receives independent owned artifacts", async (t) => {
     const credentials = hosts.map((id) => JSON.parse(readFileSync(join(f.bridge, "hosts", id, "credential.json"), "utf8")));
     await t.test("creates one directory per alias", () => assert.equal(hosts.length, 2));
     await t.test("uses independent credentials", () => assert.notEqual(credentials[0].id, credentials[1].id));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("credential rotation verifies the replacement before retiring the old credential", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    const installed = run(f, ["install", "rotate-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const oldCredential = JSON.parse(readFileSync(join(host, "credential.json"), "utf8"));
+    server = await startCredentialServer(f);
+    const result = run(f, ["rotate", "rotate-pi"]);
+    const nextCredential = JSON.parse(readFileSync(join(host, "credential.json"), "utf8"));
+    const calls = readFileSync(f.sshLog, "utf8");
+
+    await t.test("succeeds", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("installs a new independent credential", () => assert.notEqual(nextCredential.id, oldCredential.id));
+    const rotationCalls = calls.slice(calls.lastIndexOf("remote-prepare"));
+    await t.test("commits only after authenticated replacement health", () => assert.equal(rotationCalls.indexOf("remote-health") < rotationCalls.indexOf("remote-credential-commit"), true));
+    await t.test("leaves no staged local secret", () => assert.equal(existsSync(join(host, "credential.next.json")), false));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("credential revocation previews and scopes deletion to one host", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    for (const alias of ["revoke-pi", "keep-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    const revokeId = createHash("sha256").update("revoke-pi").digest("hex").slice(0, 16);
+    const keepId = createHash("sha256").update("keep-pi").digest("hex").slice(0, 16);
+    server = await startCredentialServer(f, { connections: 2, activeRecordingLease: 1, incompleteAudio: 1, retainedWav: 3 });
+    const preview = run(f, ["revoke", "revoke-pi"]);
+    const confirmed = run(f, ["revoke", "revoke-pi", "--confirm"]);
+
+    await t.test("previews retained WAV deletion effects", () => assert.match(preview.stdout, /Retained WAVs to delete: 3/));
+    await t.test("preview preserves the target host", () => assert.equal(preview.status, 0));
+    await t.test("confirmation succeeds", () => assert.equal(confirmed.status, 0, confirmed.stderr));
+    await t.test("confirmation deletes the target host", () => assert.equal(existsSync(join(f.bridge, "hosts", revokeId)), false));
+    await t.test("confirmation preserves another host", () => assert.equal(existsSync(join(f.bridge, "hosts", keepId)), true));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("bridge list returns bounded safe JSON for every configured host", async (t) => {
+  const f = fixture();
+  try {
+    for (const alias of ["zeta-pi", "alpha-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    const result = run(f, ["list", "--json"]);
+    const listed = JSON.parse(result.stdout);
+    const serialized = JSON.stringify(listed);
+
+    await t.test("uses a stable versioned object", () => assert.equal(listed.schemaVersion, 1));
+    await t.test("sorts hosts by SSH alias", () => assert.deepEqual(listed.hosts.map((host) => host.sshAlias), ["alpha-pi", "zeta-pi"]));
+    await t.test("reports each reconciled health state", () => assert.equal(listed.hosts.every((host) => host.status.authenticatedHealth === "ready"), true));
+    await t.test("does not disclose credential secrets", () => assert.equal(serialized.includes("secret"), false));
+    await t.test("does not disclose private paths", () => assert.equal(serialized.includes(f.home), false));
+    await t.test("does not disclose SSH commands", () => assert.equal(serialized.includes("BatchMode"), false));
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
