@@ -124,20 +124,27 @@ test("production companion rejects adversarial traffic without changing an unrel
       await t.test(`${name} frame leaves the owner lease recording`, () => assert.equal(ownerStatus.payload.state, "recording"));
     }
 
-    const foreignResults = [];
+    const foreignResults = new Map();
     for (const operation of ["status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
       const payload = operation === "levels" ? { ...lease, afterSequence: -1 } : lease;
-      foreignResults.push((await request(competitor, operation, payload)).status);
+      foreignResults.set(operation, (await request(competitor, operation, payload)).status);
     }
-    await t.test("all cross-owner lease operations collapse to not-found", () => {
-      assert.deepEqual(foreignResults, Array(6).fill("not-found"));
-    });
+    for (const operation of ["status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
+      await t.test(`cross-owner ${operation} collapses to not-found`, () => {
+        assert.equal(foreignResults.get(operation), "not-found");
+      });
+    }
     const unknown = await request(competitor, "status", foreignLease);
     await t.test("cross-owner access is indistinguishable from an absent lease", () => assert.equal(unknown.status, "not-found"));
 
-    const mismatch = await request(competitor, "health", {}, { version: protocolVersion - 1 });
+    const mismatchRequestId = randomUUID();
+    const mismatch = await request(competitor, "health", {}, { requestId: mismatchRequestId, version: protocolVersion - 1 });
     await t.test("authenticated version mismatch reports only both versions", () => {
       assert.deepEqual(mismatch, { status: "version-mismatch", payload: { clientVersion: 2, companionVersion: 3 } });
+    });
+    const changedMismatchReplay = await request(competitor, "health", { changed: true }, { requestId: mismatchRequestId });
+    await t.test("changed-content reuse after a version mismatch returns request-conflict", () => {
+      assert.equal(changedMismatchReplay.status, "request-conflict");
     });
   } finally {
     await request(owner, "cancel", lease).catch(() => {});

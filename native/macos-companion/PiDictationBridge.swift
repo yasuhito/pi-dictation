@@ -903,15 +903,15 @@ private func handleRequest(
     recordings: RecordingManager
 ) throws {
     let request = try readAuthenticatedRequest(descriptor, credentials: credentials)
-    guard request.clientVersion == protocolVersion else {
-        try writeAuthenticatedResponse(descriptor, request: request, status: "version-mismatch", payloadObject: [
-            "clientVersion": request.clientVersion, "companionVersion": protocolVersion,
-        ])
-        return
-    }
     do {
         try recordings.register(ownerId: request.credential.id, requestId: request.requestId,
                                 operation: request.operation, payload: request.payloadData)
+        guard request.clientVersion == protocolVersion else {
+            try writeAuthenticatedResponse(descriptor, request: request, status: "version-mismatch", payloadObject: [
+                "clientVersion": request.clientVersion, "companionVersion": protocolVersion,
+            ])
+            return
+        }
         switch request.operation {
         case "health":
             guard request.payload.isEmpty else { throw CompanionFailure.invalidFrame }

@@ -87,6 +87,15 @@ for (const [mode, code] of [
   });
 }
 
+test("the Bridge recording adapter accepts result metadata when an ambiguous start retry finds a completed lease", async () => {
+  const instance = await harness("ambiguous-start-result-ready");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    assert.equal(instance.events().filter((event) => event === "start").length, 2);
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge recording adapter reconciles an ambiguous stop through owner status", async () => {
   const instance = await harness("ambiguous-stop");
   try {

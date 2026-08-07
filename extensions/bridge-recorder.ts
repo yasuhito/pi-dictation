@@ -362,8 +362,16 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
           recordingId, leaseSecret, maxDurationMs: options.maxDurationMs,
         }, options.signal);
       } catch (error) { throw safeError(error); }
-      if (!exactObject(startPayload, ["recordingId", "state"]) || startPayload.recordingId !== recordingId ||
-          !["recording", "finalizing", "result-ready"].includes(String(startPayload.state))) {
+      const maximumBytes = options.maxDurationMs * 32 + MAX_FRAME_BYTES;
+      const startShape = startPayload as Record<string, unknown>;
+      const basicStart = exactObject(startPayload, ["recordingId", "state"]) &&
+        ["recording", "finalizing"].includes(String(startShape.state));
+      const completedStart = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
+        startShape.state === "result-ready" && Number.isSafeInteger(maximumBytes) &&
+        Number.isSafeInteger(startShape.length) && Number(startShape.length) >= 44 && Number(startShape.length) <= maximumBytes &&
+        typeof startShape.sha256 === "string" && /^[0-9a-f]{64}$/.test(startShape.sha256) &&
+        ["stopped", "duration-limit"].includes(String(startShape.completion));
+      if ((!basicStart && !completedStart) || startShape.recordingId !== recordingId) {
         throw new RecorderError("recording-failed");
       }
 

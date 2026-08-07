@@ -227,6 +227,13 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         socket.write(Buffer.concat([response, audio.subarray(0, 100)]));
         return;
       }
+      if (request.operation === "start" && mode === "ambiguous-start-result-ready" && !previous) {
+        const recording = recordings.get(payload.recordingId);
+        recording.state = "result-ready";
+        if (activeId === recording.id) activeId = undefined;
+        socket.destroy();
+        return;
+      }
       if (request.operation === "start" && mode === "pi-start-delay") {
         const delayed = setTimeout(() => socket.end(response), 220);
         delayed.unref();
