@@ -21,6 +21,8 @@ const busyStarts = new Set(persisted.busyStarts || []);
 const sockets = new Set();
 const droppedResponses = new Set(persisted.droppedResponses || []);
 let activeId = persisted.activeId;
+let unappliedStopFailures = 0;
+let unappliedStopRequestId;
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
 
 function audioPath(recording) { return stateFile ? `${stateFile}.${recording.id}.wav` : undefined; }
@@ -184,14 +186,31 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const payload = JSON.parse(payloadBytes.toString("utf8"));
       if (eventFile) require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
+      if (mode === "unapplied-stop-retries" && request.operation === "stop") {
+        unappliedStopRequestId ??= request.requestId;
+        if (request.requestId !== unappliedStopRequestId) {
+          socket.destroy();
+          return;
+        }
+        if (unappliedStopFailures < 3) {
+          unappliedStopFailures += 1;
+          socket.destroy();
+          return;
+        }
+      }
       const replayKey = `${credential.id}:${request.requestId}`;
       const content = createHash("sha256").update(request.operation).update(Buffer.from([0])).update(payloadBytes).digest("hex");
       const previous = replay.get(replayKey);
+      const previousContent = typeof previous === "string" ? previous : previous?.content;
       let status = "ok";
       let responsePayload = {};
       let audio;
-      if (previous && previous !== content) {
+      if (previousContent && previousContent !== content) {
         status = "request-conflict";
+      } else if (previous?.status) {
+        status = previous.status;
+        responsePayload = previous.payload;
+        if (request.operation === "fetch" && status === "ok") audio = owned(credential.id, payload)?.audio;
       } else {
         replay.set(replayKey, content);
         if (request.operation === "start") {
@@ -292,6 +311,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             } else status = "invalid-state";
           } else status = "failed";
         }
+      }
+      if (status !== "request-conflict") {
+        replay.set(replayKey, { content, operation: request.operation, status, payload: responsePayload });
+        const observationOperations = new Set(["health", "levels", "status"]);
+        const observations = [...replay].filter(([, value]) => observationOperations.has(value.operation));
+        while (observations.length > 256) replay.delete(observations.shift()[0]);
       }
       persistState();
       const responseBytes = Buffer.from(JSON.stringify(responsePayload));

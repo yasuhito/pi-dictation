@@ -372,16 +372,18 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
             );
             finalizationTimer.unref?.();
             const finalizationSignal = AbortSignal.any([stopController.signal, finalizationController.signal]);
-            try {
-              await requestJson(config, credential, "stop", owned, finalizationSignal, randomUUID(), FINALIZATION_TIMEOUT_MS);
-            } catch (error) {
-              if (error instanceof RecorderError || error instanceof BridgeProtocolError || error instanceof BridgeAudioError) throw error;
-              if (error instanceof BridgeResponseError && !["invalid-state", "not-found"].includes(error.status)) throw error;
-            }
+            const stopRequestId = randomUUID();
             let status: unknown;
-            do {
+            while (true) {
               ensureNotCancelled();
               if (Date.now() >= finalizationDeadline) throw new BridgeOutcomeUnknownError();
+              try {
+                await requestJson(config, credential, "stop", owned, finalizationSignal, stopRequestId,
+                  Math.max(1, finalizationDeadline - Date.now()));
+              } catch (error) {
+                if (error instanceof RecorderError || error instanceof BridgeProtocolError || error instanceof BridgeAudioError) throw error;
+                if (error instanceof BridgeResponseError && !["invalid-state", "not-found"].includes(error.status)) throw error;
+              }
               try { status = await requestJson(config, credential, "status", owned, finalizationSignal); }
               catch (error) {
                 if (Date.now() >= finalizationDeadline) throw new BridgeOutcomeUnknownError(undefined, { cause: error });
@@ -394,11 +396,12 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
               if (!validKeys || statusShape.recordingId !== recordingId) throw new BridgeProtocolError();
               if (statusShape.state === "failed") throw new RecorderError("recording-failed");
               if (statusShape.state === "cancelled") throw new RecorderError("cancelled");
-              if (statusShape.state === "finalizing") await abortableDelay(FINALIZATION_POLL_MS, finalizationSignal);
-            } while ((status as Record<string, unknown>)?.state === "finalizing");
+              if (statusShape.state === "result-ready") break;
+              if (!["recording", "finalizing"].includes(String(statusShape.state))) throw new RecorderError("recording-failed");
+              await abortableDelay(FINALIZATION_POLL_MS, finalizationSignal);
+            }
             clearTimeout(finalizationTimer);
             const statusShape = status as Record<string, unknown>;
-            if (statusShape.state !== "result-ready") throw new BridgeProtocolError();
             if (statusShape.completion === "duration-limit") resultCompletion = "duration-limit";
 
             const fetchRequestId = randomUUID();

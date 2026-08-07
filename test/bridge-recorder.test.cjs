@@ -92,6 +92,15 @@ test("the Bridge recording adapter reconciles an ambiguous stop through owner st
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge recording adapter reapplies the same stop identity during finalization reconciliation", async () => {
+  const instance = await harness("unapplied-stop-retries");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
 for (const operation of ["start", "status", "stop", "acknowledge", "cancel"]) {
   test(`the Bridge recording adapter retries the same ${operation} operation after a lost response`, async () => {
     const instance = await harness(`drop-${operation}-response`);

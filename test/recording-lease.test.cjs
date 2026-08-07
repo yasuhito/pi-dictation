@@ -166,6 +166,34 @@ test("authenticated request receipts remain replay-safe across companion restart
   } finally { await cleanup(instance); }
 });
 
+test("control request receipts survive observation churn and preserve non-success outcomes", async (t) => {
+  const instance = await setup();
+  const [owner, competitor] = instance.credentials;
+  const lease = capability();
+  const competingLease = capability();
+  const busyRequestId = randomUUID();
+  const invalidFetchRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, competitor, "start", { ...competingLease, maxDurationMs: 10000 }, busyRequestId);
+    await request(instance.socket, owner, "fetch", lease, invalidFetchRequestId);
+    for (let index = 0; index < 300; index += 1) {
+      await request(instance.socket, owner, "levels", { ...lease, afterSequence: index });
+    }
+    await request(instance.socket, owner, "stop", lease);
+    const busyReplay = await request(instance.socket, competitor, "start",
+      { ...competingLease, maxDurationMs: 10000 }, busyRequestId);
+    const invalidFetchReplay = await request(instance.socket, owner, "fetch", lease, invalidFetchRequestId);
+
+    await t.test("more than 256 Level requests do not evict a busy start receipt", () => {
+      assert.equal(busyReplay.status, "busy");
+    });
+    await t.test("an invalid-state response remains stable after the lease state changes", () => {
+      assert.equal(invalidFetchReplay.status, "invalid-state");
+    });
+  } finally { await cleanup(instance); }
+});
+
 test("concurrent stop and cancel leave the Recording lease cancelled before acknowledgement", async () => {
   const instance = await setup("slow-finalization");
   try {
@@ -273,7 +301,7 @@ test("an unacknowledged completed WAV remains owner-recoverable across companion
 
 test("interrupted transport phases recover safely after companion restart", async (t) => {
   for (const operation of ["start", "stop", "cancel", "acknowledge"]) {
-    await t.test(`${operation} response loss`, async () => {
+    await t.test(`${operation} response loss`, async (responseLossTest) => {
       const instance = await persistentSetup(`drop-${operation}-response`);
       const [owner, competitor] = instance.credentials;
       const lease = capability();
@@ -287,15 +315,18 @@ test("interrupted transport phases recover safely after companion restart", asyn
         const ownerStatus = await request(instance.socket, owner, "status", lease);
         const foreignStatus = await request(instance.socket, competitor, "status", lease);
         const expectedState = { start: "recording", stop: "result-ready", cancel: "cancelled", acknowledge: "acknowledged" }[operation];
-        assert.deepEqual(
-          { owner: ownerStatus.payload.state, foreign: foreignStatus.status },
-          { owner: expectedState, foreign: "not-found" },
-        );
+
+        await responseLossTest.test("restores the owner's operation outcome", () => {
+          assert.equal(ownerStatus.payload.state, expectedState);
+        });
+        await responseLossTest.test("does not disclose the lease to another credential", () => {
+          assert.equal(foreignStatus.status, "not-found");
+        });
       } finally { await cleanup(instance); }
     });
   }
 
-  await t.test("interrupted fetch", async () => {
+  await t.test("interrupted fetch", async (interruptedFetchTest) => {
     const instance = await persistentSetup("fetch-interrupted-once");
     const [owner, competitor] = instance.credentials;
     const lease = capability();
@@ -306,10 +337,13 @@ test("interrupted transport phases recover safely after companion restart", asyn
       await restart(instance, "fetch-interrupted-once");
       const recovered = await request(instance.socket, owner, "fetch", lease);
       const foreign = await request(instance.socket, competitor, "fetch", lease);
-      assert.deepEqual(
-        { bytes: recovered.body.length, expected: recovered.payload.length, foreign: foreign.status },
-        { bytes: recovered.payload.length, expected: recovered.payload.length, foreign: "not-found" },
-      );
+
+      await interruptedFetchTest.test("restores the complete WAV bytes", () => {
+        assert.equal(recovered.body.length, recovered.payload.length);
+      });
+      await interruptedFetchTest.test("does not disclose the WAV to another credential", () => {
+        assert.equal(foreign.status, "not-found");
+      });
     } finally { await cleanup(instance); }
   });
 });
