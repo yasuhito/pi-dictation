@@ -63,12 +63,11 @@ test("the Recorder transports authenticated Bridge recording Level observations"
 });
 
 for (const [mode, code] of [
-  ["early-eof", "invalid-audio"],
   ["oversized", "invalid-audio"],
   ["invalid-wav", "invalid-audio"],
   ["trailing-data", "invalid-audio"],
   ["hash-mismatch", "invalid-audio"],
-  ["auth-failure", "recording-failed"],
+  ["auth-failure", "outcome-unknown"],
   ["ack-failure", "recording-failed"],
 ]) {
   test(`the Bridge recording adapter rejects ${mode} without committing audio`, async (t) => {
@@ -90,6 +89,62 @@ test("the Bridge recording adapter reconciles an ambiguous stop through owner st
     const recording = await instance.recorder.start(instance.startOptions);
     await recording.stop();
     assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge recording adapter reapplies the same stop identity during finalization reconciliation", async () => {
+  const instance = await harness("unapplied-stop-retries");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+for (const operation of ["start", "status", "stop", "acknowledge", "cancel"]) {
+  test(`the Bridge recording adapter retries the same ${operation} operation after a lost response`, async () => {
+    const instance = await harness(`drop-${operation}-response`);
+    try {
+      const recording = await instance.recorder.start(instance.startOptions);
+      if (operation === "cancel") await recording.cancel();
+      else if (operation !== "start") await recording.stop();
+      else await recording.cancel();
+      assert.equal(instance.events().filter((event) => event === operation).length >= 2, true);
+    } finally { await instance.cleanup(); }
+  });
+}
+
+test("a deterministic local fetch write failure does not enter transport recovery", async (t) => {
+  const instance = await harness();
+  instance.startOptions.destination = join(resolve(instance.startOptions.destination, ".."), "missing", "recording.wav");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const startedAt = Date.now();
+    const error = await recording.stop().catch((value) => value);
+    const elapsed = Date.now() - startedAt;
+    await t.test("returns the deterministic recording failure classification", () => {
+      assert.equal(error.code, "recording-failed");
+    });
+    await t.test("fails without consuming the recovery window", () => {
+      assert.equal(elapsed < 1000, true);
+    });
+    await t.test("does not retry the successful remote fetch", () => {
+      assert.equal(instance.events().filter((event) => event === "fetch").length, 1);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("an interrupted Bridge fetch restarts from byte zero", async (t) => {
+  const instance = await harness("fetch-interrupted-once");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    await t.test("retries the fetch operation", () => {
+      assert.equal(instance.events().filter((event) => event === "fetch").length, 2);
+    });
+    await t.test("commits only the complete recovered WAV", () => {
+      assert.equal(existsSync(instance.startOptions.destination), true);
+    });
   } finally { await instance.cleanup(); }
 });
 
