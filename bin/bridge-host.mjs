@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import net from "node:net";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
-export const BRIDGE_PROTOCOL_VERSION = 2;
+export const BRIDGE_PROTOCOL_VERSION = 3;
 const packageRoot = new URL("..", import.meta.url);
 const supervisorPath = fileURLToPath(new URL("./pi-dictation-tunnel.mjs", import.meta.url));
 
@@ -115,8 +115,7 @@ function ssh(alias, remoteArgs, options = {}) {
     encoding: "utf8", input: options.input, timeout: options.timeout ?? 15000,
   });
   if (result.error || result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim().slice(0, 500);
-    throw new BridgeHostError(`${options.failure || "SSH command failed"}${detail ? `: ${detail}` : ""}`);
+    throw new BridgeHostError(options.failure || "SSH command failed");
   }
   return result.stdout.trim();
 }

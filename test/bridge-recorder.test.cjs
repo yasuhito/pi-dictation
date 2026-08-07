@@ -68,6 +68,9 @@ for (const [mode, code] of [
   ["invalid-wav", "invalid-audio"],
   ["trailing-data", "invalid-audio"],
   ["hash-mismatch", "invalid-audio"],
+  ["metadata-conflict", "invalid-audio"],
+  ["noncanonical-base64", "recording-failed"],
+  ["version-mismatch", "recording-failed"],
   ["auth-failure", "recording-failed"],
   ["ack-failure", "recording-failed"],
 ]) {
