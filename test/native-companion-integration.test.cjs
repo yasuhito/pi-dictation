@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { createHash, randomBytes, randomUUID } = require("node:crypto");
-const { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { test } = require("node:test");
@@ -46,21 +46,32 @@ async function nativeHarness() {
     return { id, directory, credential: value };
   });
   const socket = join(runtime, "companion.sock");
-  const child = spawn(executable, [], {
-    env: { ...process.env, HOME: home, CFFIXED_USER_HOME: home }, stdio: ["ignore", "ignore", "pipe"],
-  });
-  let companionError = "";
-  child.stderr.on("data", (chunk) => { companionError += chunk; });
-  const deadline = Date.now() + 10000;
-  while (!require("node:fs").existsSync(socket) && child.exitCode === null && Date.now() < deadline) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  let child;
+  async function launch() {
+    let companionError = "";
+    child = spawn(executable, [], {
+      env: { ...process.env, HOME: home, CFFIXED_USER_HOME: home }, stdio: ["ignore", "ignore", "pipe"],
+    });
+    child.stderr.on("data", (chunk) => { companionError += chunk; });
+    const deadline = Date.now() + 10000;
+    while (!existsSync(socket) && child.exitCode === null && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    if (!existsSync(socket)) throw new Error(`native companion did not start: ${companionError.trim()}`);
   }
-  if (!require("node:fs").existsSync(socket)) throw new Error(`native companion did not start: ${companionError.trim()}`);
+  await launch();
   return {
-    home, socket, primary, owners, child,
-    async cleanup() {
+    home, runtime, socket, primary, owners,
+    async restart() {
       child.kill("SIGTERM");
       await new Promise((resolveWait) => child.once("exit", resolveWait));
+      await launch();
+    },
+    async cleanup() {
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await new Promise((resolveWait) => child.once("exit", resolveWait));
+      }
       rmSync(home, { recursive: true, force: true });
     },
   };
@@ -74,38 +85,91 @@ test("native companion coordinates concurrent host owners", macOnly, async (t) =
     const [first, second] = instance.owners;
     const firstLease = capability();
     const secondLease = capability();
-    const firstStart = await request(instance.socket, first.credential, "start", { ...firstLease, maxDurationMs: 10000 });
-    const competingStart = await request(instance.socket, second.credential, "start", { ...secondLease, maxDurationMs: 10000 });
-    await t.test("single-recording arbitration", () => assert.deepEqual([firstStart.status, competingStart.status], ["ok", "busy"]));
+    const starts = await Promise.all([
+      request(instance.socket, first.credential, "start", { ...firstLease, maxDurationMs: 10000 }),
+      request(instance.socket, second.credential, "start", { ...secondLease, maxDurationMs: 10000 }),
+    ]);
+    await t.test("single-recording arbitration", () => assert.deepEqual(
+      starts.map((value) => value.status).sort(), ["busy", "ok"],
+    ));
+    const winner = starts[0].status === "ok"
+      ? { owner: first, lease: firstLease }
+      : { owner: second, lease: secondLease };
+    const loser = starts[0].status === "busy"
+      ? { owner: first, lease: firstLease }
+      : { owner: second, lease: secondLease };
 
-    const isolated = await request(instance.socket, second.credential, "status", firstLease);
+    const isolated = await request(instance.socket, loser.owner.credential, "status", winner.lease);
     await t.test("owner isolation", () => assert.equal(isolated.status, "not-found"));
 
+    await request(instance.socket, winner.owner.credential, "cancel", winner.lease);
+    await instance.restart();
     const reconnects = await Promise.all([
-      request(instance.socket, second.credential, "health", {}),
+      request(instance.socket, first.credential, "health", {}),
       request(instance.socket, second.credential, "health", {}),
     ]);
-    await t.test("independent reconnect", () => assert.deepEqual(reconnects.map((value) => value.status), ["ok", "ok"]));
+    await t.test("first owner reconnects after companion disconnect", () => assert.equal(reconnects[0].status, "ok"));
+    await t.test("second owner reconnects independently", () => assert.equal(reconnects[1].status, "ok"));
 
-    await request(instance.socket, first.credential, "cancel", firstLease);
     const replacement = credential();
     privateJson(join(first.directory, "credential.next.json"), replacement);
-    const replacementHealth = await request(instance.socket, replacement, "health", {});
-    const retired = await request(instance.socket, first.credential, "credential-revoke-if-idle", {});
+    const [replacementHealth, peerDuringRotation] = await Promise.all([
+      request(instance.socket, replacement, "health", {}),
+      request(instance.socket, second.credential, "health", {}),
+    ]);
+    const retiredRequestId = randomUUID();
+    const [retired, retiredReplay] = await Promise.all([
+      request(instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId),
+      request(instance.socket, first.credential, "credential-revoke-if-idle", {}, retiredRequestId),
+    ]);
     renameSync(join(first.directory, "credential.next.json"), join(first.directory, "credential.json"));
     const committedHealth = await request(instance.socket, replacement, "health", {});
-    await t.test("safe rotation", () => assert.deepEqual(
-      [replacementHealth.status, retired.status, committedHealth.status], ["ok", "ok", "ok"],
-    ));
+    await t.test("replacement authenticates during peer activity", () => assert.equal(replacementHealth.status, "ok"));
+    await t.test("peer remains healthy during rotation", () => assert.equal(peerDuringRotation.status, "ok"));
+    await t.test("retired credential is revoked while idle", () => assert.equal(retired.status, "ok"));
+    await t.test("identical revocation replays its original outcome", () => assert.deepEqual(retiredReplay.payload, retired.payload));
+    await t.test("replacement authenticates after commit", () => assert.equal(committedHealth.status, "ok"));
 
     const ownedLease = capability();
     const ownedStart = await request(instance.socket, second.credential, "start", { ...ownedLease, maxDurationMs: 10000 });
-    const revoked = await request(instance.socket, second.credential, "credential-revoke", {});
-    const survivingOwner = await request(instance.socket, replacement, "health", {});
-    await t.test("scoped revocation", () => assert.deepEqual(
-      { started: ownedStart.status, revoked: revoked.payload.activeRecordingLease, survivor: survivingOwner.status },
-      { started: "ok", revoked: 1, survivor: "ok" },
-    ));
+    const [revoked, survivingOwner] = await Promise.all([
+      request(instance.socket, second.credential, "credential-revoke", {}),
+      request(instance.socket, replacement, "health", {}),
+    ]);
+    await t.test("revoked owner held the recording lease", () => assert.equal(ownedStart.status, "ok"));
+    await t.test("revocation reports the active lease", () => assert.equal(revoked.payload.activeRecordingLease, 1));
+    await t.test("other owner survives concurrent revocation", () => assert.equal(survivingOwner.status, "ok"));
+  } finally { await instance.cleanup(); }
+});
+
+test("native companion preserves recording ownership across restart", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [first, second] = instance.owners;
+    const retainedLease = capability();
+    const incompleteLease = capability();
+    await request(instance.socket, first.credential, "start", { ...retainedLease, maxDurationMs: 10000 });
+    await request(instance.socket, first.credential, "stop", retainedLease);
+    await request(instance.socket, second.credential, "start", { ...incompleteLease, maxDurationMs: 10000 });
+    await instance.restart();
+
+    const [retainedEffects, incompleteEffects] = await Promise.all([
+      request(instance.socket, first.credential, "credential-effects", {}),
+      request(instance.socket, second.credential, "credential-effects", {}),
+    ]);
+    await t.test("preview restores the first owner's retained WAV", () => assert.equal(retainedEffects.payload.retainedWav, 1));
+    await t.test("preview restores the second owner's incomplete WAV", () => assert.equal(incompleteEffects.payload.incompleteAudio, 1));
+
+    const firstWav = join(instance.runtime, `recording-${retainedLease.recordingId}.wav`);
+    const secondWav = join(instance.runtime, `recording-${incompleteLease.recordingId}.wav`);
+    const [revoked, survivor] = await Promise.all([
+      request(instance.socket, first.credential, "credential-revoke", {}),
+      request(instance.socket, second.credential, "health", {}),
+    ]);
+    await t.test("revocation reports only the target owner's retained WAV", () => assert.equal(revoked.payload.retainedWav, 1));
+    await t.test("revocation deletes the target owner's WAV", () => assert.equal(existsSync(firstWav), false));
+    await t.test("revocation preserves the other owner's WAV", () => assert.equal(existsSync(secondWav), true));
+    await t.test("revocation preserves the other owner's credential", () => assert.equal(survivor.status, "ok"));
   } finally { await instance.cleanup(); }
 });
 

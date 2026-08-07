@@ -4,7 +4,7 @@
 
 Bridge protocol version 2 makes each Bridge recording a capability-owned **Recording lease**. Pi generates a UUID recording identity and a cryptographically random 32-byte lease secret before `start`. The companion binds the lease to the authenticated client credential and retains only `SHA-256(lease secret)`.
 
-Every request has an authenticated UUID request identity. The response HMAC covers the actual response status. Reusing a request identity with identical operation and payload is replay-safe; changing either returns `request-conflict` without applying an operation.
+Every request has an authenticated UUID request identity. The response HMAC covers the actual response status. Reusing a request identity with identical operation and payload is replay-safe; changing either returns `request-conflict` without applying an operation. The companion retains the original status and payload for authenticated administration requests, including after that request revokes its credential, so an identical replay receives the original outcome.
 
 ## Operations
 
@@ -16,7 +16,13 @@ Every request has an authenticated UUID request identity. The response HMAC cove
 - `cancel { recordingId, leaseSecret }`
 - `acknowledge { recordingId, leaseSecret }`
 
-Except for `start` and authenticated `health`, every operation requires both capability fields. Unknown identities, wrong secrets, and cross-owner requests all return the identical authenticated `not-found {}` response. `busy {}` never identifies the active owner or lease.
+Credential administration is a separate owner-authenticated plane:
+
+- `credential-effects {}` previews the calling credential's connections and owned audio.
+- `credential-revoke {}` revokes the calling credential and deletes only its owned audio.
+- `credential-revoke-if-idle {}` performs that revocation only when the preview has no owned audio or active lease.
+
+Recording lifecycle operations other than `start` require both capability fields; authenticated `health` and credential administration require no recording capability because they address the calling credential rather than a recording lease. Unknown recording identities, wrong secrets, and cross-owner recording requests all return the identical authenticated `not-found {}` response. `busy {}` never identifies the active owner or lease.
 
 The statuses are `ok`, `busy`, `not-found`, `request-conflict`, `invalid-state`, and `failed`.
 
