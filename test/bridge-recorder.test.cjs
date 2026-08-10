@@ -65,6 +65,8 @@ test("the Recorder transports authenticated Bridge recording Level observations"
 for (const [mode, code] of [
   ["oversized", "invalid-audio"],
   ["invalid-wav", "invalid-audio"],
+  ["duplicate-fmt-wav", "invalid-audio"],
+  ["duplicate-data-wav", "invalid-audio"],
   ["trailing-data", "invalid-audio"],
   ["hash-mismatch", "invalid-audio"],
   ["metadata-conflict", "invalid-audio"],

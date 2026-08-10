@@ -147,6 +147,30 @@ function wav() {
   const sample = mode === "all-zero" ? 0 : mode === "quiet-nonzero" ? 1 : 1200;
   for (let offset = 44; offset < result.length; offset += 2) result.writeInt16LE(sample, offset);
   if (mode === "invalid-wav") result.writeUInt16LE(2, 22);
+  if (mode === "duplicate-fmt-wav") {
+    const conflictingFormat = Buffer.alloc(24);
+    conflictingFormat.write("fmt ", 0);
+    conflictingFormat.writeUInt32LE(16, 4);
+    conflictingFormat.writeUInt16LE(1, 8);
+    conflictingFormat.writeUInt16LE(2, 10);
+    conflictingFormat.writeUInt32LE(16000, 12);
+    conflictingFormat.writeUInt32LE(64000, 16);
+    conflictingFormat.writeUInt16LE(4, 20);
+    conflictingFormat.writeUInt16LE(16, 22);
+    const ambiguous = Buffer.concat([result.subarray(0, 12), conflictingFormat, result.subarray(12)]);
+    ambiguous.writeUInt32LE(ambiguous.length - 8, 4);
+    return ambiguous;
+  }
+  if (mode === "duplicate-data-wav") {
+    const duplicateData = Buffer.alloc(12);
+    duplicateData.write("data", 0);
+    duplicateData.writeUInt32LE(4, 4);
+    duplicateData.writeInt16LE(1200, 8);
+    duplicateData.writeInt16LE(1200, 10);
+    const ambiguous = Buffer.concat([result.subarray(0, 36), duplicateData, result.subarray(36)]);
+    ambiguous.writeUInt32LE(ambiguous.length - 8, 4);
+    return ambiguous;
+  }
   if (mode === "trailing-data") return Buffer.concat([result, Buffer.from([1])]);
   return result;
 }
