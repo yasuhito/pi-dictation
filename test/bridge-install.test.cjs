@@ -58,7 +58,7 @@ function hostDirectories(bridge) {
   return existsSync(hosts) ? require("node:fs").readdirSync(hosts) : [];
 }
 
-async function startCredentialServer(f, busyFile) {
+async function startCredentialServer(f, busyFile, dropFile) {
   const script = join(f.home, "credential-server.cjs");
   const socket = join(f.home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
   mkdirSync(join(socket, ".."), { recursive: true, mode: 0o700 });
@@ -67,16 +67,16 @@ const { createHmac, randomBytes } = require("node:crypto");
 const { appendFileSync, chmodSync, existsSync, readFileSync, readdirSync, rmSync } = require("node:fs");
 const { join } = require("node:path");
 const net = require("node:net");
-const [bridge, socket, busyFile] = process.argv.slice(2);
+const [bridge, socket, busyFile, dropFile] = process.argv.slice(2);
 const outcomes = new Map();
 function encode(fields) { const pieces=[Buffer.from("pi-dictation-bridge-auth-v1\0")]; for (const field of fields) { const value=Buffer.isBuffer(field)?field:Buffer.from(String(field)); const length=Buffer.alloc(4); length.writeUInt32BE(value.length); pieces.push(length,value); } return Buffer.concat(pieces); }
 function tag(secret, fields) { return createHmac("sha256", Buffer.from(secret,"base64")).update(encode(fields)).digest(); }
 function frame(value) { const body=Buffer.from(JSON.stringify(value)); const header=Buffer.alloc(4); header.writeUInt32BE(body.length); return Buffer.concat([header,body]); }
 function credentials() { const result=new Map(); for (const id of readdirSync(join(bridge,"hosts"))) for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,"hosts",id,name))); result.set(value.id,value); } catch {} } return result; }
-const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const rejected=request.operation==="credential-revoke-if-idle"&&existsSync(busyFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:0,incompleteAudio:0,retainedWav:0}}; outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.requestId+"\n"); } const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
+const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const rejected=request.operation==="credential-revoke-if-idle"&&existsSync(busyFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:0,incompleteAudio:0,retainedWav:0}}; outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.operation+" "+request.requestId+"\n"); } if(request.operation==="credential-revoke"&&existsSync(dropFile)){rmSync(dropFile);return client.destroy();} const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
 rmSync(socket,{force:true}); server.listen(socket,()=>{chmodSync(socket,0o600);if(process.send)process.send("ready");});
 `);
-  const child = spawn(process.execPath, [script, f.bridge, socket, busyFile], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  const child = spawn(process.execPath, [script, f.bridge, socket, busyFile, dropFile || `${busyFile}.never-drop`], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   await once(child, "message");
   return child;
 }
@@ -114,6 +114,36 @@ test("each SSH alias receives independent owned artifacts", async (t) => {
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("confirmed revocation retries a lost response from durable local intent", async (t) => {
+  const f = fixture();
+  const busyFile = join(f.home, "no-owned-audio");
+  const dropFile = join(f.home, "drop-revoke-response");
+  let server;
+  try {
+    const installed = run(f, ["install", "retry-revoke-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    writeFileSync(dropFile, "drop\n");
+    server = await startCredentialServer(f, busyFile, dropFile);
+    const interrupted = run(f, ["revoke", "retry-revoke-pi", "--confirm"]);
+    const intentPersisted = existsSync(join(host, "credential.revocation.json"));
+    const pendingList = run(f, ["list", "--json"]);
+    const pendingLifecycle = JSON.parse(pendingList.stdout).hosts[0].status.lifecycle;
+    const rotationWhilePending = run(f, ["rotate", "retry-revoke-pi"]);
+    const retried = run(f, ["revoke", "retry-revoke-pi", "--confirm"]);
+
+    await t.test("lost response fails the first invocation", () => assert.notEqual(interrupted.status, 0));
+    await t.test("local revocation intent survives the lost response", () => assert.equal(intentPersisted, true));
+    await t.test("list reports the ambiguous revocation as pending", () => assert.equal(pendingLifecycle, "revocation-pending"));
+    await t.test("rotation is refused while revocation is pending", () => assert.notEqual(rotationWhilePending.status, 0));
+    await t.test("retry completes with the original request identity", () => assert.equal(retried.status, 0, retried.stderr));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
 test("credential rotation retries an idle rejection without restarting the companion", async (t) => {
   const f = fixture();
   const busyFile = join(f.home, "owned-audio");
@@ -141,6 +171,36 @@ test("credential rotation retries an idle rejection without restarting the compa
     if (server) await once(server, "exit").catch(() => {});
     rmSync(f.home, { recursive: true, force: true });
   }
+});
+
+test("remote credential commit keeps a readable credential through interruption", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-commit-"));
+  const id = "4567890abcdef123";
+  const endpoint = { type: "unix", path: join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id, "listener.sock") };
+  const oldCredential = { id: "77777777-7777-4777-8777-777777777777", secret: Buffer.alloc(32, 13).toString("base64") };
+  const nextCredential = { id: "88888888-8888-4888-8888-888888888888", secret: Buffer.alloc(32, 14).toString("base64") };
+  const prepare = (credential, stagedCredential) => spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id,
+    Buffer.from(JSON.stringify({ ...endpoint, ...(stagedCredential ? { stagedCredential: true } : {}) })).toString("base64")], {
+    cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+  });
+  try {
+    const initial = prepare(oldCredential, false);
+    if (initial.status !== 0) throw new Error(initial.stderr);
+    const staged = prepare(nextCredential, true);
+    if (staged.status !== 0) throw new Error(staged.stderr);
+    const interrupted = spawnSync(process.execPath, [cli, "bridge", "remote-credential-commit", id, oldCredential.id, nextCredential.id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test", PI_DICTATION_TEST_INTERRUPT: "after-remote-current-copy" },
+    });
+    const config = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8"));
+    const readableDuringInterruption = existsSync(config.recorder.credentialFile);
+    const retried = spawnSync(process.execPath, [cli, "bridge", "remote-credential-commit", id, oldCredential.id, nextCredential.id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test" },
+    });
+
+    await t.test("interrupts after copying the current credential", () => assert.notEqual(interrupted.status, 0));
+    await t.test("Recorder credential remains readable", () => assert.equal(readableDuringInterruption, true));
+    await t.test("retry completes the remote commit", () => assert.equal(retried.status, 0, retried.stderr));
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 for (const [name, bind, expectedHost] of [["IPv4", "127.0.0.1:43123", "127.0.0.1"], ["IPv6", "[::1]:43124", "::1"]]) {

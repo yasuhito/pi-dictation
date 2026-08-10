@@ -110,18 +110,108 @@ test("native companion coordinates independent credential owners", macOnly, asyn
   try {
     const [first, second] = instance.owners;
     const lease = capability();
+    const priorHealthId = randomUUID();
+    await request(instance.socket, first.credential, "health", {}, priorHealthId);
     const started = await request(instance.socket, first.credential, "start", { ...lease, maxDurationMs: 10000 });
     const rejectedId = randomUUID();
     const rejected = await request(instance.socket, first.credential, "credential-revoke-if-idle", {}, rejectedId);
     await request(instance.socket, first.credential, "cancel", lease);
     const replayed = await request(instance.socket, first.credential, "credential-revoke-if-idle", {}, rejectedId);
     const retried = await request(instance.socket, first.credential, "credential-revoke-if-idle", {}, randomUUID());
+    const oldHealthReplay = await request(instance.socket, first.credential, "health", {}, priorHealthId);
     const peer = await request(instance.socket, second.credential, "health", {});
 
     await t.test("owner holds the active Recording lease", () => assert.equal(started.status, "ok"));
     await t.test("idle revocation rejects owned audio", () => assert.equal(rejected.status, "invalid-state"));
     await t.test("same request identity replays the rejection", () => assert.equal(replayed.status, "invalid-state"));
     await t.test("new request identity can revoke after cleanup", () => assert.equal(retried.status, "ok"));
+    await t.test("revoked owner cannot replay an earlier health request", () => assert.equal(oldHealthReplay.status, "not-found"));
+    await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
+  } finally { await instance.cleanup(); }
+});
+
+test("terminal cleanup failure does not block unrelated owners", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [first, second] = instance.owners;
+    const lease = capability();
+    await request(instance.socket, first.credential, "start", { ...lease, maxDurationMs: 10000 });
+    writeFileSync(join(instance.runtime, "test-fail-audio-cleanup"), "fail once\n");
+    const cancelled = await request(instance.socket, first.credential, "cancel", lease);
+    const cleanupFailureInjected = !existsSync(join(instance.runtime, "test-fail-audio-cleanup"));
+    const pendingEffects = await request(instance.socket, first.credential, "credential-effects", {});
+    const peer = await request(instance.socket, second.credential, "health", {});
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1200));
+    const wavAbsent = !existsSync(join(instance.runtime, `recording-${lease.recordingId}.wav`));
+
+    await t.test("injects one audio cleanup failure", () => assert.equal(cleanupFailureInjected, true));
+    await t.test("accepted cancellation keeps its terminal outcome", () => assert.equal(cancelled.status, "ok"));
+    await t.test("preview reports cleanup-pending audio", () => assert.equal(pendingEffects.payload.incompleteAudio, 1));
+    await t.test("another owner remains usable during cleanup retry", () => assert.equal(peer.status, "ok"));
+    await t.test("cleanup retry removes the WAV", () => assert.equal(wavAbsent, true));
+  } finally { await instance.cleanup(); }
+});
+
+test("native companion overlaps multi-owner arbitration, reconnect, rotation, and revocation", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [first, second] = instance.owners;
+    const firstLease = capability();
+    const secondLease = capability();
+    const starts = await Promise.all([
+      request(instance.socket, first.credential, "start", { ...firstLease, maxDurationMs: 10000 }),
+      request(instance.socket, second.credential, "start", { ...secondLease, maxDurationMs: 10000 }),
+    ]);
+    const winner = starts[0].status === "ok" ? { owner: first, lease: firstLease } : { owner: second, lease: secondLease };
+    const loser = starts[0].status === "busy" ? { owner: first, lease: firstLease } : { owner: second, lease: secondLease };
+    const isolated = await request(instance.socket, loser.owner.credential, "status", winner.lease);
+    await request(instance.socket, winner.owner.credential, "cancel", winner.lease);
+    await instance.restart();
+    const reconnects = await Promise.all([
+      request(instance.socket, first.credential, "health", {}),
+      request(instance.socket, second.credential, "health", {}),
+    ]);
+    const retainedLease = capability();
+    await request(instance.socket, second.credential, "start", { ...retainedLease, maxDurationMs: 10000 });
+    await request(instance.socket, second.credential, "stop", retainedLease);
+    const replacement = credential();
+    privateJson(join(first.directory, "credential.next.json"), replacement);
+    const [replacementHealth, peerDuringRotation] = await Promise.all([
+      request(instance.socket, replacement, "health", {}),
+      request(instance.socket, second.credential, "health", {}),
+    ]);
+    const [revoked, replacementAfterRevocation, retainedPeer] = await Promise.all([
+      request(instance.socket, first.credential, "credential-revoke-if-idle", {}),
+      request(instance.socket, replacement, "health", {}),
+      request(instance.socket, second.credential, "status", retainedLease),
+    ]);
+
+    await t.test("concurrent starts preserve single-recording arbitration", () => assert.deepEqual(starts.map((value) => value.status).sort(), ["busy", "ok"]));
+    await t.test("competing owner cannot inspect the Recording lease", () => assert.equal(isolated.status, "not-found"));
+    await t.test("first owner reconnects after companion restart", () => assert.equal(reconnects[0].status, "ok"));
+    await t.test("second owner reconnects independently", () => assert.equal(reconnects[1].status, "ok"));
+    await t.test("replacement credential authenticates during peer activity", () => assert.equal(replacementHealth.status, "ok"));
+    await t.test("peer remains healthy during rotation", () => assert.equal(peerDuringRotation.status, "ok"));
+    await t.test("idle owner revocation succeeds", () => assert.equal(revoked.status, "ok"));
+    await t.test("replacement remains usable after old credential revocation", () => assert.equal(replacementAfterRevocation.status, "ok"));
+    await t.test("peer retained WAV survives scoped revocation", () => assert.equal(retainedPeer.payload.state, "result-ready"));
+  } finally { await instance.cleanup(); }
+});
+
+test("revocation wins over a start already registered for the same owner", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [first, second] = instance.owners;
+    const lease = capability();
+    writeFileSync(join(instance.runtime, "test-delay-start-after-register"), "delay\n");
+    const startPromise = request(instance.socket, first.credential, "start", { ...lease, maxDurationMs: 10000 });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    const revoked = await request(instance.socket, first.credential, "credential-revoke", {});
+    const started = await startPromise;
+    const peer = await request(instance.socket, second.credential, "health", {});
+
+    await t.test("revocation commits while start dispatch is delayed", () => assert.equal(revoked.status, "ok"));
+    await t.test("registered start cannot create audio after revocation", () => assert.equal(started.status, "not-found"));
     await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
   } finally { await instance.cleanup(); }
 });
@@ -161,10 +251,12 @@ for (const scenario of [
       await instance.waitForExit();
       await instance.start();
       const restored = await request(instance.socket, first.credential, "status", lease);
+      const wavAbsent = !existsSync(join(instance.runtime, `recording-${lease.recordingId}.wav`));
       const peer = await request(instance.socket, second.credential, "health", {});
 
       await t.test("operation disconnects at the durable cleanup boundary", () => assert.equal(interrupted, true));
       await t.test("restart preserves the terminal state", () => assert.equal(restored.payload.state, scenario.operation === "cancel" ? "cancelled" : "acknowledged"));
+      await t.test("restart preserves WAV deletion", () => assert.equal(wavAbsent, true));
       await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
     } finally { await instance.cleanup(); }
   });
@@ -184,9 +276,11 @@ test("retention expiry cleanup survives a crash after WAV deletion", macOnly, as
     await instance.startAndWaitForCrash("retention-after-audio-delete");
     await instance.start();
     const restored = await request(instance.socket, first.credential, "status", lease);
+    const wavAbsent = !existsSync(join(instance.runtime, `recording-${lease.recordingId}.wav`));
     const peer = await request(instance.socket, second.credential, "health", {});
 
     await t.test("restart completes the expired tombstone", () => assert.equal(restored.payload.state, "expired"));
+    await t.test("restart preserves expired WAV deletion", () => assert.equal(wavAbsent, true));
     await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
   } finally { await instance.cleanup(); }
 });
@@ -204,10 +298,12 @@ test("owner revocation cleanup survives a crash after WAV deletion", macOnly, as
     await instance.waitForExit();
     await instance.start();
     const replay = await request(instance.socket, first.credential, "credential-revoke", {}, requestId);
+    const wavAbsent = !existsSync(join(instance.runtime, `recording-${lease.recordingId}.wav`));
     const peer = await request(instance.socket, second.credential, "health", {});
 
     await t.test("revocation disconnects at the durable cleanup boundary", () => assert.equal(interrupted, true));
     await t.test("restart replays the successful revocation", () => assert.equal(replay.status, "ok"));
+    await t.test("restart preserves revoked WAV deletion", () => assert.equal(wavAbsent, true));
     await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
   } finally { await instance.cleanup(); }
 });

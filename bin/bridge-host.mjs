@@ -94,6 +94,7 @@ function localPaths(alias) {
     nextCredential: join(root, "credential.next.json"),
     previousCredential: join(root, "credential.previous.json"),
     rotation: join(root, "credential.rotation.json"),
+    revocation: join(root, "credential.revocation.json"),
     revokedCredential: join(root, "credential.revoked.json"),
     endpoint: join(root, "endpoint.json"),
     state: join(root, "setup.json"),
@@ -329,6 +330,7 @@ export function installHost(alias, args = []) {
   ensureOwnedParent(dirname(paths.plist), "LaunchAgents directory");
   ensureDirectory(join(paths.bridgeRoot, "hosts"), "bridge hosts directory");
   assertOwnedHost(paths, alias);
+  if (existsSync(paths.revocation)) throw new BridgeHostError("Credential revocation is pending; finish it before reinstalling this host bridge.");
   if (!existsSync(paths.root)) ensureDirectory(paths.root, "host bridge directory");
   const ownershipPath = join(paths.root, "ownership.json");
   if (!existsSync(ownershipPath)) atomicWrite(ownershipPath, `${JSON.stringify({ product: PRODUCT, hostId: paths.id, sshAlias: alias })}\n`);
@@ -428,13 +430,20 @@ function configuredHosts() {
     const paths = localPaths(ownership.sshAlias);
     assertOwnedHost(paths, ownership.sshAlias);
     const stages = readStages(paths, ownership.sshAlias);
-    const revocationPending = !existsSync(paths.credential) && existsSync(paths.revokedCredential);
-    const credentialPath = revocationPending ? paths.revokedCredential : paths.credential;
-    const credential = validateCredential(readOwnedJson(credentialPath, revocationPending ? "revoked host credential" : "host credential"), revocationPending ? "revoked host credential" : "host credential");
+    const hasRevocationIntent = existsSync(paths.revocation);
+    if (hasRevocationIntent) readOwnedJson(paths.revocation, "credential revocation state");
+    const revocationPending = hasRevocationIntent || !existsSync(paths.credential) && existsSync(paths.revokedCredential);
+    const credentialPath = existsSync(paths.credential) ? paths.credential : paths.revokedCredential;
+    const credential = validateCredential(readOwnedJson(credentialPath, revocationPending ? "host credential pending revocation" : "host credential"), revocationPending ? "host credential pending revocation" : "host credential");
     result.push({
       sshAlias: ownership.sshAlias,
       credential: { name: credential.id, createdAt: typeof credential.createdAt === "string" ? credential.createdAt : null },
-      status: { lifecycle: revocationPending ? "revocation-pending" : "active", tunnel: stages.tunnelProcess, listener: stages.listener, authenticatedHealth: stages.authenticatedHealth },
+      status: {
+        lifecycle: revocationPending ? "revocation-pending" : "active",
+        tunnel: revocationPending ? "pending" : stages.tunnelProcess,
+        listener: revocationPending ? "pending" : stages.listener,
+        authenticatedHealth: revocationPending ? "pending" : stages.authenticatedHealth,
+      },
     });
     if (result.length > 1000) throw new BridgeHostError("Bridge list exceeds the safe 1000-host output limit.");
   }
@@ -523,6 +532,7 @@ function testInterruption(name) {
 export async function rotateHost(alias, companionRequestAt) {
   const paths = localPaths(alias);
   assertOwnedHost(paths, alias);
+  if (existsSync(paths.revocation)) throw new BridgeHostError("Credential revocation is pending; finish it before rotating this host bridge.");
   let rotation = readRotation(paths);
   if (!rotation) {
     const previous = optionalCredential(paths.previousCredential, "previous host credential");
@@ -609,8 +619,19 @@ export async function rotateHost(alias, companionRequestAt) {
 export async function revokeHost(alias, confirmed, companionRequestAt) {
   const paths = localPaths(alias);
   assertOwnedHost(paths, alias);
+  let revocation;
+  if (existsSync(paths.revocation)) {
+    revocation = readOwnedJson(paths.revocation, "credential revocation state");
+    if (revocation.product !== PRODUCT || revocation.hostId !== paths.id ||
+        !["confirmed", "companion-revoked"].includes(revocation.phase) ||
+        typeof revocation.credentialId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(revocation.requestId)) {
+      throw new BridgeHostError("Refusing invalid credential revocation state.");
+    }
+  }
   const alreadyDisabled = existsSync(paths.revokedCredential) && !existsSync(paths.credential);
-  if (!alreadyDisabled) {
+  if (!revocation) {
+    if (alreadyDisabled) throw new BridgeHostError("Credential revocation state is missing; refusing unsafe cleanup.");
     const credential = validateCredential(readOwnedJson(paths.credential, "host credential"), "host credential");
     const effects = validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), credential, "credential-effects"));
     console.log(`SSH alias: ${alias}`);
@@ -622,16 +643,32 @@ export async function revokeHost(alias, confirmed, companionRequestAt) {
       console.log(`Preview only. Rerun with: pi-dictation bridge revoke ${alias} --confirm`);
       return;
     }
-    validateCredentialEffects(await companionRequestAt(
-      localCompanionEndpoint(paths), credential, "credential-revoke",
-      administrationRequestId(credential.id, "credential-revoke"),
-    ));
-    const domain = `gui/${ownerUid()}`;
-    spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
-    renameSync(paths.credential, paths.revokedCredential);
+    revocation = {
+      product: PRODUCT, hostId: paths.id, credentialId: credential.id,
+      requestId: administrationRequestId(credential.id, "credential-revoke"), phase: "confirmed",
+    };
+    atomicWrite(paths.revocation, `${JSON.stringify(revocation)}\n`);
   } else if (!confirmed) {
-    throw new BridgeHostError("Credential revocation is already confirmed and awaiting remote cleanup; rerun with --confirm.");
+    throw new BridgeHostError("Credential revocation is already confirmed and awaiting cleanup; rerun with --confirm.");
   }
+  if (revocation.phase === "confirmed") {
+    const credentialPath = existsSync(paths.credential) ? paths.credential : paths.revokedCredential;
+    const credential = validateCredential(readOwnedJson(credentialPath, "host credential pending revocation"), "host credential pending revocation");
+    if (credential.id !== revocation.credentialId) throw new BridgeHostError("Credential changed during revocation.");
+    try {
+      validateCredentialEffects(await companionRequestAt(
+        localCompanionEndpoint(paths), credential, "credential-revoke", revocation.requestId,
+      ));
+    } catch (error) {
+      throw new BridgeHostError(`${error instanceof Error ? error.message : "Credential revocation failed"} The confirmed revocation was preserved for a safe retry.`);
+    }
+    revocation = { ...revocation, phase: "companion-revoked" };
+    atomicWrite(paths.revocation, `${JSON.stringify(revocation)}\n`);
+  }
+  const domain = `gui/${ownerUid()}`;
+  spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
+  if (existsSync(paths.credential) && !existsSync(paths.revokedCredential)) renameSync(paths.credential, paths.revokedCredential);
+  else if (existsSync(paths.credential) || !existsSync(paths.revokedCredential)) throw new BridgeHostError("Credential files are inconsistent during revocation.");
   try {
     ssh(alias, ["pi-dictation", "bridge", "remote-credential-revoke", paths.id], { failure: "Remote credential revocation failed" });
   } catch (error) {
@@ -788,14 +825,22 @@ export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
   const next = existsSync(nextPath)
     ? validateCredential(readOwnedJson(nextPath, "staged remote bridge credential"), "staged remote bridge credential")
     : undefined;
-  if (current.id === oldCredentialId && next?.id === nextCredentialId) renameSync(nextPath, currentPath);
-  else if (current.id === nextCredentialId && next?.id === nextCredentialId) rmSync(nextPath);
-  else if (current.id !== nextCredentialId || next) throw new BridgeHostError("Remote credential changed during rotation.");
+  if (current.id === oldCredentialId && next?.id === nextCredentialId) {
+    atomicWrite(currentPath, `${JSON.stringify(next)}\n`);
+    testInterruption("after-remote-current-copy");
+  } else if (current.id !== nextCredentialId || (next && next.id !== nextCredentialId)) {
+    throw new BridgeHostError("Remote credential changed during rotation.");
+  }
   const endpointPath = join(root, "endpoint.json");
   const staged = readOwnedJson(endpointPath, "remote Recorder endpoint configuration");
   const recorder = { ...staged, credentialFile: currentPath };
   atomicWrite(endpointPath, `${JSON.stringify(recorder, null, 2)}\n`);
   reconcileRemoteRecorder(id, recorder);
+  if (existsSync(nextPath)) {
+    const retained = validateCredential(readOwnedJson(nextPath, "staged remote bridge credential"), "staged remote bridge credential");
+    if (retained.id !== nextCredentialId) throw new BridgeHostError("Remote credential changed during rotation.");
+    rmSync(nextPath);
+  }
   console.log(JSON.stringify({ committed: true }));
 }
 
