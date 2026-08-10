@@ -191,7 +191,7 @@ test("isolated native companion rejects adversarial traffic without changing an 
       assert.equal(changedVersionReplay.status, "request-conflict");
     });
     const concurrentObservationRequestId = randomUUID();
-    const concurrentObservations = await Promise.all(Array.from({ length: 20 }, () =>
+    const concurrentObservations = await Promise.all(Array.from({ length: 4 }, () =>
       request(competitor, "health", {}, { requestId: concurrentObservationRequestId })));
     await t.test("concurrent exact observation retries all complete safely", () => {
       assert.equal(concurrentObservations.every((result) => result.status === "ok"), true);

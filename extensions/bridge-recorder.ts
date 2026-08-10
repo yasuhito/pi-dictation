@@ -501,7 +501,8 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const recordingId = randomUUID();
       const leaseSecret = randomBytes(32).toString("base64");
       const owned = leasePayload(recordingId, leaseSecret);
-      const piDurationDeadline = Date.now() + options.maxDurationMs;
+      const recordingStartedAt = Date.now();
+      const piDurationDeadline = recordingStartedAt + options.maxDurationMs;
       let startPayload: unknown;
       const startRequestId = randomUUID();
       try {
@@ -746,6 +747,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       };
 
       const recording: Recording = {
+        startedAt: recordingStartedAt,
         stop() {
           if (state === "stopped") return Promise.resolve();
           if (state === "cancelled" || state === "cancelling") return Promise.reject(new RecorderError("cancelled"));

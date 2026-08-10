@@ -371,6 +371,13 @@ class DictationStrip {
     this.requestRender();
   }
 
+  setRecordingStartedAt(startedAt: number) {
+    if (this.animationMode !== "blink" || !Number.isFinite(startedAt) || startedAt > Date.now()) return;
+    this.startedAt = startedAt;
+    this.rebuildLevels();
+    this.requestRender();
+  }
+
   restartAnimationTimer() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -642,6 +649,7 @@ export default function (pi: ExtensionAPI) {
       activeRecordings.add(active);
       ownershipTransferred = true;
       showStrip(ctx, "Recording", { blink: true });
+      strip?.setRecordingStartedAt(handle.startedAt);
       levelsReady = true;
       for (const event of pendingLevelEvents) strip?.observeLevel(event);
       if (earlyFailure) handleFailure(earlyFailure);

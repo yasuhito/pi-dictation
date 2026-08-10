@@ -183,6 +183,7 @@ runRecorderContract("fake", async () => {
       if (options.signal.aborted) throw new RecorderError("cancelled");
       let state = "active";
       return {
+        startedAt: Date.now(),
         async stop() {
           if (state === "stopped") return;
           if (state === "cancelled") throw new RecorderError("cancelled");

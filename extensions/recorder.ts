@@ -38,6 +38,7 @@ export type RecorderStartOptions = {
 };
 
 export type Recording = {
+  startedAt: number;
   stop(): Promise<void>;
   cancel(): Promise<void>;
 };
@@ -315,6 +316,7 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
         throw error;
       }
 
+      const recordingStartedAt = Date.now();
       let state: "active" | "stopping" | "stopped" | "cancelled" | "failed" = "active";
       let stopPromise: Promise<void> | undefined;
       let cancelPromise: Promise<void> | undefined;
@@ -391,6 +393,7 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
       startOptions.signal.addEventListener("abort", onStartupAbort, { once: true });
 
       const recording: Recording = {
+        startedAt: recordingStartedAt,
         stop() {
           if (state === "stopped") return Promise.resolve();
           if (state === "cancelled") return Promise.reject(new RecorderError("cancelled"));

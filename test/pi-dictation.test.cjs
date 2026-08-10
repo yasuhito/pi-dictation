@@ -349,6 +349,8 @@ test("the Dictation strip preserves truthful Level slot states", async (t) => {
     const gapDiagnosis = strip.levelDiagnosis;
     strip.observeLevel({ type: "unavailable", sequence: 4, capturedAtMs: 200 });
     const unavailableDiagnosis = strip.levelDiagnosis;
+    strip.setRecordingStartedAt(Date.now() - 2100);
+    const elapsedFromRecordingOrigin = strip.render(32)[0];
 
     await t.test("a missing interval resets smoothing", () => {
       assert.equal(beforeDelayed, 0);
@@ -364,6 +366,9 @@ test("the Dictation strip preserves truthful Level slot states", async (t) => {
     });
     await t.test("measurement unavailability remains distinct in diagnosis", () => {
       assert.equal(unavailableDiagnosis, "measurement-unavailable");
+    });
+    await t.test("elapsed time uses the Recorder timeline origin", () => {
+      assert.match(elapsedFromRecordingOrigin, /00:02$/);
     });
   } finally {
     await runtime.shutdown();

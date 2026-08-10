@@ -16,6 +16,8 @@ private let requestReceiptRetentionSeconds = resultRetentionSeconds
 private let levelIntervalMilliseconds = 50
 private let levelReplaySlots = 600
 private let levelSubscriberQueueLimit = 64
+private let maximumConnections = 16
+private let maximumConnectionsPerCredential = 4
 private let validRequestOperations: Set<String> = [
     "health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge",
     "credential-effects", "credential-revoke", "credential-revoke-if-idle",
@@ -953,10 +955,13 @@ private final class RecordingManager {
         return nil
     }
 
-    func openConnection(ownerId: String, descriptor: Int32) {
+    func openConnection(ownerId: String, descriptor: Int32) throws {
         lock.lock()
+        defer { lock.unlock() }
+        guard (connections[ownerId]?.count ?? 0) < maximumConnectionsPerCredential else {
+            throw CompanionFailure.failed
+        }
         connections[ownerId, default: []].insert(descriptor)
-        lock.unlock()
     }
 
     func closeConnection(ownerId: String, descriptor: Int32) {
@@ -1054,9 +1059,7 @@ private final class RecordingManager {
     private func cleanupRevokedRecordingLocked(_ current: BridgeRecording) throws {
         current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         current.levelSubscriber?.close(); current.levelSubscriber = nil
-        current.levelReaderLock.lock()
         current.recorder?.stop(); current.recorder = nil
-        current.levelReaderLock.unlock()
         try removeAudioLocked(current)
         testCrash("revoke-after-audio-delete")
         let metadata = metadataPath(current.id)
@@ -1179,12 +1182,19 @@ private final class RecordingManager {
     }
 
     private func captureLevel(_ current: BridgeRecording) {
-        lock.lock()
-        guard current.state == "recording", activeId == current.id else { lock.unlock(); return }
         current.levelReaderLock.lock()
-        let result = Result { try current.levelReader.readIntervals(startingAt: current.sequence) }
+        lock.lock()
+        guard current.state == "recording", activeId == current.id else {
+            lock.unlock(); current.levelReaderLock.unlock(); return
+        }
+        let startingSequence = current.sequence
+        lock.unlock()
+        let result = Result { try current.levelReader.readIntervals(startingAt: startingSequence) }
         if case .failure = result { current.levelReader.markUnavailableInterval() }
-        current.levelReaderLock.unlock()
+        lock.lock()
+        guard ["recording", "finalizing"].contains(current.state), current.sequence == startingSequence else {
+            lock.unlock(); current.levelReaderLock.unlock(); return
+        }
         switch result {
         case .failure:
             let event: [String: Any] = [
@@ -1198,6 +1208,7 @@ private final class RecordingManager {
             }
             let subscriber = current.levelSubscriber
             lock.unlock()
+            current.levelReaderLock.unlock()
             subscriber?.enqueue(event)
         case .success(let events):
             current.sequence += events.count
@@ -1207,6 +1218,7 @@ private final class RecordingManager {
             }
             let subscriber = current.levelSubscriber
             lock.unlock()
+            current.levelReaderLock.unlock()
             for event in events { subscriber?.enqueue(event) }
         }
     }
@@ -1291,10 +1303,8 @@ private final class RecordingManager {
         let terminalAt = Date().timeIntervalSince1970
         try persistTransitionLocked(current, state: "cancelled", terminalAt: terminalAt)
         current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
-        current.levelReaderLock.lock()
         current.recorder?.stop()
         current.recorder = nil
-        current.levelReaderLock.unlock()
         current.levelSubscriber?.enqueue(["type": "terminal", "state": "cancelled"])
         current.levelSubscriber = nil
         if activeId == current.id { activeId = nil }
@@ -1369,12 +1379,21 @@ private final class RecordingManager {
     private func beginFinalizationLocked(_ current: BridgeRecording, completion: String) throws {
         current.completion = completion
         current.durationTimer?.cancel(); current.levelTimer?.cancel()
-        current.levelReaderLock.lock()
         current.recorder?.stop()
         current.recorder = nil
-        let finalEvents = try? current.levelReader.readIntervals(startingAt: current.sequence)
-        current.levelReaderLock.unlock()
-        if let finalEvents {
+        current.state = "finalizing"
+        try persistLocked(current)
+    }
+
+    private func completeFinalization(_ current: BridgeRecording) {
+        current.levelReaderLock.lock()
+        lock.lock()
+        let startingSequence = current.sequence
+        let shouldDrain = current.state == "finalizing"
+        lock.unlock()
+        let finalEvents = shouldDrain ? (try? current.levelReader.readIntervals(startingAt: startingSequence)) : nil
+        lock.lock()
+        if current.state == "finalizing", current.sequence == startingSequence, let finalEvents {
             current.sequence += finalEvents.count
             current.observations.append(contentsOf: finalEvents)
             if current.observations.count > levelReplaySlots {
@@ -1382,13 +1401,13 @@ private final class RecordingManager {
             }
             for event in finalEvents { current.levelSubscriber?.enqueue(event) }
         }
-        current.state = "finalizing"
-        try persistLocked(current)
-        current.levelSubscriber?.enqueue(["type": "terminal", "state": "finalizing"])
-        current.levelSubscriber = nil
-    }
+        if current.state == "finalizing" {
+            current.levelSubscriber?.enqueue(["type": "terminal", "state": "finalizing"])
+            current.levelSubscriber = nil
+        }
+        lock.unlock()
+        current.levelReaderLock.unlock()
 
-    private func completeFinalization(_ current: BridgeRecording) {
         var result: (Int, String)?
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: current.url.path)
@@ -1414,10 +1433,8 @@ private final class RecordingManager {
 
     private func failLocked(_ current: BridgeRecording) {
         current.durationTimer?.cancel(); current.levelTimer?.cancel()
-        current.levelReaderLock.lock()
         current.recorder?.stop()
         current.recorder = nil
-        current.levelReaderLock.unlock()
         current.levelSubscriber?.enqueue(["type": "terminal", "state": "failed"])
         current.levelSubscriber = nil
         current.state = "failed"; current.length = nil; current.sha256 = nil
@@ -1895,7 +1912,7 @@ private func handleRequest(
     recordings: RecordingManager
 ) throws {
     let request = try readAuthenticatedRequest(descriptor, credentials: credentials)
-    recordings.openConnection(ownerId: request.credential.id, descriptor: descriptor)
+    try recordings.openConnection(ownerId: request.credential.id, descriptor: descriptor)
     defer { recordings.closeConnection(ownerId: request.credential.id, descriptor: descriptor) }
     let replay: (String, [String: Any])?
     do {
@@ -2100,12 +2117,32 @@ private func makeUnixListener(path: String) throws -> Int32 {
     return descriptor
 }
 
+private final class ConnectionLimiter {
+    private let lock = NSLock()
+    private var active = 0
+
+    func acquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard active < maximumConnections else { return false }
+        active += 1
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        active = max(0, active - 1)
+        lock.unlock()
+    }
+}
+
 private func serve() throws {
     let paths = fixedPaths()
     try verifyDirectory(paths.root)
     try verifyDirectory(paths.runtime)
     try verifyPreflightReceipt(root: paths.root)
     let recordings = try RecordingManager(runtime: paths.runtime)
+    let connectionLimiter = ConnectionLimiter()
     try removeStaleSocketIfSafe(path: paths.socket)
     let listener = try makeUnixListener(path: paths.socket)
     signal(SIGTERM, SIG_IGN)
@@ -2131,9 +2168,15 @@ private func serve() throws {
         var timeout = timeval(tv_sec: 5, tv_usec: 0)
         let client = accept(listener, nil, nil)
         if client < 0 { continue }
+        guard connectionLimiter.acquire() else {
+            shutdown(client, SHUT_RDWR)
+            Darwin.close(client)
+            continue
+        }
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         DispatchQueue.global().async {
+            defer { connectionLimiter.release() }
             do {
                 let credentials = try readCredentials(primary: paths.credential, hosts: paths.hostCredentials)
                 try handleRequest(client, credentials: credentials, recordings: recordings)
