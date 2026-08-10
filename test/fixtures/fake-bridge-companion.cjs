@@ -254,7 +254,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const actual = Buffer.from(request.hmac, "hex");
       if (mode === "auth-failure" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("auth");
       const payload = JSON.parse(payloadBytes.toString("utf8"));
-      if (eventFile) require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
+      if (eventFile) {
+        require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
+        if (request.operation === "subscribe-levels") {
+          require("node:fs").appendFileSync(eventFile, `subscribe-levels-request:${request.requestId}\n`);
+        }
+      }
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
       if (mode === "unapplied-stop-retries" && request.operation === "stop") {
         unappliedStopRequestId ??= request.requestId;
@@ -464,6 +469,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       if (mode === "noncanonical-base64") responsePayloadText = `${responsePayloadText.slice(0, 1)}\n${responsePayloadText.slice(1)}`;
       const response = frame({ type: "response", version: responseVersion, requestId: request.requestId, status, payload: responsePayloadText, hmac: responseTag.toString("hex") });
       if (request.operation === "subscribe-levels" && status === "ok") {
+        if (mode === "drop-subscribe-levels-response" && !droppedResponses.has("subscribe-levels")) {
+          droppedResponses.add("subscribe-levels");
+          persistState();
+          socket.destroy();
+          return;
+        }
         socket.write(response);
         const recording = owned(credential.id, payload);
         if (!recording) return socket.destroy();

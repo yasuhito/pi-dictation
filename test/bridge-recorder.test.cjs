@@ -153,6 +153,27 @@ test("Level transport failure does not change Bridge recording success", async (
   } finally { await instance.cleanup(); }
 });
 
+test("a lost Level subscription response retries the same request identity", async (t) => {
+  const instance = await harness("drop-subscribe-levels-response");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const deadline = Date.now() + 3000;
+    while (instance.events().filter((event) => event.startsWith("subscribe-levels-request:")).length < 2 && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    const requestIds = instance.events()
+      .filter((event) => event.startsWith("subscribe-levels-request:"))
+      .map((event) => event.slice("subscribe-levels-request:".length));
+    await recording.cancel();
+    await t.test("retries after losing the authenticated response", () => {
+      assert.equal(requestIds.length >= 2, true);
+    });
+    await t.test("preserves the ambiguous request identity", () => {
+      assert.equal(requestIds[1], requestIds[0]);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge retries a failed Level connection with bounded backoff only while recording", async (t) => {
   const instance = await harness("level-disconnect");
   try {
