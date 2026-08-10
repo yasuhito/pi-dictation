@@ -218,8 +218,10 @@ export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): 
     ) throw new RecorderError("invalid-audio");
 
     let formatValid = false;
+    let formatSeen = false;
     let dataOffset = 0;
     let dataSize = 0;
+    let dataSeen = false;
     let chunkOffset = 12;
     for (; chunkOffset + 8 <= riffEnd; ) {
       checkCancellation();
@@ -230,7 +232,8 @@ export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): 
       if (next <= chunkOffset || next > riffEnd) throw new RecorderError("invalid-audio");
       const id = header.toString("ascii", 0, 4);
       if (id === "fmt ") {
-        if (chunkSize < 16) throw new RecorderError("invalid-audio");
+        if (formatSeen || dataSeen || chunkSize < 16) throw new RecorderError("invalid-audio");
+        formatSeen = true;
         const format = await readAt(body, 16);
         const sampleRate = format.readUInt32LE(4);
         formatValid =
@@ -242,12 +245,14 @@ export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): 
           format.readUInt16LE(14) === 16 &&
           format.readUInt16LE(12) === 2;
       } else if (id === "data") {
+        if (!formatSeen || dataSeen) throw new RecorderError("invalid-audio");
+        dataSeen = true;
         dataOffset = body;
         dataSize = chunkSize;
       }
       chunkOffset = next;
     }
-    if (chunkOffset !== riffEnd || !formatValid || !dataOffset || dataSize < 2 || dataSize % 2 !== 0) {
+    if (chunkOffset !== riffEnd || !formatValid || !formatSeen || !dataSeen || !dataOffset || dataSize < 2 || dataSize % 2 !== 0) {
       throw new RecorderError("invalid-audio");
     }
 

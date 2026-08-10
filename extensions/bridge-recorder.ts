@@ -7,7 +7,7 @@ import type { BridgeRecorderConfig } from "./config.js";
 import type { Recorder, RecorderStartOptions, Recording } from "./recorder.js";
 import { RecorderError, validatePcm16MonoWav } from "./recorder.js";
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const MAX_FRAME_BYTES = 64 * 1024;
 const CONTROL_TIMEOUT_MS = 5000;
 const FINALIZATION_TIMEOUT_MS = 30_000;
@@ -18,7 +18,7 @@ const RETRY_ATTEMPTS = 3;
 const FINALIZATION_POLL_MS = 25;
 
 type Credential = { id: string; secret: Buffer };
-type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed";
+type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
 type ResponseFrame = { status: ResponseStatus; payload: unknown; reader: SocketReader; socket: Socket };
 
 class BridgeProtocolError extends Error {}
@@ -38,6 +38,77 @@ function abortError(signal?: AbortSignal): Error {
 function exactObject(value: unknown, keys: string[]): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value as object).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+function decodeCanonicalBase64(value: unknown, expectedBytes?: number): Buffer {
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new BridgeProtocolError();
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value || (expectedBytes !== undefined && decoded.length !== expectedBytes)) {
+    throw new BridgeProtocolError();
+  }
+  return decoded;
+}
+
+function decodeCanonicalHex(value: unknown, expectedBytes: number): Buffer {
+  if (typeof value !== "string" || value.length !== expectedBytes * 2 || !/^[0-9a-f]+$/.test(value)) {
+    throw new BridgeProtocolError();
+  }
+  return Buffer.from(value, "hex");
+}
+
+function parseStrictJson(bytes: Buffer): unknown {
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new BridgeProtocolError(); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); }
+  catch { throw new BridgeProtocolError(); }
+  let index = 0;
+  const whitespace = () => { while (/\s/.test(text[index] || "")) index += 1; };
+  const string = (): string => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === "\\") index += 2;
+      else if (text[index++] === '"') return JSON.parse(text.slice(start, index));
+    }
+    throw new BridgeProtocolError();
+  };
+  const value = (): void => {
+    whitespace();
+    if (text[index] === "{") {
+      index += 1; whitespace();
+      const keys = new Set<string>();
+      if (text[index] === "}") { index += 1; return; }
+      while (true) {
+        if (text[index] !== '"') throw new BridgeProtocolError();
+        const key = string();
+        if (keys.has(key)) throw new BridgeProtocolError();
+        keys.add(key); whitespace();
+        if (text[index++] !== ":") throw new BridgeProtocolError();
+        value(); whitespace();
+        if (text[index] === "}") { index += 1; return; }
+        if (text[index++] !== ",") throw new BridgeProtocolError();
+        whitespace();
+      }
+    }
+    if (text[index] === "[") {
+      index += 1; whitespace();
+      if (text[index] === "]") { index += 1; return; }
+      while (true) {
+        value(); whitespace();
+        if (text[index] === "]") { index += 1; return; }
+        if (text[index++] !== ",") throw new BridgeProtocolError();
+      }
+    }
+    if (text[index] === '"') { string(); return; }
+    while (index < text.length && !/[\s,}\]]/.test(text[index])) index += 1;
+  };
+  value(); whitespace();
+  if (index !== text.length) throw new BridgeProtocolError();
+  return parsed;
 }
 
 function encodeAuthFields(fields: Array<string | number | Buffer>): Buffer {
@@ -88,7 +159,7 @@ class SocketReader {
     const header = await this.readExactly(4);
     const length = header.readUInt32BE(0);
     if (length < 2 || length > MAX_FRAME_BYTES) throw new BridgeProtocolError();
-    try { return JSON.parse((await this.readExactly(length)).toString("utf8")); }
+    try { return parseStrictJson(await this.readExactly(length)); }
     catch (error) {
       if (error instanceof BridgeTransportError) throw error;
       throw new BridgeProtocolError();
@@ -182,11 +253,11 @@ async function authenticatedRequest(
   const reader = new SocketReader(socket);
   try {
     const challengeMessage = await reader.readFrame();
-    if (!exactObject(challengeMessage, ["type", "version", "challenge"]) ||
-        challengeMessage.type !== "challenge" || challengeMessage.version !== PROTOCOL_VERSION ||
-        typeof challengeMessage.challenge !== "string") throw new BridgeProtocolError();
-    const challenge = Buffer.from(challengeMessage.challenge, "base64");
-    if (challenge.length !== 32) throw new BridgeProtocolError();
+    if (!exactObject(challengeMessage, ["type", "challenge"]) ||
+        challengeMessage.type !== "challenge" || typeof challengeMessage.challenge !== "string") {
+      throw new BridgeProtocolError();
+    }
+    const challenge = decodeCanonicalBase64(challengeMessage.challenge, 32);
     const payloadBytes = Buffer.from(JSON.stringify(payload));
     const tag = authenticationTag(credential.secret, [
       "request", PROTOCOL_VERSION, challenge, credential.id, requestId, operation, payloadBytes,
@@ -196,22 +267,27 @@ async function authenticatedRequest(
       operation, payload: payloadBytes.toString("base64"), hmac: tag.toString("hex"),
     }));
     const response = await reader.readFrame();
-    const statuses: ResponseStatus[] = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed"];
+    const statuses: ResponseStatus[] = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed", "version-mismatch"];
     if (!exactObject(response, ["type", "version", "requestId", "status", "payload", "hmac"]) ||
-        response.type !== "response" || response.version !== PROTOCOL_VERSION || response.requestId !== requestId ||
-        !statuses.includes(response.status as ResponseStatus) || typeof response.payload !== "string" || typeof response.hmac !== "string") {
+        response.type !== "response" || !Number.isSafeInteger(response.version) || Number(response.version) < 1 ||
+        response.requestId !== requestId || !statuses.includes(response.status as ResponseStatus) ||
+        typeof response.payload !== "string" || typeof response.hmac !== "string") {
       throw new BridgeProtocolError();
     }
     const status = response.status as ResponseStatus;
-    const responsePayload = Buffer.from(response.payload, "base64");
+    const responsePayload = decodeCanonicalBase64(response.payload);
     const expected = authenticationTag(credential.secret, [
-      "response", PROTOCOL_VERSION, challenge, credential.id, requestId, `${operation}:${status}`, responsePayload,
+      "response", PROTOCOL_VERSION, response.version as number, challenge, credential.id, requestId,
+      `${operation}:${status}`, responsePayload,
     ]);
-    const actual = Buffer.from(response.hmac, "hex");
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new BridgeProtocolError();
-    let parsed: unknown;
-    try { parsed = JSON.parse(responsePayload.toString("utf8")); }
-    catch { throw new BridgeProtocolError(); }
+    const actual = decodeCanonicalHex(response.hmac, expected.length);
+    if (!timingSafeEqual(actual, expected)) throw new BridgeProtocolError();
+    const parsed = parseStrictJson(responsePayload);
+    if (status === "version-mismatch") {
+      if (!exactObject(parsed, ["clientVersion", "companionVersion"]) ||
+          parsed.clientVersion !== PROTOCOL_VERSION || parsed.companionVersion !== response.version ||
+          response.version === PROTOCOL_VERSION) throw new BridgeProtocolError();
+    } else if (response.version !== PROTOCOL_VERSION) throw new BridgeProtocolError();
     if (operation === "fetch") {
       clearTimeout(timeout);
       socket.setTimeout(FETCH_NO_PROGRESS_TIMEOUT_MS, () => socket.destroy(new BridgeTransportError()));
@@ -331,7 +407,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
         ["recording", "finalizing"].includes(String(startShape?.state));
       const maximumBytes = Math.ceil(options.maxDurationMs * 32) + MAX_FRAME_BYTES;
       const startIsResultReady = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
-        startShape?.state === "result-ready" && Number.isInteger(startShape.length) && Number(startShape.length) >= 44 &&
+        startShape?.state === "result-ready" && Number.isSafeInteger(startShape.length) && Number(startShape.length) >= 44 &&
         Number(startShape.length) <= maximumBytes && typeof startShape.sha256 === "string" &&
         /^[0-9a-f]{64}$/.test(startShape.sha256) && ["stopped", "duration-limit"].includes(String(startShape.completion));
       if (startShape?.recordingId !== recordingId || (!startIsActive && !startIsResultReady)) {
@@ -439,11 +515,14 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                 );
                 if (response.status !== "ok") throw new BridgeResponseError(response.status);
                 const metadata = response.payload;
-                const maximumBytes = Math.ceil(options.maxDurationMs * 32) + MAX_FRAME_BYTES;
-                if (!exactObject(metadata, ["recordingId", "length", "sha256", "completion"]) || metadata.recordingId !== recordingId ||
-                    !Number.isInteger(metadata.length) || Number(metadata.length) < 44 || Number(metadata.length) > maximumBytes ||
+                const maximumBytes = options.maxDurationMs * 32 + MAX_FRAME_BYTES;
+                if (!Number.isSafeInteger(maximumBytes) ||
+                    !exactObject(metadata, ["recordingId", "length", "sha256", "completion"]) || metadata.recordingId !== recordingId ||
+                    !Number.isSafeInteger(metadata.length) || Number(metadata.length) < 44 || Number(metadata.length) > maximumBytes ||
                     typeof metadata.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(metadata.sha256) ||
-                    !["stopped", "duration-limit"].includes(String(metadata.completion))) throw new BridgeAudioError();
+                    !["stopped", "duration-limit"].includes(String(metadata.completion)) ||
+                    metadata.length !== statusShape.length || metadata.sha256 !== statusShape.sha256 ||
+                    metadata.completion !== statusShape.completion) throw new BridgeAudioError();
                 if (metadata.completion === "duration-limit") resultCompletion = "duration-limit";
                 handle = await localFileOperation(() => open(partial, "wx", 0o600));
                 const digest = createHash("sha256");

@@ -38,6 +38,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.cjs",
+    "test:native-bridge-adversarial": "scripts/run-native-bridge-adversarial.sh",
     "typecheck": "tsc --noEmit",
     "test:assertions": "node scripts/check-test-assertions.mjs",
     "check": "npm run test:assertions && npm run typecheck && npm test",

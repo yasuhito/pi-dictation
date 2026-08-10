@@ -65,8 +65,13 @@ test("the Recorder transports authenticated Bridge recording Level observations"
 for (const [mode, code] of [
   ["oversized", "invalid-audio"],
   ["invalid-wav", "invalid-audio"],
+  ["duplicate-fmt-wav", "invalid-audio"],
+  ["duplicate-data-wav", "invalid-audio"],
   ["trailing-data", "invalid-audio"],
   ["hash-mismatch", "invalid-audio"],
+  ["metadata-conflict", "invalid-audio"],
+  ["noncanonical-base64", "recording-failed"],
+  ["version-mismatch", "recording-failed"],
   ["auth-failure", "outcome-unknown"],
   ["ack-failure", "recording-failed"],
 ]) {
@@ -82,6 +87,15 @@ for (const [mode, code] of [
     } finally { await instance.cleanup(); }
   });
 }
+
+test("the Bridge recording adapter accepts result metadata when an ambiguous start retry finds a completed lease", async () => {
+  const instance = await harness("ambiguous-start-result-ready");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    assert.equal(instance.events().filter((event) => event === "start").length, 2);
+  } finally { await instance.cleanup(); }
+});
 
 test("the Bridge recording adapter recovers a result completed after a lost start response", async () => {
   const instance = await harness("lost-start-result-ready");

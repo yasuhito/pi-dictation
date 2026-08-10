@@ -30,10 +30,10 @@ printf '%s\\n' "$*" >> "$SSH_LOG"
 case "$*" in
   *" -G "*) printf 'host %s\\nhostname pi.example.test\\nuser pi\\nport 22\\nstricthostkeychecking true\\nuserknownhostsfile ~/.ssh/known_hosts\\nproxyjump bastion\\nidentityfile ~/.ssh/id_ed25519\\n' "$*"; exit 0 ;;
   *" true") if [ "$SSH_AUTH_FAIL" = 1 ]; then echo denied >&2; exit 255; fi; exit 0 ;;
-  *" remote-info") if [ "$SSH_WRONG_VERSION" = 1 ]; then version=9.9.9; else version=0.6.0; fi; printf '{"packageVersion":"%s","protocolVersion":2,"home":"/srv/pi"}\\n' "$version"; exit 0 ;;
+  *" remote-info") if [ "$SSH_WRONG_VERSION" = 1 ]; then version=9.9.9; else version=0.6.0; fi; printf '{"packageVersion":"%s","protocolVersion":3,"home":"/srv/pi"}\\n' "$version"; exit 0 ;;
   *" remote-prepare "*) cat >/dev/null; printf '{"configured":true}\\n'; exit 0 ;;
   *" remote-listener "*) printf '{"listener":"established"}\\n'; exit 0 ;;
-  *" remote-health "*) printf '{"protocolVersion":2,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
+  *" remote-health "*) printf '{"protocolVersion":3,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
 esac
 exit 2
 `);
