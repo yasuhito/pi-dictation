@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import net from "node:net";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
-export const BRIDGE_PROTOCOL_VERSION = 2;
+export const BRIDGE_PROTOCOL_VERSION = 3;
 const packageRoot = new URL("..", import.meta.url);
 const supervisorPath = fileURLToPath(new URL("./pi-dictation-tunnel.mjs", import.meta.url));
 
@@ -120,8 +120,7 @@ function ssh(alias, remoteArgs, options = {}) {
     encoding: "utf8", input: options.input, timeout: options.timeout ?? 15000,
   });
   if (result.error || result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim().slice(0, 500);
-    throw new BridgeHostError(`${options.failure || "SSH command failed"}${detail ? `: ${detail}` : ""}`);
+    throw new BridgeHostError(options.failure || "SSH command failed");
   }
   return result.stdout.trim();
 }
@@ -484,6 +483,7 @@ function readRotation(paths) {
   const rotation = readOwnedJson(paths.rotation, "credential rotation state");
   if (rotation.product !== PRODUCT || rotation.hostId !== paths.id ||
       typeof rotation.oldCredentialId !== "string" || typeof rotation.nextCredentialId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rotation.revokeRequestId) ||
       rotation.oldCredentialId === rotation.nextCredentialId || !rotationPhases.has(rotation.phase)) {
     throw new BridgeHostError("Refusing invalid credential rotation state.");
   }
@@ -534,6 +534,7 @@ export async function rotateHost(alias, companionRequestAt) {
       rotation = writeRotation(paths, {
         product: PRODUCT, hostId: paths.id,
         oldCredentialId: previous.id, nextCredentialId: replacement.id,
+        revokeRequestId: randomUUID(),
       }, "old-revoked");
     } else {
       if (!current) throw new BridgeHostError("Refusing rotation without a current host credential.");
@@ -542,6 +543,7 @@ export async function rotateHost(alias, companionRequestAt) {
       rotation = writeRotation(paths, {
         product: PRODUCT, hostId: paths.id,
         oldCredentialId: current.id, nextCredentialId: replacement.id,
+        revokeRequestId: randomUUID(),
       }, "staged");
     }
   }
@@ -562,10 +564,17 @@ export async function rotateHost(alias, companionRequestAt) {
     if (rotation.phase === "staged") {
       const oldCredential = optionalCredential(paths.credential, "host credential");
       if (!oldCredential || oldCredential.id !== rotation.oldCredentialId) throw new BridgeHostError("Refusing rotation without the old credential.");
-      validateCredentialEffects(await companionRequestAt(
-        localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle",
-        administrationRequestId(oldCredential.id, "credential-revoke-if-idle"),
-      ));
+      try {
+        validateCredentialEffects(await companionRequestAt(
+          localCompanionEndpoint(paths), oldCredential, "credential-revoke-if-idle",
+          rotation.revokeRequestId,
+        ));
+      } catch (error) {
+        if (error?.status === "invalid-state") {
+          rotation = writeRotation(paths, { ...rotation, revokeRequestId: randomUUID() }, "staged");
+        }
+        throw error;
+      }
       testInterruption("after-revoke");
       rotation = writeRotation(paths, rotation, "old-revoked");
     }

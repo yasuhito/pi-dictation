@@ -1,7 +1,7 @@
 const { createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const net = require("node:net");
 
-const version = 2;
+const version = 3;
 function encode(fields) {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
   for (const field of fields) {
@@ -44,7 +44,7 @@ async function request(endpoint, credential, operation, payload, requestId = ran
     payload: payloadBytes.toString("base64"), hmac: hmac.toString("hex") }));
   const response = await readFrame(iterator, buffered);
   const responseBytes = Buffer.from(response.payload, "base64");
-  const expected = tag(credential.secret, ["response", version, challenge, credential.id, requestId,
+  const expected = tag(credential.secret, ["response", version, response.version, challenge, credential.id, requestId,
     `${operation}:${response.status}`, responseBytes]);
   const actual = Buffer.from(response.hmac, "hex");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("response authentication");

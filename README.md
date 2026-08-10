@@ -216,6 +216,8 @@ Pi Dictation:
 - aborts transcription on cancellation and session shutdown;
 - creates recordings in private (`0700`) temporary directories;
 - commits only validated PCM16 mono WAV output for transcription;
+- recovers owner-authenticated completed Bridge WAVs across transport loss or companion restart for at most ten minutes;
+- deletes Bridge audio on acknowledgement, cancellation, or expiry and removes its minimal retry tombstone ten minutes later;
 - removes temporary recordings after normal use, cancellation, failure, and graceful shutdown.
 
 An uncatchable Pi crash (for example, `SIGKILL`) can leave the private recording directory behind for the operating system's temporary-file cleanup.
