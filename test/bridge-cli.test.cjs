@@ -21,7 +21,8 @@ const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 
 function temporaryHome() {
-  return mkdtempSync(join(tmpdir(), "pi-dictation-bridge-"));
+  const base = process.platform === "darwin" ? "/tmp" : tmpdir();
+  return mkdtempSync(join(base, "pi-dictation-bridge-"));
 }
 
 function runBridge(home, args, env = {}) {
@@ -30,6 +31,16 @@ function runBridge(home, args, env = {}) {
     encoding: "utf8",
     env: { ...process.env, HOME: home, ...env },
   });
+}
+
+function runInPseudoTerminal(args, options) {
+  if (process.platform === "darwin") {
+    const command = args.map((argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("}", "\\}")}}`).join(" ");
+    const program = `set timeout -1; spawn ${command}; expect eof; set result [wait]; exit [lindex $result 3]`;
+    return spawnSync("/usr/bin/expect", ["-c", program], options);
+  }
+  const command = args.map((argument) => `'${argument.replaceAll("'", `'\\''`)}'`).join(" ");
+  return spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], options);
 }
 
 function writeExecutable(path, content) {
@@ -285,8 +296,7 @@ test("bridge preflight requires and records interactive real-audio observation b
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    const result = spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    const result = runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools, LAUNCHCTL_LOG: launchctlLog },
@@ -329,8 +339,7 @@ test("bridge preflight removes readiness when LaunchAgent loading fails", () => 
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools },
@@ -349,8 +358,7 @@ test("bridge preflight does not mark digital silence ready", () => {
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools, FAKE_CAPTURE: "silence", LAUNCHCTL_LOG: join(home, "launchctl.log") },
@@ -398,7 +406,7 @@ function frame(value) {
 }
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
   const challenge = randomBytes(32);
-  socket.write(frame({ type: "challenge", version: mode === "wrong-version" ? 1 : 3, challenge: challenge.toString("base64") }));
+  socket.write(frame({ type: "challenge", challenge: challenge.toString("base64") }));
   let buffered = Buffer.alloc(0);
   socket.on("data", (chunk) => {
     buffered = Buffer.concat([buffered, chunk]);
@@ -409,11 +417,20 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
     const expected = tag(["request", 3, challenge, credential.id, request.requestId, "health", payload]);
     const actual = Buffer.from(request.hmac, "hex");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return socket.destroy();
-    const responsePayload = Buffer.from(JSON.stringify({ permission: "authorized", defaultInputAvailable: true }));
+    const responseVersion = mode === "wrong-version" ? 2 : 3;
+    const status = mode === "wrong-version" ? "version-mismatch" : "ok";
+    const body = mode === "wrong-version"
+      ? { clientVersion: 3, companionVersion: 2 }
+      : {
+          permission: mode === "control-permission" ? "authorized\u001b[31m" :
+            mode === "unknown-permission" ? "unexpected" : "authorized",
+          defaultInputAvailable: true,
+        };
+    const responsePayload = Buffer.from(JSON.stringify(body));
     const responseTag = mode === "bad-response-hmac"
       ? Buffer.alloc(32)
-      : tag(["response", 3, challenge, credential.id, request.requestId, "health:ok", responsePayload]);
-    const response = frame({ type: "response", version: 3, requestId: request.requestId, status: "ok", payload: responsePayload.toString("base64"), hmac: responseTag.toString("hex") });
+      : tag(["response", 3, responseVersion, challenge, credential.id, request.requestId, "health:" + status, responsePayload]);
+    const response = frame({ type: "response", version: responseVersion, requestId: request.requestId, status, payload: responsePayload.toString("base64"), hmac: responseTag.toString("hex") });
     if (mode === "trailing-response") {
       socket.write(response);
       setTimeout(() => socket.end(Buffer.from("x")), 10);
@@ -483,6 +500,28 @@ test("bridge health rejects an unauthenticated response", () => {
   })();
 });
 
+for (const [mode, description] of [
+  ["control-permission", "control characters in permission diagnostics"],
+  ["unknown-permission", "unknown permission diagnostics"],
+]) {
+  test(`bridge health rejects ${description}`, async () => {
+    const home = temporaryHome();
+    const tools = fakeToolchain(home);
+    let server;
+    try {
+      const installed = runBridge(home, ["install"], { PATH: tools });
+      if (installed.status !== 0) throw new Error(installed.stderr);
+      markPreflightReady(home);
+      server = await startHealthServer(home, mode);
+      const result = runBridge(home, ["health"]);
+      assert.match(result.stderr, /invalid health data/);
+    } finally {
+      server?.kill();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
 test("bridge health rejects trailing response bytes delivered separately", () => {
   return (async () => {
     const home = temporaryHome();
@@ -513,7 +552,7 @@ test("bridge health rejects any other protocol version", () => {
       markPreflightReady(home);
       server = await startHealthServer(home, "wrong-version");
       const result = runBridge(home, ["health"]);
-      assert.match(result.stderr, /requires exact version 3/);
+      assert.match(result.stderr, /Authenticated protocol mismatch: Pi uses version 3; companion uses version 2/);
     } finally {
       server?.kill();
       rmSync(home, { recursive: true, force: true });

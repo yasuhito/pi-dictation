@@ -44,7 +44,7 @@ async function request(endpoint, credential, operation, payload, requestId = ran
     payload: payloadBytes.toString("base64"), hmac: hmac.toString("hex") }));
   const response = await readFrame(iterator, buffered);
   const responseBytes = Buffer.from(response.payload, "base64");
-  const expected = tag(credential.secret, ["response", version, challenge, credential.id, requestId,
+  const expected = tag(credential.secret, ["response", version, response.version, challenge, credential.id, requestId,
     `${operation}:${response.status}`, responseBytes]);
   const actual = Buffer.from(response.hmac, "hex");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("response authentication");
@@ -54,8 +54,52 @@ async function request(endpoint, credential, operation, payload, requestId = ran
   return { status: response.status, payload: JSON.parse(responseBytes), body: Buffer.concat(chunks), requestId };
 }
 
+async function subscribeLevels(endpoint, credential, lease, count = 1, requestId = randomUUID()) {
+  const socket = net.createConnection({ path: endpoint, allowHalfOpen: true });
+  await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  const iterator = socket[Symbol.asyncIterator]();
+  const buffered = { value: Buffer.alloc(0) };
+  const challengeFrame = await readFrame(iterator, buffered);
+  const challenge = Buffer.from(challengeFrame.challenge, "base64");
+  const operation = "subscribe-levels";
+  const payloadBytes = Buffer.from(JSON.stringify({ ...lease, afterSequence: -1 }));
+  const hmac = tag(credential.secret, ["request", version, challenge, credential.id, requestId, operation, payloadBytes]);
+  socket.end(frame({
+    type: "request", version, credentialId: credential.id, requestId, operation,
+    payload: payloadBytes.toString("base64"), hmac: hmac.toString("hex"),
+  }));
+  const response = await readFrame(iterator, buffered);
+  const responseBytes = Buffer.from(response.payload, "base64");
+  const responseExpected = tag(credential.secret, [
+    "response", version, response.version, challenge, credential.id, requestId,
+    `${operation}:${response.status}`, responseBytes,
+  ]);
+  const responseActual = Buffer.from(response.hmac, "hex");
+  if (responseActual.length !== responseExpected.length || !timingSafeEqual(responseActual, responseExpected)) {
+    throw new Error("response authentication");
+  }
+  const events = [];
+  let terminal;
+  for (let streamSequence = 0; events.length < count; streamSequence += 1) {
+    const message = await readFrame(iterator, buffered);
+    const eventBytes = Buffer.from(message.payload, "base64");
+    const eventExpected = tag(credential.secret, [
+      "stream", version, message.version, challenge, credential.id, requestId, streamSequence, eventBytes,
+    ]);
+    const eventActual = Buffer.from(message.hmac, "hex");
+    if (message.type !== "level-event" || message.requestId !== requestId ||
+        message.streamSequence !== streamSequence || eventActual.length !== eventExpected.length ||
+        !timingSafeEqual(eventActual, eventExpected)) throw new Error("stream authentication");
+    const event = JSON.parse(eventBytes);
+    if (event.type === "terminal") { terminal = event; break; }
+    events.push(event);
+  }
+  socket.destroy();
+  return { status: response.status, bounds: JSON.parse(responseBytes), events, terminal };
+}
+
 function capability() {
   return { recordingId: randomUUID(), leaseSecret: randomBytes(32).toString("base64") };
 }
 
-module.exports = { capability, request };
+module.exports = { capability, request, subscribeLevels };

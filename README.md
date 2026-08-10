@@ -176,7 +176,19 @@ pi-dictation bridge install my-pi
 pi-dictation bridge status my-pi
 ```
 
-Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently.
+Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently. Repeat the command for additional aliases; each gets an independent credential, tunnel LaunchAgent, listener, Recorder configuration, and health state while sharing the same Mac companion.
+
+Manage configured bridges without exposing secrets, private paths, SSH commands, or Recording lease identities:
+
+```bash
+pi-dictation bridge list
+pi-dictation bridge list --json
+pi-dictation bridge rotate my-pi
+pi-dictation bridge revoke my-pi
+pi-dictation bridge revoke my-pi --confirm
+```
+
+Rotation stages a new owner-only credential on both hosts, verifies authenticated health through it, and only then revokes the old credential. It refuses to disrupt an unfinished Recording lease or retained WAV and preserves staged state for a safe retry. Revocation previews the target credential's live connections, active lease, incomplete audio, and retained WAV deletion counts unless `--confirm` is supplied; confirmation closes and deletes only that credential's bridge state.
 
 A TCP listener is never selected automatically. If the SSH server cannot forward Unix sockets, explicitly opt in to one exact loopback bind:
 
@@ -204,6 +216,8 @@ Pi Dictation:
 - aborts transcription on cancellation and session shutdown;
 - creates recordings in private (`0700`) temporary directories;
 - commits only validated PCM16 mono WAV output for transcription;
+- recovers owner-authenticated completed Bridge WAVs across transport loss or companion restart for at most ten minutes;
+- deletes Bridge audio on acknowledgement, cancellation, or expiry and removes its minimal retry tombstone ten minutes later;
 - removes temporary recordings after normal use, cancellation, failure, and graceful shutdown.
 
 An uncatchable Pi crash (for example, `SIGKILL`) can leave the private recording directory behind for the operating system's temporary-file cleanup.
