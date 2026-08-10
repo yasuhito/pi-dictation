@@ -17,7 +17,7 @@ const LEVEL_INTERVAL_MS = 50;
 const RETRY_ATTEMPTS = 3;
 const FINALIZATION_POLL_MS = 25;
 
-type Credential = { id: string; secret: Buffer };
+type Credential = { id: string; secret: Buffer; createdAt?: string };
 type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
 type ResponseFrame = { status: ResponseStatus; payload: unknown; reader: SocketReader; socket: Socket };
 
@@ -201,12 +201,17 @@ async function readCredential(path: string): Promise<Credential> {
       throw new BridgeProtocolError();
     }
     const value = JSON.parse(await handle.readFile("utf8"));
-    if (!exactObject(value, ["id", "secret"]) || typeof value.id !== "string" ||
+    const credentialKeys = exactObject(value, ["id", "secret"]) || exactObject(value, ["id", "secret", "createdAt"]);
+    if (!credentialKeys || typeof value.id !== "string" ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id) ||
-        typeof value.secret !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value.secret)) throw new BridgeProtocolError();
+        typeof value.secret !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value.secret) ||
+        (value.createdAt !== undefined && (typeof value.createdAt !== "string" || value.createdAt.length > 32 || Number.isNaN(Date.parse(value.createdAt))))) {
+      throw new BridgeProtocolError();
+    }
     const secret = Buffer.from(value.secret, "base64");
     if (secret.length !== 32) throw new BridgeProtocolError();
-    return { id: value.id, secret };
+    const createdAt = typeof value.createdAt === "string" ? value.createdAt : undefined;
+    return { id: value.id, secret, ...(createdAt === undefined ? {} : { createdAt }) };
   } catch { throw new BridgeProtocolError(); }
   finally { await handle.close(); }
 }

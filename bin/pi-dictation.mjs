@@ -26,10 +26,15 @@ import {
   BridgeHostError,
   hostStatus,
   installHost,
+  listHosts,
+  remoteCredentialCommit,
+  remoteCredentialRevoke,
   remoteHealth,
   remoteInfo,
   remoteListener,
   remotePrepare,
+  revokeHost,
+  rotateHost,
 } from "./bridge-host.mjs";
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
@@ -626,7 +631,7 @@ function exactObject(value, keys) {
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 }
 
-async function healthAt(endpoint, credential) {
+async function companionRequestAt(endpoint, credential, operation, fixedRequestId) {
   let secret;
   try {
     secret = canonicalBase64(credential.secret, 32);
@@ -637,55 +642,65 @@ async function healthAt(endpoint, credential) {
     ? net.createConnection({ path: endpoint.path })
     : net.createConnection({ host: endpoint.host, port: endpoint.port });
   try {
-    const challengeFrame = await readFrame(socket);
-    const challengeMessage = challengeFrame.value;
+    const challengeMessage = (await readFrame(socket)).value;
     if (!exactObject(challengeMessage, ["type", "challenge"]) || challengeMessage.type !== "challenge") {
       throw new CliError("The companion sent an invalid authentication challenge.");
     }
     const challenge = canonicalBase64(challengeMessage.challenge, 32);
-    const requestId = randomUUID();
+    const requestId = fixedRequestId || randomUUID();
     const payload = Buffer.from("{}", "utf8");
-    const tag = hmac(secret, ["request", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, "health", payload]);
+    const tag = hmac(secret, ["request", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, operation, payload]);
     socket.end(frame({
       type: "request", version: BRIDGE_PROTOCOL_VERSION, credentialId: credential.id,
-      requestId, operation: "health", payload: payload.toString("base64"), hmac: tag.toString("hex"),
+      requestId, operation, payload: payload.toString("base64"), hmac: tag.toString("hex"),
     }));
-    const responseFrame = await readFrame(socket, 5000, true);
-    const response = responseFrame.value;
+    const response = (await readFrame(socket, 5000, true)).value;
+    const statuses = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed", "version-mismatch"];
     if (!exactObject(response, ["type", "version", "requestId", "status", "payload", "hmac"]) ||
         response.type !== "response" || !Number.isSafeInteger(response.version) || response.version < 1 ||
-        response.requestId !== requestId || !["ok", "version-mismatch"].includes(response.status)) {
-      throw new CliError("The companion returned an invalid authenticated health response.");
+        response.requestId !== requestId || !statuses.includes(response.status)) {
+      throw new CliError("The companion returned an invalid authenticated response.");
     }
     const responsePayload = canonicalBase64(response.payload);
     const expected = hmac(secret, ["response", BRIDGE_PROTOCOL_VERSION, response.version, challenge, credential.id,
-      requestId, `health:${response.status}`, responsePayload]);
+      requestId, `${operation}:${response.status}`, responsePayload]);
     const actual = canonicalHex(response.hmac, expected.length);
     if (!timingSafeEqual(actual, expected)) {
-      throw new CliError("The companion health response could not be authenticated.");
+      throw new CliError("The companion response could not be authenticated.");
     }
-    const health = parseUtf8Json(responsePayload);
+    const value = parseUtf8Json(responsePayload);
     if (response.status === "version-mismatch") {
-      if (!exactObject(health, ["clientVersion", "companionVersion"]) ||
-          health.clientVersion !== BRIDGE_PROTOCOL_VERSION || health.companionVersion !== response.version) {
+      if (!exactObject(value, ["clientVersion", "companionVersion"]) ||
+          value.clientVersion !== BRIDGE_PROTOCOL_VERSION || value.companionVersion !== response.version ||
+          response.version === BRIDGE_PROTOCOL_VERSION) {
         throw new CliError("The companion returned invalid authenticated version data.");
       }
-      throw new CliError(`Authenticated protocol mismatch: Pi uses version ${health.clientVersion}; companion uses version ${health.companionVersion}.`);
+      throw new CliError(`Authenticated protocol mismatch: Pi uses version ${value.clientVersion}; companion uses version ${value.companionVersion}.`);
     }
     if (response.version !== BRIDGE_PROTOCOL_VERSION) {
       throw new CliError("The companion returned invalid authenticated version data.");
     }
-    const permissionValues = ["authorized", "denied", "restricted", "not-determined", "unknown"];
-    if (!exactObject(health, ["permission", "defaultInputAvailable"]) ||
-        !permissionValues.includes(health.permission) ||
-        typeof health.defaultInputAvailable !== "boolean") {
-      throw new CliError("The companion returned invalid health data.");
+    if (response.status !== "ok") {
+      const error = new CliError(`The companion rejected ${operation} with authenticated status ${response.status}.`);
+      error.status = response.status;
+      throw error;
     }
-    return health;
+    return value;
   } finally {
     socket.end();
     socket.destroy();
   }
+}
+
+async function healthAt(endpoint, credential) {
+  const health = await companionRequestAt(endpoint, credential, "health");
+  const permissionValues = ["authorized", "denied", "restricted", "not-determined", "unknown"];
+  if (!exactObject(health, ["permission", "defaultInputAvailable"]) ||
+      !permissionValues.includes(health.permission) ||
+      typeof health.defaultInputAvailable !== "boolean") {
+    throw new CliError("The companion returned invalid health data.");
+  }
+  return health;
 }
 
 async function authenticatedHealth() {
@@ -714,7 +729,7 @@ function build(args) {
 }
 
 function usage() {
-  console.log("Usage: pi-dictation bridge <build|install [ssh-alias]|preflight|health|status ssh-alias>");
+  console.log("Usage: pi-dictation bridge <build|install [ssh-alias]|preflight|health|status ssh-alias|list [--json]|rotate ssh-alias|revoke ssh-alias [--confirm]>");
 }
 
 async function main() {
@@ -727,10 +742,15 @@ async function main() {
   if (command === "install" && args.length === 0) return install();
   if (command === "install" && args.length >= 1) return installHost(args[0], args.slice(1));
   if (command === "status" && args.length === 1) return hostStatus(args[0]);
+  if (command === "list" && (args.length === 0 || args.length === 1 && args[0] === "--json")) return listHosts(args[0] === "--json");
+  if (command === "rotate" && args.length === 1) return rotateHost(args[0], companionRequestAt);
+  if (command === "revoke" && (args.length === 1 || args.length === 2 && args[1] === "--confirm")) return revokeHost(args[0], args[1] === "--confirm", companionRequestAt);
   if (command === "preflight" && args.length === 0) return preflight();
   if (command === "health" && args.length === 0) return authenticatedHealth();
   if (command === "remote-info" && args.length === 0) return remoteInfo();
   if (command === "remote-prepare" && args.length === 2) return remotePrepare(args[0], args[1]);
+  if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
+  if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
   if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);
   usage();
