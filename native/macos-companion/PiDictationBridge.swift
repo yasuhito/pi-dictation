@@ -648,34 +648,40 @@ private final class PcmLevelReader {
             }
             guard cursor != nil else { throw CompanionFailure.failed }
         }
+        let bytesPerInterval = 16000 * levelIntervalMilliseconds / 1000 * 2
+        var events: [[String: Any]] = []
+        func drainPendingIntervals() {
+            while intervalsToDiscard > 0, pending.count >= bytesPerInterval {
+                pending.removeFirst(bytesPerInterval)
+                intervalsToDiscard -= 1
+            }
+            while pending.count >= bytesPerInterval {
+                let interval = pending.prefix(bytesPerInterval)
+                var sum = 0.0
+                var offset = interval.startIndex
+                while offset + 1 < interval.endIndex {
+                    let bits = UInt16(interval[offset]) | UInt16(interval[offset + 1]) << 8
+                    let sample = Double(Int16(bitPattern: bits)) / 32768.0
+                    sum += sample * sample
+                    offset += 2
+                }
+                let eventSequence = sequence + events.count
+                let dbfs: Any = sum == 0 ? "silence" : 20.0 * log10(sqrt(sum / Double(bytesPerInterval / 2)))
+                events.append([
+                    "type": "observation", "sequence": eventSequence,
+                    "capturedAtMs": eventSequence * levelIntervalMilliseconds, "dbfs": dbfs,
+                ])
+                pending.removeFirst(bytesPerInterval)
+            }
+        }
         try handle.seek(toOffset: cursor!)
-        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+        var chunksRead = 0
+        while chunksRead < levelReplaySlots,
+              let chunk = try handle.read(upToCount: bytesPerInterval), !chunk.isEmpty {
+            chunksRead += 1
             pending.append(chunk)
             cursor! += UInt64(chunk.count)
-        }
-        let bytesPerInterval = 16000 * levelIntervalMilliseconds / 1000 * 2
-        while intervalsToDiscard > 0, pending.count >= bytesPerInterval {
-            pending.removeFirst(bytesPerInterval)
-            intervalsToDiscard -= 1
-        }
-        var events: [[String: Any]] = []
-        while pending.count >= bytesPerInterval {
-            let interval = pending.prefix(bytesPerInterval)
-            var sum = 0.0
-            var offset = interval.startIndex
-            while offset + 1 < interval.endIndex {
-                let bits = UInt16(interval[offset]) | UInt16(interval[offset + 1]) << 8
-                let sample = Double(Int16(bitPattern: bits)) / 32768.0
-                sum += sample * sample
-                offset += 2
-            }
-            let eventSequence = sequence + events.count
-            let dbfs: Any = sum == 0 ? "silence" : 20.0 * log10(sqrt(sum / Double(bytesPerInterval / 2)))
-            events.append([
-                "type": "observation", "sequence": eventSequence,
-                "capturedAtMs": eventSequence * levelIntervalMilliseconds, "dbfs": dbfs,
-            ])
-            pending.removeFirst(bytesPerInterval)
+            drainPendingIntervals()
         }
         return events
     }
