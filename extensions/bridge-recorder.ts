@@ -325,8 +325,16 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
           throw safeError(new BridgeOutcomeUnknownError(undefined, { cause: statusError }));
         }
       }
-      if (!exactObject(startPayload, ["recordingId", "state"]) || startPayload.recordingId !== recordingId ||
-          !["recording", "finalizing", "result-ready"].includes(String(startPayload.state))) {
+      const startShape = startPayload && typeof startPayload === "object" && !Array.isArray(startPayload)
+        ? startPayload as Record<string, unknown> : undefined;
+      const startIsActive = exactObject(startPayload, ["recordingId", "state"]) &&
+        ["recording", "finalizing"].includes(String(startShape?.state));
+      const maximumBytes = Math.ceil(options.maxDurationMs * 32) + MAX_FRAME_BYTES;
+      const startIsResultReady = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
+        startShape?.state === "result-ready" && Number.isInteger(startShape.length) && Number(startShape.length) >= 44 &&
+        Number(startShape.length) <= maximumBytes && typeof startShape.sha256 === "string" &&
+        /^[0-9a-f]{64}$/.test(startShape.sha256) && ["stopped", "duration-limit"].includes(String(startShape.completion));
+      if (startShape?.recordingId !== recordingId || (!startIsActive && !startIsResultReady)) {
         throw new RecorderError("recording-failed");
       }
 
@@ -391,6 +399,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
               }
               try { status = await requestJson(config, credential, "status", owned, finalizationSignal); }
               catch (error) {
+                if (error instanceof BridgeResponseError && error.status === "not-found") {
+                  throw new RecorderError("recording-failed", { cause: error });
+                }
                 if (Date.now() >= finalizationDeadline) throw new BridgeOutcomeUnknownError(undefined, { cause: error });
                 await abortableDelay(FINALIZATION_POLL_MS, finalizationSignal);
                 continue;

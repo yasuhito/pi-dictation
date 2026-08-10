@@ -495,6 +495,34 @@ private final class BridgeRecording {
     }
 }
 
+func initializeCapture(
+    attempt: () throws -> Void,
+    onFailure: () -> Void
+) throws {
+    do {
+        try attempt()
+    } catch {
+        onFailure()
+        throw error
+    }
+}
+
+@discardableResult
+func commitFailedRecordingState(
+    persist: () throws -> Void,
+    removeAudio: () throws -> Void,
+    scheduleRetry: () -> Void
+) -> Bool {
+    do {
+        try persist()
+        try removeAudio()
+        return true
+    } catch {
+        scheduleRetry()
+        return false
+    }
+}
+
 private final class RecordingManager {
     private let runtime: String
     private let lock = NSCondition()
@@ -614,27 +642,27 @@ private final class RecordingManager {
         activeId = id
         do {
             try persistLocked(current)
-            let settings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
-                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
-            ]
-            let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
-            audioRecorder.isMeteringEnabled = true
-            guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0, audioRecorder.record() else {
-                throw CompanionFailure.failed
-            }
-            current.recorder = audioRecorder
         } catch {
-            current.recorder?.stop()
-            try? FileManager.default.removeItem(at: url)
-            current.state = "failed"
-            current.terminalAt = Date().timeIntervalSince1970
+            recordings.removeValue(forKey: id)
             activeId = nil
-            try? persistLocked(current)
-            scheduleRetentionLocked(current)
             throw error
         }
+        try initializeCapture(
+            attempt: {
+                let settings: [String: Any] = [
+                    AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
+                    AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                    AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+                ]
+                let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
+                audioRecorder.isMeteringEnabled = true
+                guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0, audioRecorder.record() else {
+                    throw CompanionFailure.failed
+                }
+                current.recorder = audioRecorder
+            },
+            onFailure: { self.failLocked(current) }
+        )
 
         let levels = DispatchSource.makeTimerSource(queue: .global())
         levels.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
@@ -829,13 +857,12 @@ private final class RecordingManager {
         current.state = "failed"; current.length = nil; current.sha256 = nil
         current.terminalAt = Date().timeIntervalSince1970
         if activeId == current.id { activeId = nil }
-        do {
-            try persistLocked(current)
-            try removeAudioLocked(current)
-            scheduleRetentionLocked(current)
-        } catch {
-            scheduleCleanupRetryLocked(current)
-        }
+        let committed = commitFailedRecordingState(
+            persist: { try self.persistLocked(current) },
+            removeAudio: { try self.removeAudioLocked(current) },
+            scheduleRetry: { self.scheduleCleanupRetryLocked(current) }
+        )
+        if committed { scheduleRetentionLocked(current) }
     }
 
     private func removeAudioLocked(_ current: BridgeRecording) throws {
@@ -1080,12 +1107,12 @@ private final class RecordingManager {
             )
             recordings[current.id] = current
             if ["recording", "finalizing"].contains(current.state) {
-                try recoverAsFailedLocked(current)
+                recoverAsFailedLocked(current)
             } else if current.state == "result-ready" {
                 guard let length = current.length, let sha256 = current.sha256,
                       (try? validateResultFile(current.url, length: length, sha256: sha256)) == true,
                       current.terminalAt != nil else {
-                    try recoverAsFailedLocked(current)
+                    recoverAsFailedLocked(current)
                     continue
                 }
                 enforceRetentionLocked(current)
@@ -1109,12 +1136,8 @@ private final class RecordingManager {
         if removedOrphan { try syncRuntimeDirectory() }
     }
 
-    private func recoverAsFailedLocked(_ current: BridgeRecording) throws {
-        try removeAudioLocked(current)
-        current.state = "failed"; current.length = nil; current.sha256 = nil
-        current.terminalAt = Date().timeIntervalSince1970
-        try persistLocked(current)
-        scheduleRetentionLocked(current)
+    private func recoverAsFailedLocked(_ current: BridgeRecording) {
+        failLocked(current)
     }
 
     private func validateResultFile(_ url: URL, length: Int, sha256: String) throws -> Bool {
@@ -1449,23 +1472,30 @@ private extension Data {
     var hex: String { map { String(format: "%02x", $0) }.joined() }
 }
 
-umask(0o077)
-var arguments = Array(CommandLine.arguments.dropFirst())
-if let preflightIndex = arguments.firstIndex(of: "--preflight-result") {
-    if preflightIndex + 1 >= arguments.count { exit(EXIT_FAILURE) }
-    let resultPath = arguments[preflightIndex + 1]
-    arguments.removeSubrange(preflightIndex...(preflightIndex + 1))
-    if !arguments.allSatisfy({ $0.hasPrefix("-psn_") }) { exit(EXIT_FAILURE) }
-    do {
-        try writePreflightResult(to: resultPath)
-        exit(EXIT_SUCCESS)
-    } catch {
-        exit(EXIT_FAILURE)
+#if !PI_DICTATION_TESTING
+@main
+private struct CompanionMain {
+    static func main() {
+        umask(0o077)
+        var arguments = Array(CommandLine.arguments.dropFirst())
+        if let preflightIndex = arguments.firstIndex(of: "--preflight-result") {
+            if preflightIndex + 1 >= arguments.count { exit(EXIT_FAILURE) }
+            let resultPath = arguments[preflightIndex + 1]
+            arguments.removeSubrange(preflightIndex...(preflightIndex + 1))
+            if !arguments.allSatisfy({ $0.hasPrefix("-psn_") }) { exit(EXIT_FAILURE) }
+            do {
+                try writePreflightResult(to: resultPath)
+                exit(EXIT_SUCCESS)
+            } catch {
+                exit(EXIT_FAILURE)
+            }
+        }
+        if !arguments.allSatisfy({ $0.hasPrefix("-psn_") }) { exit(EXIT_FAILURE) }
+        do {
+            try serve()
+        } catch {
+            exit(EXIT_FAILURE)
+        }
     }
 }
-if !arguments.allSatisfy({ $0.hasPrefix("-psn_") }) { exit(EXIT_FAILURE) }
-do {
-    try serve()
-} catch {
-    exit(EXIT_FAILURE)
-}
+#endif

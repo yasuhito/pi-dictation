@@ -274,10 +274,15 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             if (recording.state !== "recording") status = "invalid-state";
             else responsePayload = { observations: [{ sequence: 0, capturedAtMs: 0, dbfs: -20 }] };
           } else if (request.operation === "status") {
-            responsePayload = statusPayload(recording);
+            responsePayload = mode === "lost-start-null-status" ? null : statusPayload(recording);
           } else if (request.operation === "stop") {
             let initiatedFinalization = false;
-            if (recording.state === "recording" && mode === "ambiguous-stop") {
+            if (mode === "finalization-not-found") {
+              recordings.delete(recording.id);
+              if (activeId === recording.id) activeId = undefined;
+              removeAudio(recording);
+              status = "not-found";
+            } else if (recording.state === "recording" && mode === "ambiguous-stop") {
               recording.state = "finalizing";
               setTimeout(() => {
                 if (recording.state !== "finalizing") return;
@@ -348,6 +353,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const responseBytes = Buffer.from(JSON.stringify(responsePayload));
       const responseTag = tag(credential.secret, ["response", protocolVersion, challenge, credential.id, request.requestId, `${request.operation}:${status}`, responseBytes]);
       const response = frame({ type: "response", version: protocolVersion, requestId: request.requestId, status, payload: responseBytes.toString("base64"), hmac: responseTag.toString("hex") });
+      if (request.operation === "start" && ["lost-start-result-ready", "lost-start-null-status"].includes(mode)) {
+        const recording = owned(credential.id, payload);
+        if (recording && mode === "lost-start-result-ready") markResultReady(recording);
+        socket.destroy();
+        return;
+      }
       if (request.operation === "fetch" && mode === "early-eof" && audio) audio = audio.subarray(0, audio.length - 1);
       if (request.operation === "fetch" && mode === "fetch-stall" && audio) {
         socket.write(Buffer.concat([response, audio.subarray(0, 100)]));

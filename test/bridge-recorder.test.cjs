@@ -83,12 +83,42 @@ for (const [mode, code] of [
   });
 }
 
+test("the Bridge recording adapter recovers a result completed after a lost start response", async () => {
+  const instance = await harness("lost-start-result-ready");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge recording adapter rejects a null status after a lost start response", async () => {
+  const instance = await harness("lost-start-null-status");
+  try {
+    const error = await instance.recorder.start(instance.startOptions).catch((value) => value);
+    assert.equal(error.code, "recording-failed");
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge recording adapter reconciles an ambiguous stop through owner status", async () => {
   const instance = await harness("ambiguous-stop");
   try {
     const recording = await instance.recorder.start(instance.startOptions);
     await recording.stop();
     assert.equal(existsSync(instance.startOptions.destination), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("owner-authenticated not-found during finalization is a deterministic failure", async () => {
+  const instance = await harness("finalization-not-found");
+  const controller = new AbortController();
+  instance.startOptions.signal = controller.signal;
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const safetyDeadline = setTimeout(() => controller.abort(), 500);
+    const error = await recording.stop().catch((value) => value);
+    clearTimeout(safetyDeadline);
+    assert.equal(error.code, "recording-failed");
   } finally { await instance.cleanup(); }
 });
 
