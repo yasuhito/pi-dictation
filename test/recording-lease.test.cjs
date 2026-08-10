@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const { fork } = require("node:child_process");
 const { randomBytes, randomUUID } = require("node:crypto");
-const { mkdirSync, mkdtempSync, rmSync } = require("node:fs");
+const { existsSync, mkdirSync, mkdtempSync, rmSync } = require("node:fs");
 const { once } = require("node:events");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
@@ -31,6 +31,23 @@ async function cleanup(instance) {
   instance.child.kill("SIGTERM");
   await once(instance.child, "exit").catch(() => {});
   rmSync(instance.directory, { recursive: true, force: true });
+}
+
+async function restart(instance, mode = "valid") {
+  instance.child.kill("SIGTERM");
+  await once(instance.child, "exit");
+  rmSync(instance.socket, { force: true });
+  instance.child = fork(companion, [
+    instance.socket, Buffer.from(JSON.stringify(instance.credentials)).toString("base64"), mode, "", instance.stateFile,
+  ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  await once(instance.child, "message");
+}
+
+async function persistentSetup(mode = "valid") {
+  const instance = await setup();
+  instance.stateFile = join(instance.directory, "leases.json");
+  await restart(instance, mode);
+  return instance;
 }
 
 test("two authenticated clients agree with the Recording lease reference model", async (t) => {
@@ -124,6 +141,106 @@ test("two authenticated clients agree with the Recording lease reference model",
   } finally { await cleanup(instance); }
 });
 
+test("authenticated request receipts remain replay-safe across companion restart", async (t) => {
+  const instance = await persistentSetup();
+  const [owner, competitor] = instance.credentials;
+  const first = capability();
+  const second = capability();
+  const changedRequestId = randomUUID();
+  const busyRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...first, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "status", first, changedRequestId);
+    await request(instance.socket, competitor, "start", { ...second, maxDurationMs: 10000 }, busyRequestId);
+    await restart(instance);
+    const conflict = await request(instance.socket, owner, "cancel", first, changedRequestId);
+    await request(instance.socket, owner, "stop", first);
+    const busyReplay = await request(instance.socket, competitor, "start", { ...second, maxDurationMs: 10000 }, busyRequestId);
+
+    await t.test("rejects changed-content reuse after restart", () => {
+      assert.equal(conflict.status, "request-conflict");
+    });
+    await t.test("preserves a busy start outcome after restart and slot release", () => {
+      assert.equal(busyReplay.status, "busy");
+    });
+  } finally { await cleanup(instance); }
+});
+
+test("startup discards an orphaned pending fetch receipt so replay can execute", async () => {
+  const instance = await persistentSetup("crash-before-fetch-dispatch");
+  const owner = instance.credentials[0];
+  const lease = capability();
+  const fetchRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    await request(instance.socket, owner, "fetch", lease, fetchRequestId).catch(() => {});
+    await restart(instance);
+    const recovered = await request(instance.socket, owner, "fetch", lease, fetchRequestId);
+    assert.equal(recovered.body.length, recovered.payload.length);
+  } finally { await cleanup(instance); }
+});
+
+test("an authenticated unknown operation cannot poison persisted receipts", async () => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const requestId = randomUUID();
+  const lease = capability();
+  try {
+    await request(instance.socket, owner, "unknown", lease, requestId);
+    await restart(instance);
+    const reused = await request(instance.socket, owner, "status", lease, requestId);
+    assert.equal(reused.status, "not-found");
+  } finally { await cleanup(instance); }
+});
+
+test("a cached terminal response is not replayed after its lease tombstone is purged", async () => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const lease = capability();
+  const statusRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    await request(instance.socket, owner, "acknowledge", lease);
+    await request(instance.socket, owner, "status", lease, statusRequestId);
+    await new Promise((resolvePurge) => {
+      instance.child.once("message", resolvePurge);
+      instance.child.send({ type: "purge", recordingId: lease.recordingId });
+    });
+    const replayed = await request(instance.socket, owner, "status", lease, statusRequestId);
+    assert.equal(replayed.status, "not-found");
+  } finally { await cleanup(instance); }
+});
+
+test("control request receipts survive observation churn and preserve non-success outcomes", async (t) => {
+  const instance = await setup();
+  const [owner, competitor] = instance.credentials;
+  const lease = capability();
+  const competingLease = capability();
+  const busyRequestId = randomUUID();
+  const invalidFetchRequestId = randomUUID();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, competitor, "start", { ...competingLease, maxDurationMs: 10000 }, busyRequestId);
+    await request(instance.socket, owner, "fetch", lease, invalidFetchRequestId);
+    for (let index = 0; index < 300; index += 1) {
+      await request(instance.socket, owner, "levels", { ...lease, afterSequence: index });
+    }
+    await request(instance.socket, owner, "stop", lease);
+    const busyReplay = await request(instance.socket, competitor, "start",
+      { ...competingLease, maxDurationMs: 10000 }, busyRequestId);
+    const invalidFetchReplay = await request(instance.socket, owner, "fetch", lease, invalidFetchRequestId);
+
+    await t.test("more than 256 Level requests do not evict a busy start receipt", () => {
+      assert.equal(busyReplay.status, "busy");
+    });
+    await t.test("an invalid-state response remains stable after the lease state changes", () => {
+      assert.equal(invalidFetchReplay.status, "invalid-state");
+    });
+  } finally { await cleanup(instance); }
+});
+
 test("concurrent stop and cancel leave the Recording lease cancelled before acknowledgement", async () => {
   const instance = await setup("slow-finalization");
   try {
@@ -198,5 +315,122 @@ test("storage arbitration agrees with an unreservable reference start", async ()
     const expected = model.apply(owner.id, randomUUID(), "start", { ...lease, maxDurationMs: 10000 }, { reservable: false });
     const actual = await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
     assert.equal(actual.status, expected.status);
+  } finally { await cleanup(instance); }
+});
+
+test("an unacknowledged completed WAV remains owner-recoverable across companion restart", async (t) => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const competitor = instance.credentials[1];
+  const lease = capability();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    await restart(instance);
+    const status = await request(instance.socket, owner, "status", lease);
+    const fetched = await request(instance.socket, owner, "fetch", lease);
+    const foreign = await request(instance.socket, competitor, "fetch", lease);
+    const audioPath = `${instance.stateFile}.${lease.recordingId}.wav`;
+    const audioBeforeAcknowledgement = existsSync(audioPath);
+    await request(instance.socket, owner, "acknowledge", lease);
+    const audioAfterAcknowledgement = existsSync(audioPath);
+    await restart(instance);
+    const acknowledged = await request(instance.socket, owner, "status", lease);
+
+    await t.test("restores result-ready metadata", () => assert.equal(status.payload.state, "result-ready"));
+    await t.test("restores the complete WAV bytes", () => assert.equal(fetched.body.length, fetched.payload.length));
+    await t.test("does not disclose the restored lease to another credential", () => assert.equal(foreign.status, "not-found"));
+    await t.test("retains the WAV on disk before acknowledgement", () => assert.equal(audioBeforeAcknowledgement, true));
+    await t.test("deletes the WAV on disk after acknowledgement", () => assert.equal(audioAfterAcknowledgement, false));
+    await t.test("preserves the acknowledgement tombstone", () => assert.equal(acknowledged.payload.state, "acknowledged"));
+  } finally { await cleanup(instance); }
+});
+
+test("interrupted transport phases recover safely after companion restart", async (t) => {
+  for (const operation of ["start", "stop", "cancel", "acknowledge"]) {
+    await t.test(`${operation} response loss`, async (responseLossTest) => {
+      const instance = await persistentSetup(`drop-${operation}-response`);
+      const [owner, competitor] = instance.credentials;
+      const lease = capability();
+      const requestId = randomUUID();
+      try {
+        if (operation !== "start") await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+        if (operation === "acknowledge") await request(instance.socket, owner, "stop", lease);
+        const payload = operation === "start" ? { ...lease, maxDurationMs: 10000 } : lease;
+        await request(instance.socket, owner, operation, payload, requestId).catch(() => {});
+        await restart(instance, `drop-${operation}-response`);
+        const ownerStatus = await request(instance.socket, owner, "status", lease);
+        const foreignStatus = await request(instance.socket, competitor, "status", lease);
+        const expectedState = { start: "recording", stop: "result-ready", cancel: "cancelled", acknowledge: "acknowledged" }[operation];
+
+        await responseLossTest.test("restores the owner's operation outcome", () => {
+          assert.equal(ownerStatus.payload.state, expectedState);
+        });
+        await responseLossTest.test("does not disclose the lease to another credential", () => {
+          assert.equal(foreignStatus.status, "not-found");
+        });
+      } finally { await cleanup(instance); }
+    });
+  }
+
+  await t.test("interrupted fetch", async (interruptedFetchTest) => {
+    const instance = await persistentSetup("fetch-interrupted-once");
+    const [owner, competitor] = instance.credentials;
+    const lease = capability();
+    try {
+      await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+      await request(instance.socket, owner, "stop", lease);
+      await request(instance.socket, owner, "fetch", lease).catch(() => {});
+      await restart(instance, "fetch-interrupted-once");
+      const recovered = await request(instance.socket, owner, "fetch", lease);
+      const foreign = await request(instance.socket, competitor, "fetch", lease);
+
+      await interruptedFetchTest.test("restores the complete WAV bytes", () => {
+        assert.equal(recovered.body.length, recovered.payload.length);
+      });
+      await interruptedFetchTest.test("does not disclose the WAV to another credential", () => {
+        assert.equal(foreign.status, "not-found");
+      });
+    } finally { await cleanup(instance); }
+  });
+});
+
+test("startup converts interrupted active work to an attributable failed tombstone", async (t) => {
+  const instance = await persistentSetup();
+  const owner = instance.credentials[0];
+  const lease = capability();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await restart(instance, "restart-recovery");
+    const failed = await request(instance.socket, owner, "status", lease);
+    const next = await request(instance.socket, owner, "start", { ...capability(), maxDurationMs: 10000 });
+    await t.test("attributes the failed terminal result to its owner", () => assert.equal(failed.payload.state, "failed"));
+    await t.test("releases the active slot", () => assert.equal(next.status, "ok"));
+  } finally { await cleanup(instance); }
+});
+
+test("elapsed retention expires and purges a restarted Recording lease", async (t) => {
+  const instance = await persistentSetup("short-retention");
+  const owner = instance.credentials[0];
+  const competitor = instance.credentials[1];
+  const lease = capability();
+  try {
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "stop", lease);
+    const audioPath = `${instance.stateFile}.${lease.recordingId}.wav`;
+    await restart(instance, "short-retention");
+    const recovered = await request(instance.socket, owner, "status", lease);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 350));
+    const expired = await request(instance.socket, owner, "status", lease);
+    const foreign = await request(instance.socket, competitor, "status", lease);
+    const audioAfterExpiry = existsSync(audioPath);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 350));
+    const purged = await request(instance.socket, owner, "status", lease);
+
+    await t.test("recovers within the remaining result retention", () => assert.equal(recovered.payload.state, "result-ready"));
+    await t.test("reports elapsed expiry only to the owner", () => assert.equal(expired.payload.state, "expired"));
+    await t.test("keeps expiry indistinguishable from not-found cross-owner", () => assert.equal(foreign.status, "not-found"));
+    await t.test("deletes the expired WAV from disk", () => assert.equal(audioAfterExpiry, false));
+    await t.test("purges after the elapsed tombstone retention", () => assert.equal(purged.status, "not-found"));
   } finally { await cleanup(instance); }
 });

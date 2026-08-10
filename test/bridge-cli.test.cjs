@@ -21,7 +21,8 @@ const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 
 function temporaryHome() {
-  return mkdtempSync(join(tmpdir(), "pi-dictation-bridge-"));
+  const base = process.platform === "darwin" ? "/tmp" : tmpdir();
+  return mkdtempSync(join(base, "pi-dictation-bridge-"));
 }
 
 function runBridge(home, args, env = {}) {
@@ -30,6 +31,16 @@ function runBridge(home, args, env = {}) {
     encoding: "utf8",
     env: { ...process.env, HOME: home, ...env },
   });
+}
+
+function runInPseudoTerminal(args, options) {
+  if (process.platform === "darwin") {
+    const command = args.map((argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("}", "\\}")}}`).join(" ");
+    const program = `set timeout -1; spawn ${command}; expect eof; set result [wait]; exit [lindex $result 3]`;
+    return spawnSync("/usr/bin/expect", ["-c", program], options);
+  }
+  const command = args.map((argument) => `'${argument.replaceAll("'", `'\\''`)}'`).join(" ");
+  return spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], options);
 }
 
 function writeExecutable(path, content) {
@@ -285,8 +296,7 @@ test("bridge preflight requires and records interactive real-audio observation b
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    const result = spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    const result = runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools, LAUNCHCTL_LOG: launchctlLog },
@@ -329,8 +339,7 @@ test("bridge preflight removes readiness when LaunchAgent loading fails", () => 
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools },
@@ -349,8 +358,7 @@ test("bridge preflight does not mark digital silence ready", () => {
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const command = `${process.execPath} ${cliPath} bridge preflight`;
-    spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], {
+    runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools, FAKE_CAPTURE: "silence", LAUNCHCTL_LOG: join(home, "launchctl.log") },

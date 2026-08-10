@@ -37,6 +37,7 @@ export type RecorderErrorCode =
   | "cancellation-unconfirmed"
   | "duration-limit-reached"
   | "invalid-audio"
+  | "outcome-unknown"
   | "recorder-busy"
   | "recorder-unavailable"
   | "recording-failed";
@@ -46,6 +47,7 @@ const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   "cancellation-unconfirmed": "Cancellation could not be confirmed within five seconds; the recording owner may remain live on the companion.",
   "duration-limit-reached": "Recording reached the maximum duration.",
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
+  "outcome-unknown": "The Bridge recording outcome could not be determined within the recovery window.",
   "recorder-busy": "Another Bridge recording is already in progress.",
   "recorder-unavailable": "No supported local recorder is available.",
   "recording-failed": "Voice recording stopped unexpectedly.",

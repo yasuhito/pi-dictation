@@ -243,7 +243,7 @@ function buildBundle(output, installId = "standalone-build") {
     mkdirSync(resources, { mode: 0o700 });
     const executable = join(macos, APP_NAME);
     run(toolchain.swiftc, [
-      "-O", "-whole-module-optimization", "-sdk", toolchain.sdk, "-target", "arm64-apple-macosx14.0",
+      "-O", "-whole-module-optimization", "-parse-as-library", "-sdk", toolchain.sdk, "-target", "arm64-apple-macosx14.0",
       "-framework", "AVFoundation", "-framework", "AudioToolbox",
       "-framework", "CoreMedia", "-framework", "CryptoKit", "-framework", "Security",
       sourcePath, "-o", executable,
