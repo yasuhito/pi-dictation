@@ -226,6 +226,7 @@ function closeLevels(recording, state) {
 
 function statusPayload(recording) {
   const result = { recordingId: recording.id, state: recording.state };
+  if (recording.state === "failed") result.reason = recording.failureReason;
   if (recording.state === "result-ready") {
     result.length = recording.audio.length;
     result.sha256 = createHash("sha256").update(recording.audio).digest("hex");
@@ -256,9 +257,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const payload = JSON.parse(payloadBytes.toString("utf8"));
       if (eventFile) {
         require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
-        if (request.operation === "subscribe-levels") {
-          require("node:fs").appendFileSync(eventFile, `subscribe-levels-request:${request.requestId}\n`);
-        }
+        require("node:fs").appendFileSync(eventFile, `${request.operation}-request:${request.requestId}\n`);
+        require("node:fs").appendFileSync(eventFile, `${request.operation}-at:${Date.now()}\n`);
       }
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
       if (mode === "unapplied-stop-retries" && request.operation === "stop") {
@@ -322,6 +322,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             const recording = {
               id: payload.recordingId, owner: credential.id, leaseHash, state: "recording",
               audio: wav(), completion: "stopped", observations: [], nextSequence: 0,
+              lastOwnerProofAt: Date.now(),
             };
             recordings.set(recording.id, recording);
             activeId = recording.id;
@@ -357,7 +358,28 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
               });
             }, 50);
             recording.levelTimer.unref();
-            if (!["companion-duration-disabled", "pi-start-delay"].includes(mode)) {
+            if (mode.startsWith("lifecycle-")) {
+              const lifecycleTimer = setTimeout(() => {
+                if (recording.state !== "recording") return;
+                recording.state = "failed";
+                recording.failureReason = mode.slice("lifecycle-".length);
+                closeLevels(recording, "failed");
+                removeAudio(recording);
+                recording.terminalAt = Date.now();
+                if (activeId === recording.id) activeId = undefined;
+                persistState();
+                scheduleRetention(recording);
+              }, 100);
+              lifecycleTimer.unref();
+            }
+            if (mode === "owner-liveness-loss") {
+              const livenessTimer = setTimeout(() => {
+                if (recording.state !== "recording") return;
+                markResultReady(recording, "owner-liveness-loss");
+              }, 100);
+              livenessTimer.unref();
+            }
+            if (!["companion-duration-disabled", "pi-start-delay", "owner-liveness-loss"].includes(mode) && !mode.startsWith("lifecycle-")) {
               const companionDuration = mode === "mac-duration-early" ? Math.max(1, Math.floor(payload.maxDurationMs / 2)) : payload.maxDurationMs;
               const durationTimer = setTimeout(() => {
                 if (recording.state !== "recording") return;
@@ -386,6 +408,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
               };
             }
           } else if (request.operation === "status") {
+            if (recording.state === "recording") recording.lastOwnerProofAt = Date.now();
             responsePayload = mode === "lost-start-null-status" ? null : statusPayload(recording);
           } else if (request.operation === "stop") {
             let initiatedFinalization = false;
@@ -525,6 +548,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       }
       if (request.operation === "start" && mode === "pi-start-delay") {
         const delayed = setTimeout(() => socket.end(response), 220);
+        delayed.unref();
+        return;
+      }
+      if (request.operation === "status" && mode === "slow-liveness-status") {
+        const delayed = setTimeout(() => socket.end(response), 700);
         delayed.unref();
         return;
       }

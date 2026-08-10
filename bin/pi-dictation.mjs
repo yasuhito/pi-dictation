@@ -42,6 +42,7 @@ const APP_NAME = "PiDictationBridge";
 const MAX_FRAME_BYTES = 64 * 1024;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = join(packageRoot, "native", "macos-companion", "PiDictationBridge.swift");
+const watchdogSourcePath = join(packageRoot, "native", "macos-companion", "PiDictationDurationWatchdog.swift");
 
 class CliError extends Error {}
 
@@ -234,7 +235,9 @@ function packageVersion() {
 }
 
 function buildBundle(output, installId = "standalone-build") {
-  if (!existsSync(sourcePath)) throw new CliError("The packaged macOS companion source is missing. Reinstall pi-dictation.");
+  if (!existsSync(sourcePath) || !existsSync(watchdogSourcePath)) {
+    throw new CliError("The packaged macOS companion source is missing. Reinstall pi-dictation.");
+  }
   if (existsSync(output)) throw new CliError("Refusing to replace an existing build output.");
   const toolchain = validateToolchain();
   const parent = dirname(output);
@@ -249,13 +252,21 @@ function buildBundle(output, installId = "standalone-build") {
     const executable = join(macos, APP_NAME);
     run(toolchain.swiftc, [
       "-O", "-whole-module-optimization", "-parse-as-library", "-sdk", toolchain.sdk, "-target", "arm64-apple-macosx14.0",
-      "-framework", "AVFoundation", "-framework", "AudioToolbox",
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "AudioToolbox",
       "-framework", "CoreMedia", "-framework", "CryptoKit", "-framework", "Security",
       sourcePath, "-o", executable,
     ], {
       failure: "The Swift toolchain cannot build the macOS companion. Update Xcode or Apple's command line tools.",
     });
     chmodSync(executable, 0o700);
+    const watchdog = join(macos, "PiDictationDurationWatchdog");
+    run(toolchain.swiftc, [
+      "-O", "-whole-module-optimization", "-parse-as-library", "-sdk", toolchain.sdk,
+      "-target", "arm64-apple-macosx14.0", watchdogSourcePath, "-o", watchdog,
+    ], {
+      failure: "The Swift toolchain cannot build the duration watchdog. Update Xcode or Apple's command line tools.",
+    });
+    chmodSync(watchdog, 0o700);
     writeFileSync(join(stage, "Contents", "Info.plist"), infoPlist(packageVersion()), { mode: 0o600 });
     writeFileSync(join(resources, "ownership.json"), JSON.stringify({ product: LABEL, installId }) + "\n", { mode: 0o600 });
     writeFileSync(entitlements, entitlementsPlist(), { mode: 0o600 });
@@ -315,6 +326,7 @@ function proveApp(path, installId) {
   inspectPath(macos, "directory", 0o700, "companion executable directory");
   inspectPath(join(contents, "Info.plist"), "file", 0o600, "companion metadata");
   inspectPath(join(macos, APP_NAME), "file", 0o700, "companion executable");
+  inspectPath(join(macos, "PiDictationDurationWatchdog"), "file", 0o700, "duration watchdog executable");
   const marker = readJsonOwned(join(resources, "ownership.json"), "companion ownership marker");
   if (marker.product !== LABEL || marker.installId !== installId) {
     throw new CliError("Refusing a companion app whose ownership cannot be proven.");
@@ -382,6 +394,7 @@ function install() {
     chmodSync(join(stagedApp, "Contents", "Resources"), 0o700);
     chmodSync(join(stagedApp, "Contents", "Info.plist"), 0o600);
     chmodSync(join(stagedApp, "Contents", "MacOS", APP_NAME), 0o700);
+    chmodSync(join(stagedApp, "Contents", "MacOS", "PiDictationDurationWatchdog"), 0o700);
     chmodSync(join(stagedApp, "Contents", "Resources", "ownership.json"), 0o600);
     const backup = join(p.root, `.${APP_NAME}.${randomUUID()}.backup`);
     if (pathExists(p.app)) renameSync(p.app, backup);

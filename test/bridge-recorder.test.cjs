@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { fork } = require("node:child_process");
-const { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } = require("node:fs");
+const net = require("node:net");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { once } = require("node:events");
@@ -32,6 +33,7 @@ async function harness(mode = "valid", credentialMetadata = {}) {
   await once(child, "message");
   const { createRecorder } = await jiti.import(join(root, "extensions", "recorder.ts"));
   return {
+    child, socket, credential,
     recorder: createRecorder({ type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile }),
     eventFile,
     events() { return existsSync(eventFile) ? readFileSync(eventFile, "utf8").trim().split("\n") : []; },
@@ -42,8 +44,10 @@ async function harness(mode = "valid", credentialMetadata = {}) {
       onLevel() {},
     },
     async cleanup() {
-      child.kill("SIGTERM");
-      await once(child, "exit").catch(() => {});
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        await once(child, "exit").catch(() => {});
+      }
       rmSync(directory, { recursive: true, force: true });
     },
   };
@@ -534,6 +538,116 @@ test("Bridge WAV validation distinguishes digital silence from quiet input", asy
   } finally {
     await silent.cleanup();
     await quiet.cleanup();
+  }
+});
+
+test("Pi proves owner liveness with fresh authenticated status requests every five seconds", async (t) => {
+  const instance = await harness("slow-liveness-status");
+  instance.startOptions.maxDurationMs = 20000;
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10300));
+    const events = instance.events();
+    const statusRequestIds = events
+      .filter((event) => event.startsWith("status-request:"))
+      .map((event) => event.slice("status-request:".length));
+    const statusTimes = events
+      .filter((event) => event.startsWith("status-at:"))
+      .map((event) => Number(event.slice("status-at:".length)));
+    await recording.cancel();
+    await t.test("sends a liveness proof by the five-second cadence", () => {
+      assert.equal(statusRequestIds.length >= 2, true);
+    });
+    await t.test("uses a fresh authenticated request identity", () => {
+      assert.equal(new Set(statusRequestIds).size, statusRequestIds.length);
+    });
+    await t.test("starts proofs on the fixed five-second cadence", () => {
+      assert.equal(statusTimes[1] - statusTimes[0] >= 4500 && statusTimes[1] - statusTimes[0] <= 5500, true);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("owner-liveness loss remains recoverable without becoming normal success", async (t) => {
+  const instance = await harness("owner-liveness-loss");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 180));
+    const error = await recording.stop().catch((value) => value);
+    await t.test("returns the distinct owner-liveness failure", () => {
+      assert.equal(error.code, "bridge-owner-liveness-lost");
+    });
+    await t.test("recovers the retained WAV with the same capability", () => {
+      assert.equal(instance.events().includes("fetch"), true);
+    });
+    await t.test("acknowledges recovered audio for deletion", () => {
+      assert.equal(instance.events().includes("acknowledge"), true);
+    });
+    await t.test("does not expose recovered audio for transcription", () => {
+      assert.equal(existsSync(instance.startOptions.destination), false);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+for (const [reason, code] of [
+  ["sleep", "bridge-sleep"],
+  ["logout", "bridge-logout"],
+  ["reboot", "bridge-reboot"],
+  ["session-lock", "bridge-session-lock"],
+  ["companion-stop", "bridge-companion-stopped"],
+  ["companion-restart", "bridge-companion-restarted"],
+  ["device-loss", "bridge-device-lost"],
+]) {
+  test(`the Recorder exposes the distinct ${reason} lifecycle failure`, async () => {
+    const instance = await harness(`lifecycle-${reason}`);
+    try {
+      const recording = await instance.recorder.start(instance.startOptions);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 180));
+      const error = await recording.stop().catch((value) => value);
+      assert.equal(error.code, code);
+    } finally { await instance.cleanup(); }
+  });
+}
+
+test("a new recording fails promptly during reconnect and succeeds after authenticated service returns", async (t) => {
+  const instance = await harness();
+  let replacement;
+  let pendingHealth;
+  try {
+    instance.child.kill("SIGTERM");
+    await once(instance.child, "exit");
+    rmSync(instance.socket, { force: true });
+    pendingHealth = net.createServer((socket) => socket.destroy());
+    await new Promise((resolveListen, reject) => {
+      pendingHealth.once("error", reject);
+      pendingHealth.listen(instance.socket, resolveListen);
+    });
+    chmodSync(instance.socket, 0o600);
+    const startedAt = Date.now();
+    const unavailable = await instance.recorder.start(instance.startOptions).catch((value) => value);
+    const unavailableElapsed = Date.now() - startedAt;
+    await new Promise((resolveClose) => pendingHealth.close(resolveClose));
+    pendingHealth = undefined;
+    rmSync(instance.socket, { force: true });
+    replacement = fork(companion, [
+      instance.socket, Buffer.from(JSON.stringify(instance.credential)).toString("base64"), "valid", instance.eventFile,
+    ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    await once(replacement, "message");
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    await t.test("classifies reconnect downtime as unavailable", () => {
+      assert.equal(unavailable.code, "recorder-unavailable");
+    });
+    await t.test("fails without waiting for implicit reconnect", () => {
+      assert.equal(unavailableElapsed < 1000, true);
+    });
+    await t.test("starts a new Recording lease after authenticated service returns", () => {
+      assert.equal(instance.events().filter((event) => event === "start").length >= 1, true);
+    });
+  } finally {
+    if (pendingHealth) await new Promise((resolveClose) => pendingHealth.close(resolveClose));
+    replacement?.kill("SIGTERM");
+    if (replacement) await once(replacement, "exit").catch(() => {});
+    await instance.cleanup();
   }
 });
 

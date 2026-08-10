@@ -459,6 +459,48 @@ test("tunnel supervisor establishes listener and authenticated health through pr
   }
 });
 
+test("tunnel supervisor escalates from TERM to KILL only for its owned SSH child", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-supervisor-kill-"));
+  const tools = join(home, "tools");
+  const childPidPath = join(home, "child.pid");
+  const statusPath = join(home, "setup.json");
+  const configurationPath = join(home, "tunnel.json");
+  mkdirSync(tools, { mode: 0o700 });
+  executable(join(tools, "ssh"), "#!/bin/sh\nif [ \"$1\" != tunnel ]; then exit 1; fi\nprintf '%s' $$ > \"$CHILD_PID\"\ntrap '' TERM INT\nwhile :; do sleep 1; done\n");
+  writeFileSync(statusPath, JSON.stringify({ stages: { tunnelProcess: "pending", listener: "pending", authenticatedHealth: "pending" } }), { mode: 0o600 });
+  writeFileSync(configurationPath, JSON.stringify({
+    product: "com.yasuhito.pi-dictation.bridge",
+    statusFile: statusPath,
+    stableAfterMs: 1000,
+    sshArguments: ["tunnel"],
+    listenerProbeArguments: ["listener"],
+    healthProbeArguments: ["health"],
+  }), { mode: 0o600 });
+  const supervisor = spawn(process.execPath, [join(root, "bin", "pi-dictation-tunnel.mjs"), configurationPath], {
+    cwd: root, env: { ...process.env, HOME: home, PATH: `${tools}:/usr/bin:/bin`, CHILD_PID: childPidPath }, stdio: "ignore",
+  });
+  try {
+    const deadline = Date.now() + 3000;
+    while (!existsSync(childPidPath) && Date.now() < deadline) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    const childPid = Number(readFileSync(childPidPath, "utf8"));
+    const startedAt = Date.now();
+    supervisor.kill("SIGTERM");
+    await once(supervisor, "exit");
+    let childExists = true;
+    try { process.kill(childPid, 0); } catch { childExists = false; }
+    const elapsed = Date.now() - startedAt;
+    await t.test("force-terminates the exact owned SSH child", () => {
+      assert.equal(childExists, false);
+    });
+    await t.test("uses the bounded five-second escalation window", () => {
+      assert.equal(elapsed >= 4500 && elapsed < 6500, true);
+    });
+  } finally {
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("remote prepare refuses to overwrite an existing unowned Pi configuration", () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-unowned-"));
   const id = "fedcba9876543210";

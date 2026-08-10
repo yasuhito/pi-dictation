@@ -24,6 +24,7 @@
   ],
   "bin": {
     "pi-dictation": "bin/pi-dictation.mjs",
+    "pi-dictation-bridge-certify": "bin/pi-dictation-bridge-certify.cjs",
     "pi-dictation-doctor": "bin/pi-dictation-doctor.mjs"
   },
   "files": [
@@ -39,6 +40,7 @@
   "scripts": {
     "test": "node --test test/*.test.cjs",
     "test:native-bridge-adversarial": "scripts/run-native-bridge-adversarial.sh",
+    "test:native-bridge-lifecycle": "scripts/run-native-bridge-lifecycle.sh",
     "typecheck": "tsc --noEmit",
     "test:assertions": "node scripts/check-test-assertions.mjs",
     "check": "npm run test:assertions && npm run typecheck && npm test",
