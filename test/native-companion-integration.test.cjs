@@ -105,7 +105,7 @@ async function disconnects(promise) {
   return promise.then(() => false, () => true);
 }
 
-test("native companion streams capture-time RMS from recorded PCM", macOnly, async () => {
+test("native companion streams capture-time RMS from recorded PCM", macOnly, async (t) => {
   const instance = await nativeHarness();
   try {
     const owner = instance.owners[0].credential;
@@ -113,13 +113,21 @@ test("native companion streams capture-time RMS from recorded PCM", macOnly, asy
     await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
     const subscription = await subscribeLevels(instance.socket, owner, lease);
     const event = subscription.events[0];
-    assert.deepEqual({
-      status: subscription.status,
-      intervalMs: subscription.bounds.intervalMs,
-      sequence: event?.sequence,
-      capturedAtMs: event?.capturedAtMs,
-      dbfs: Math.round(event?.dbfs * 1000) / 1000,
-    }, { status: "ok", intervalMs: 50, sequence: 0, capturedAtMs: 0, dbfs: -28.725 });
+    await t.test("authenticates the Level subscription", () => {
+      assert.equal(subscription.status, "ok");
+    });
+    await t.test("reports the fixed interval", () => {
+      assert.equal(subscription.bounds.intervalMs, 50);
+    });
+    await t.test("starts the per-recording sequence at zero", () => {
+      assert.equal(event?.sequence, 0);
+    });
+    await t.test("uses a monotonic capture-time offset", () => {
+      assert.equal(event?.capturedAtMs, 0);
+    });
+    await t.test("computes unmodified RMS dBFS from the recorded PCM", () => {
+      assert.equal(Math.round(event?.dbfs * 1000) / 1000, -28.725);
+    });
   } finally { await instance.cleanup(); }
 });
 
@@ -133,6 +141,24 @@ test("native Level subscription receives an authenticated terminal event", macOn
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     await request(instance.socket, owner, "cancel", lease);
     assert.deepEqual((await subscription).terminal, { type: "terminal", state: "cancelled" });
+  } finally { await instance.cleanup(); }
+});
+
+test("exact Level subscription retry replaces the prior connection and replays", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    const requestId = randomUUID();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    const first = await subscribeLevels(instance.socket, owner, lease, 1, requestId);
+    const replacement = await subscribeLevels(instance.socket, owner, lease, 1, requestId);
+    await t.test("delivers the original authenticated subscription", () => {
+      assert.equal(first.events[0]?.sequence, 0);
+    });
+    await t.test("replays retained observations to the exact retry", () => {
+      assert.equal(replacement.events[0]?.sequence, 0);
+    });
   } finally { await instance.cleanup(); }
 });
 

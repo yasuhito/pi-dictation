@@ -627,9 +627,11 @@ private final class PcmLevelReader {
         defer { try? handle.close() }
         if cursor == nil {
             let header = try handle.read(upToCount: maximumFrameBytes) ?? Data()
-            guard header.count >= 44,
-                  String(data: header[0..<4], encoding: .ascii) == "RIFF",
-                  String(data: header[8..<12], encoding: .ascii) == "WAVE" else { return [] }
+            if header.count < 44 { return [] }
+            guard String(data: header[0..<4], encoding: .ascii) == "RIFF",
+                  String(data: header[8..<12], encoding: .ascii) == "WAVE" else {
+                throw CompanionFailure.failed
+            }
             var offset = 12
             while offset + 8 <= header.count {
                 let size = Int(UInt32(header[offset + 4]) | UInt32(header[offset + 5]) << 8 |
@@ -642,7 +644,7 @@ private final class PcmLevelReader {
                 guard next > offset else { return [] }
                 offset = next
             }
-            guard cursor != nil else { return [] }
+            guard cursor != nil else { throw CompanionFailure.failed }
         }
         try handle.seek(toOffset: cursor!)
         while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {

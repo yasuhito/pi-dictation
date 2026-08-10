@@ -74,7 +74,7 @@ test("the Recorder transports authenticated Bridge recording Level observations"
   } finally { await instance.cleanup(); }
 });
 
-test("the Bridge Level subscription replays the fixed thirty-second history", async () => {
+test("the Bridge Level subscription replays the fixed thirty-second history", async (t) => {
   const instance = await harness("replay-600");
   const observations = [];
   try {
@@ -85,8 +85,14 @@ test("the Bridge Level subscription replays the fixed thirty-second history", as
     }
     await recording.cancel();
     const replay = observations.filter(({ type }) => type === "observation").slice(0, 600);
-    assert.deepEqual({ count: replay.length, first: replay[0]?.sequence, last: replay.at(-1)?.sequence }, {
-      count: 600, first: 0, last: 599,
+    await t.test("retains exactly 600 slots", () => {
+      assert.equal(replay.length, 600);
+    });
+    await t.test("starts replay at the oldest retained sequence", () => {
+      assert.equal(replay[0]?.sequence, 0);
+    });
+    await t.test("ends replay at the newest retained sequence", () => {
+      assert.equal(replay.at(-1)?.sequence, 599);
     });
   } finally { await instance.cleanup(); }
 });
@@ -102,6 +108,25 @@ test("the Bridge Level subscription accepts in-window out-of-order observations"
     }
     await recording.cancel();
     assert.deepEqual(observations.filter(({ type }) => type === "observation").slice(0, 2).map(({ sequence }) => sequence), [1, 0]);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge rejects conflicting duplicate Level observations", async (t) => {
+  const instance = await harness("conflicting-duplicate");
+  const events = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => events.push(event) });
+    const deadline = Date.now() + 3000;
+    while (!events.some(({ type, state }) => type === "transport" && state === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    await t.test("diagnoses the conflicting stream as unavailable", () => {
+      assert.equal(events.some(({ type, state }) => type === "transport" && state === "unavailable"), true);
+    });
+    await t.test("does not deliver the conflicting duplicate", () => {
+      assert.equal(events.filter(({ type, sequence }) => type === "observation" && sequence === 0).length, 1);
+    });
   } finally { await instance.cleanup(); }
 });
 
@@ -128,7 +153,7 @@ test("Level transport failure does not change Bridge recording success", async (
   } finally { await instance.cleanup(); }
 });
 
-test("the Bridge retries a failed Level connection with bounded backoff only while recording", async () => {
+test("the Bridge retries a failed Level connection with bounded backoff only while recording", async (t) => {
   const instance = await harness("level-disconnect");
   try {
     const recording = await instance.recorder.start(instance.startOptions);
@@ -137,7 +162,15 @@ test("the Bridge retries a failed Level connection with bounded backoff only whi
     await recording.cancel();
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     const subscriptionsAfterCancel = instance.events().filter((event) => event === "subscribe-levels").length;
-    assert.equal(subscriptionsWhileRecording >= 2 && subscriptionsWhileRecording <= 4 && subscriptionsAfterCancel === subscriptionsWhileRecording, true);
+    await t.test("retries after a disconnect", () => {
+      assert.equal(subscriptionsWhileRecording >= 2, true);
+    });
+    await t.test("bounds retry frequency", () => {
+      assert.equal(subscriptionsWhileRecording <= 4, true);
+    });
+    await t.test("stops retrying after cancellation", () => {
+      assert.equal(subscriptionsAfterCancel, subscriptionsWhileRecording);
+    });
   } finally { await instance.cleanup(); }
 });
 

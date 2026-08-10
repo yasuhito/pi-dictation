@@ -24,6 +24,10 @@ _Avoid_: Automatic normalization
 A time-positioned measurement of actual microphone amplitude. Digital silence, unavailable measurement, and a missing observation remain distinct even when the Dictation strip renders each as the Silent line.
 _Avoid_: Waveform sample, activity estimate
 
+**Level subscription**:
+The separate authenticated Bridge connection that replays retained Level observations and then carries live observations for one Recording lease without controlling recording success.
+_Avoid_: Level polling, waveform stream
+
 **Bridge recording**:
 A recording whose microphone is attached to a different host from the host running Pi.
 _Avoid_: Remote input, remote microphone

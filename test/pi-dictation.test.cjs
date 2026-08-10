@@ -344,6 +344,11 @@ test("the Dictation strip preserves truthful Level slot states", async (t) => {
     const afterDelayed = strip.levels.at(-1);
     strip.observeLevel({ type: "unavailable", sequence: 1, capturedAtMs: 50 });
     const conflictDiagnosis = strip.levelDiagnosis;
+    strip.observeLevel({ type: "transport", state: "connected" });
+    strip.observeLevel({ type: "gap", fromSequence: 3, toSequence: 3 });
+    const gapDiagnosis = strip.levelDiagnosis;
+    strip.observeLevel({ type: "unavailable", sequence: 4, capturedAtMs: 200 });
+    const unavailableDiagnosis = strip.levelDiagnosis;
 
     await t.test("a missing interval resets smoothing", () => {
       assert.equal(beforeDelayed, 0);
@@ -353,6 +358,12 @@ test("the Dictation strip preserves truthful Level slot states", async (t) => {
     });
     await t.test("a conflicting duplicate is rejected diagnostically", () => {
       assert.equal(conflictDiagnosis, "conflicting-duplicate");
+    });
+    await t.test("a replay gap remains diagnosed after connection", () => {
+      assert.equal(gapDiagnosis, "transport-gap");
+    });
+    await t.test("measurement unavailability remains distinct in diagnosis", () => {
+      assert.equal(unavailableDiagnosis, "measurement-unavailable");
     });
   } finally {
     await runtime.shutdown();

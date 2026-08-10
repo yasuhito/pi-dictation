@@ -389,12 +389,14 @@ async function streamLevels(
 ): Promise<void> {
   let afterSequence = -1;
   let retryDelay = 100;
+  let requestId = randomUUID();
   const confirmed = new Map<number, Extract<LevelEvent, { type: "observation" | "unavailable" }>>();
   while (!signal.aborted) {
     let response: ResponseFrame | undefined;
+    let established = false;
     try {
       response = await authenticatedRequest(
-        config, credential, randomUUID(), "subscribe-levels", { ...owned, afterSequence }, signal
+        config, credential, requestId, "subscribe-levels", { ...owned, afterSequence }, signal
       );
       if (response.status === "invalid-state" || response.status === "not-found") return;
       if (response.status !== "ok") throw new BridgeResponseError(response.status);
@@ -405,11 +407,12 @@ async function streamLevels(
           Number(bounds.oldestSequence) < 0 || Number(bounds.nextSequence) < Number(bounds.oldestSequence)) {
         throw new BridgeProtocolError();
       }
+      established = true;
+      onLevel({ type: "transport", state: "connected" });
       if (Number(bounds.oldestSequence) > afterSequence + 1) {
         onLevel({ type: "gap", fromSequence: afterSequence + 1, toSequence: Number(bounds.oldestSequence) - 1 });
         afterSequence = Number(bounds.oldestSequence) - 1;
       }
-      onLevel({ type: "transport", state: "connected" });
       let streamSequence = 0;
       while (!signal.aborted) {
         const message = await response.reader.readFrame();
@@ -439,10 +442,11 @@ async function streamLevels(
         confirmed.set(sequence, event);
         onLevel(event);
         while (confirmed.has(afterSequence + 1)) afterSequence += 1;
-        for (const retained of confirmed.keys()) if (retained <= afterSequence) confirmed.delete(retained);
+        for (const retained of confirmed.keys()) if (retained < afterSequence - 599) confirmed.delete(retained);
       }
     } catch (error) {
       if (signal.aborted || error instanceof RecorderError) return;
+      if (established) requestId = randomUUID();
       onLevel({ type: "transport", state: "unavailable" });
       await abortableDelay(retryDelay, signal).catch(() => {});
       retryDelay = Math.min(1600, retryDelay * 2);
