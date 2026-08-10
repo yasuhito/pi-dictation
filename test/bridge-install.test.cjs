@@ -285,7 +285,7 @@ test("remote Recorder configuration recovers an owned orphaned staging file", ()
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", async () => {
+test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", { skip: process.platform !== "linux" }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-gatewayports-"));
   const id = "34567890abcdef12";
   const script = join(home, "wildcard-listener.cjs");
