@@ -27,7 +27,7 @@ import cliSpinners from "cli-spinners";
 import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
 import { showDictationConfig } from "./config-ui.js";
 import { levelForDb } from "./live-level.js";
-import { createRecorder, type LevelObservation, type Recording } from "./recorder.js";
+import { createRecorder, type LevelEvent, type LevelObservation, type Recording } from "./recorder.js";
 import { shellQuote } from "./shell.js";
 const CONFIG_PATH = getConfigPath();
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
@@ -42,6 +42,8 @@ type StripOptions = {
   spin?: boolean;
   spinner?: string;
 };
+
+type LevelSlot = LevelObservation | { type: "unavailable" | "gap"; sequence: number; capturedAtMs: number };
 
 type ActiveRecording = {
   config: ReturnType<typeof loadConfig>;
@@ -327,7 +329,8 @@ class DictationStrip {
   theme: any;
   startedAt: number;
   levels: number[];
-  levelObservations: Map<number, LevelObservation>;
+  levelObservations: Map<number, LevelSlot>;
+  levelDiagnosis: "ok" | "measurement-unavailable" | "transport-gap" | "transport-unavailable" | "conflicting-duplicate";
   levelTimer: ReturnType<typeof setInterval> | null;
 
   constructor(ui: any, label: string, options: StripOptions = {}) {
@@ -341,6 +344,7 @@ class DictationStrip {
     this.startedAt = Date.now();
     this.levels = [];
     this.levelObservations = new Map();
+    this.levelDiagnosis = "ok";
     this.levelTimer = null;
     this.ui.setWidget(
       WIDGET_KEY,
@@ -364,6 +368,13 @@ class DictationStrip {
     this.blinkOn = true;
     if (this.animationMode === "blink") this.startedAt = Date.now();
     this.restartAnimationTimer();
+    this.requestRender();
+  }
+
+  setRecordingStartedAt(startedAt: number) {
+    if (this.animationMode !== "blink" || !Number.isFinite(startedAt) || startedAt > Date.now()) return;
+    this.startedAt = startedAt;
+    this.rebuildLevels();
     this.requestRender();
   }
 
@@ -392,6 +403,7 @@ class DictationStrip {
     this.stopLiveLevels();
     this.levels = [];
     this.levelObservations.clear();
+    this.levelDiagnosis = "ok";
     this.levelTimer = setInterval(() => {
       this.rebuildLevels();
       this.requestRender();
@@ -399,22 +411,40 @@ class DictationStrip {
     this.levelTimer.unref?.();
   }
 
-  observeLevel(observation: LevelObservation) {
+  observeLevel(event: LevelEvent) {
     if (this.animationMode !== "blink") return;
-    if (
-      !Number.isInteger(observation.sequence) ||
-      observation.sequence < 0 ||
-      !Number.isFinite(observation.capturedAtMs) ||
-      observation.capturedAtMs !== observation.sequence * LEVEL_REFRESH_MS ||
-      (observation.dbfs !== "silence" && !Number.isFinite(observation.dbfs))
-    ) return;
-    const slot = observation.capturedAtMs / LEVEL_REFRESH_MS;
-    const existing = this.levelObservations.get(slot);
-    if (existing) {
-      if (existing.capturedAtMs === observation.capturedAtMs && existing.dbfs === observation.dbfs) return;
+    if (event.type === "transport") {
+      this.levelDiagnosis = event.state === "connected" ? "ok" : "transport-unavailable";
       return;
     }
-    this.levelObservations.set(slot, observation);
+    if (event.type === "gap") {
+      if (!Number.isInteger(event.fromSequence) || !Number.isInteger(event.toSequence) ||
+          event.fromSequence < 0 || event.toSequence < event.fromSequence) return;
+      const latestSlot = Math.max(0, Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS));
+      const first = Math.max(event.fromSequence, latestSlot - 499);
+      const last = Math.min(event.toSequence, latestSlot + 499);
+      for (let sequence = first; sequence <= last; sequence++) {
+        if (!this.levelObservations.has(sequence)) this.levelObservations.set(sequence, {
+          type: "gap", sequence, capturedAtMs: sequence * LEVEL_REFRESH_MS,
+        });
+      }
+      this.levelDiagnosis = "transport-gap";
+      this.rebuildLevels();
+      this.requestRender();
+      return;
+    }
+    if (!Number.isInteger(event.sequence) || event.sequence < 0 ||
+        !Number.isFinite(event.capturedAtMs) || event.capturedAtMs !== event.sequence * LEVEL_REFRESH_MS ||
+        (event.type === "observation" && event.dbfs !== "silence" && !Number.isFinite(event.dbfs))) return;
+    const slot = event.capturedAtMs / LEVEL_REFRESH_MS;
+    const existing = this.levelObservations.get(slot);
+    if (existing) {
+      if (JSON.stringify(existing) === JSON.stringify(event)) return;
+      this.levelDiagnosis = "conflicting-duplicate";
+      return;
+    }
+    this.levelObservations.set(slot, event);
+    if (event.type === "unavailable") this.levelDiagnosis = "measurement-unavailable";
     this.rebuildLevels();
     this.requestRender();
   }
@@ -434,7 +464,7 @@ class DictationStrip {
         levels.push(0);
         continue;
       }
-      if (observation.dbfs === "silence") {
+      if (observation.type !== "observation" || observation.dbfs === "silence") {
         smoothedRms = 0;
         levels.push(0);
         continue;
@@ -587,12 +617,18 @@ export default function (pi: ExtensionAPI) {
         cwd: ctx.cwd,
         onFailure: handleFailure,
       });
+      const pendingLevelEvents: LevelEvent[] = [];
+      let levelsReady = false;
       const handle = await recorder.start({
         destination: file,
         maxDurationMs: config.maxRecordingMs,
         signal: startupController.signal,
-        onLevel(observation) {
-          strip?.observeLevel(observation);
+        onLevel(event) {
+          if (levelsReady) strip?.observeLevel(event);
+          else {
+            pendingLevelEvents.push(event);
+            if (pendingLevelEvents.length > 600) pendingLevelEvents.shift();
+          }
         },
       });
       if (shuttingDown || cancelStartupRequested) {
@@ -613,6 +649,9 @@ export default function (pi: ExtensionAPI) {
       activeRecordings.add(active);
       ownershipTransferred = true;
       showStrip(ctx, "Recording", { blink: true });
+      strip?.setRecordingStartedAt(handle.startedAt);
+      levelsReady = true;
+      for (const event of pendingLevelEvents) strip?.observeLevel(event);
       if (earlyFailure) handleFailure(earlyFailure);
     } catch (error) {
       if (!shuttingDown && !cancelStartupRequested) {

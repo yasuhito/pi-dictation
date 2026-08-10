@@ -142,7 +142,7 @@ test("isolated native companion rejects adversarial traffic without changing an 
       assert.equal(negativeSignedHmac.closed, true);
     });
 
-    for (const operation of ["health", "start", "status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
+    for (const operation of ["health", "start", "status", "levels", "subscribe-levels", "stop", "fetch", "cancel", "acknowledge"]) {
       const malformed = await rawRequest(competitor, operation, Buffer.from('{"unexpected":true,"unexpected":false}'), { expectClose: true });
       const ownerStatus = await request(owner, "status", lease);
       await t.test(`${operation} rejects duplicate malformed payload fields`, () => assert.equal(malformed.closed, true));
@@ -163,11 +163,11 @@ test("isolated native companion rejects adversarial traffic without changing an 
     }
 
     const foreignResults = new Map();
-    for (const operation of ["status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
-      const payload = operation === "levels" ? { ...lease, afterSequence: -1 } : lease;
+    for (const operation of ["status", "levels", "subscribe-levels", "stop", "fetch", "cancel", "acknowledge"]) {
+      const payload = ["levels", "subscribe-levels"].includes(operation) ? { ...lease, afterSequence: -1 } : lease;
       foreignResults.set(operation, (await request(competitor, operation, payload)).status);
     }
-    for (const operation of ["status", "levels", "stop", "fetch", "cancel", "acknowledge"]) {
+    for (const operation of ["status", "levels", "subscribe-levels", "stop", "fetch", "cancel", "acknowledge"]) {
       await t.test(`cross-owner ${operation} collapses to not-found`, () => {
         assert.equal(foreignResults.get(operation), "not-found");
       });
@@ -191,7 +191,7 @@ test("isolated native companion rejects adversarial traffic without changing an 
       assert.equal(changedVersionReplay.status, "request-conflict");
     });
     const concurrentObservationRequestId = randomUUID();
-    const concurrentObservations = await Promise.all(Array.from({ length: 20 }, () =>
+    const concurrentObservations = await Promise.all(Array.from({ length: 4 }, () =>
       request(competitor, "health", {}, { requestId: concurrentObservationRequestId })));
     await t.test("concurrent exact observation retries all complete safely", () => {
       assert.equal(concurrentObservations.every((result) => result.status === "ok"), true);

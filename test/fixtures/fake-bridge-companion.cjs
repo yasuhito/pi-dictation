@@ -25,8 +25,8 @@ let unappliedStopFailures = 0;
 let unappliedStopRequestId;
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
 const requestReceiptRetentionMs = retentionMs;
-const knownOperations = new Set(["health", "start", "levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
-const leaseOperations = new Set(["levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
+const knownOperations = new Set(["health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
+const leaseOperations = new Set(["levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
 
 function audioPath(recording) { return stateFile ? `${stateFile}.${recording.id}.wav` : undefined; }
 function writeAudio(recording) {
@@ -62,6 +62,7 @@ function scheduleRetention(recording) {
 function markResultReady(recording, completion = recording.completion) {
   recording.completion = completion;
   recording.state = "result-ready";
+  closeLevels(recording, "result-ready");
   recording.terminalAt = Date.now();
   if (activeId === recording.id) activeId = undefined;
   persistState();
@@ -71,11 +72,14 @@ function markResultReady(recording, completion = recording.completion) {
 function persistState() {
   if (!stateFile) return;
   const state = {
-    recordings: [...recordings.values()].map((value) => ({
-      ...value,
-      leaseHash: value.leaseHash.toString("base64"),
-      audio: value.audio?.toString("base64"),
-    })),
+    recordings: [...recordings.values()].map((value) => {
+      const { subscriber, levelTimer, observations, nextSequence, ...persistedRecording } = value;
+      return {
+        ...persistedRecording,
+        leaseHash: value.leaseHash.toString("base64"),
+        audio: value.audio?.toString("base64"),
+      };
+    }),
     replay: [...replay], busyStarts: [...busyStarts], droppedResponses: [...droppedResponses], activeId,
   };
   const temporary = `${stateFile}.tmp`;
@@ -191,6 +195,35 @@ function owned(owner, payload) {
   return recording && recording.owner === owner && matches ? recording : undefined;
 }
 
+function streamEvent(subscriber, event) {
+  const payload = Buffer.from(JSON.stringify(event));
+  const hmac = tag(subscriber.credential.secret, [
+    "stream", subscriber.clientVersion, protocolVersion, subscriber.challenge,
+    subscriber.credential.id, subscriber.requestId, subscriber.streamSequence, payload,
+  ]);
+  const output = frame({
+    type: "level-event", version: protocolVersion, requestId: subscriber.requestId,
+    streamSequence: subscriber.streamSequence, payload: payload.toString("base64"), hmac: hmac.toString("hex"),
+  });
+  subscriber.streamSequence += 1;
+  if (!subscriber.socket.write(output)) subscriber.socket.destroy();
+}
+
+function appendObservation(recording, event) {
+  recording.observations ??= [];
+  recording.observations.push(event);
+  if (recording.observations.length > 600) recording.observations.shift();
+  if (recording.subscriber && !recording.subscriber.socket.destroyed) streamEvent(recording.subscriber, event);
+}
+
+function closeLevels(recording, state) {
+  clearInterval(recording.levelTimer);
+  if (!recording.subscriber || recording.subscriber.socket.destroyed) return;
+  streamEvent(recording.subscriber, { type: "terminal", state });
+  recording.subscriber.socket.end();
+  recording.subscriber = undefined;
+}
+
 function statusPayload(recording) {
   const result = { recordingId: recording.id, state: recording.state };
   if (recording.state === "result-ready") {
@@ -221,7 +254,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       const actual = Buffer.from(request.hmac, "hex");
       if (mode === "auth-failure" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("auth");
       const payload = JSON.parse(payloadBytes.toString("utf8"));
-      if (eventFile) require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
+      if (eventFile) {
+        require("node:fs").appendFileSync(eventFile, `${request.operation}\n`);
+        if (request.operation === "subscribe-levels") {
+          require("node:fs").appendFileSync(eventFile, `subscribe-levels-request:${request.requestId}\n`);
+        }
+      }
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
       if (mode === "unapplied-stop-retries" && request.operation === "stop") {
         unappliedStopRequestId ??= request.requestId;
@@ -253,7 +291,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       } else if (request.version !== protocolVersion || mode === "version-mismatch") {
         status = "version-mismatch";
         responsePayload = { clientVersion: request.version, companionVersion: responseVersion };
-      } else if (previous?.status && (!leaseOperations.has(request.operation) || owned(credential.id, payload))) {
+      } else if (previous?.status && request.operation !== "subscribe-levels" &&
+                 (!leaseOperations.has(request.operation) || owned(credential.id, payload))) {
         status = previous.status;
         responsePayload = previous.payload;
         if (request.operation === "fetch" && status === "ok") audio = owned(credential.id, payload)?.audio;
@@ -280,10 +319,44 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           } else if (leaseHash.length !== 32) {
             status = "failed";
           } else {
-            const recording = { id: payload.recordingId, owner: credential.id, leaseHash, state: "recording", audio: wav(), completion: "stopped" };
+            const recording = {
+              id: payload.recordingId, owner: credential.id, leaseHash, state: "recording",
+              audio: wav(), completion: "stopped", observations: [], nextSequence: 0,
+            };
             recordings.set(recording.id, recording);
             activeId = recording.id;
             writeAudio(recording);
+            if (mode === "replay-600") {
+              for (let sequence = 0; sequence < 600; sequence += 1) {
+                appendObservation(recording, {
+                  type: "observation", sequence, capturedAtMs: sequence * 50, dbfs: -20,
+                });
+              }
+              recording.nextSequence = 600;
+            } else if (mode === "replay-gap") {
+              appendObservation(recording, { type: "observation", sequence: 5, capturedAtMs: 250, dbfs: -20 });
+              recording.nextSequence = 6;
+            } else if (mode === "out-of-order") {
+              appendObservation(recording, { type: "observation", sequence: 1, capturedAtMs: 50, dbfs: -18 });
+              appendObservation(recording, { type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -20 });
+              recording.nextSequence = 2;
+            } else {
+              appendObservation(recording, { type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -20 });
+              if (mode === "conflicting-duplicate") {
+                appendObservation(recording, { type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -10 });
+              }
+              recording.nextSequence = 1;
+            }
+            recording.levelTimer = setInterval(() => {
+              if (recording.state !== "recording") return;
+              const sequence = recording.nextSequence++;
+              appendObservation(recording, {
+                type: mode === "level-unavailable" ? "unavailable" : "observation",
+                sequence, capturedAtMs: sequence * 50,
+                ...(mode === "level-unavailable" ? {} : { dbfs: -20 }),
+              });
+            }, 50);
+            recording.levelTimer.unref();
             if (!["companion-duration-disabled", "pi-start-delay"].includes(mode)) {
               const companionDuration = mode === "mac-duration-early" ? Math.max(1, Math.floor(payload.maxDurationMs / 2)) : payload.maxDurationMs;
               const durationTimer = setTimeout(() => {
@@ -300,7 +373,18 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             status = "not-found";
           } else if (request.operation === "levels") {
             if (recording.state !== "recording") status = "invalid-state";
-            else responsePayload = { observations: [{ sequence: 0, capturedAtMs: 0, dbfs: -20 }] };
+            else responsePayload = { observations: (recording.observations ?? []).filter((event) => event.sequence > payload.afterSequence) };
+          } else if (request.operation === "subscribe-levels") {
+            if (recording.state !== "recording") status = "invalid-state";
+            else {
+              recording.observations ??= [];
+              recording.nextSequence ??= 0;
+              const oldestSequence = recording.observations[0]?.sequence ?? recording.nextSequence;
+              responsePayload = {
+                recordingId: recording.id, intervalMs: 50,
+                oldestSequence, nextSequence: recording.nextSequence,
+              };
+            }
           } else if (request.operation === "status") {
             responsePayload = mode === "lost-start-null-status" ? null : statusPayload(recording);
           } else if (request.operation === "stop") {
@@ -360,6 +444,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             if (["recording", "finalizing", "result-ready", "cancelled"].includes(recording.state)) {
               if (recording.state !== "cancelled") recording.terminalAt = Date.now();
               recording.state = "cancelled";
+              closeLevels(recording, "cancelled");
               removeAudio(recording);
               scheduleRetention(recording);
               if (activeId === recording.id) activeId = undefined;
@@ -373,7 +458,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           content, operation: request.operation, status, payload: responsePayload,
           receivedAt: typeof previous === "object" && Number.isFinite(previous.receivedAt) ? previous.receivedAt : Date.now(),
         });
-        const observationOperations = new Set(["health", "levels", "status"]);
+        const observationOperations = new Set(["health", "levels", "subscribe-levels", "status"]);
         const observations = [...replay].filter(([, value]) => observationOperations.has(value.operation));
         while (observations.length > 256) replay.delete(observations.shift()[0]);
       }
@@ -383,6 +468,28 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       let responsePayloadText = responseBytes.toString("base64");
       if (mode === "noncanonical-base64") responsePayloadText = `${responsePayloadText.slice(0, 1)}\n${responsePayloadText.slice(1)}`;
       const response = frame({ type: "response", version: responseVersion, requestId: request.requestId, status, payload: responsePayloadText, hmac: responseTag.toString("hex") });
+      if (request.operation === "subscribe-levels" && status === "ok") {
+        if (mode === "drop-subscribe-levels-response" && !droppedResponses.has("subscribe-levels")) {
+          droppedResponses.add("subscribe-levels");
+          persistState();
+          socket.destroy();
+          return;
+        }
+        socket.write(response);
+        const recording = owned(credential.id, payload);
+        if (!recording) return socket.destroy();
+        recording.subscriber?.socket.destroy();
+        const subscriber = {
+          socket, credential, challenge, requestId: request.requestId,
+          clientVersion: request.version, streamSequence: 0,
+        };
+        recording.subscriber = subscriber;
+        for (const event of recording.observations ?? []) {
+          if (event.sequence > payload.afterSequence) streamEvent(subscriber, event);
+        }
+        if (mode === "level-disconnect") socket.destroy();
+        return;
+      }
       if (request.operation === "start" && ["lost-start-result-ready", "lost-start-null-status"].includes(mode)) {
         const recording = owned(credential.id, payload);
         if (recording && mode === "lost-start-result-ready") markResultReady(recording);

@@ -4,7 +4,7 @@ import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import net, { type Socket } from "node:net";
 import type { BridgeRecorderConfig } from "./config.js";
-import type { Recorder, RecorderStartOptions, Recording } from "./recorder.js";
+import type { LevelEvent, Recorder, RecorderStartOptions, Recording } from "./recorder.js";
 import { RecorderError, validatePcm16MonoWav } from "./recorder.js";
 
 const PROTOCOL_VERSION = 3;
@@ -19,7 +19,14 @@ const FINALIZATION_POLL_MS = 25;
 
 type Credential = { id: string; secret: Buffer; createdAt?: string };
 type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
-type ResponseFrame = { status: ResponseStatus; payload: unknown; reader: SocketReader; socket: Socket };
+type ResponseFrame = {
+  status: ResponseStatus;
+  payload: unknown;
+  reader: SocketReader;
+  socket: Socket;
+  challenge: Buffer;
+  requestId: string;
+};
 
 class BridgeProtocolError extends Error {}
 class BridgeTransportError extends Error {}
@@ -296,8 +303,11 @@ async function authenticatedRequest(
     if (operation === "fetch") {
       clearTimeout(timeout);
       socket.setTimeout(FETCH_NO_PROGRESS_TIMEOUT_MS, () => socket.destroy(new BridgeTransportError()));
+    } else if (operation === "subscribe-levels") {
+      clearTimeout(timeout);
+      socket.setTimeout(CONTROL_TIMEOUT_MS, () => socket.destroy(new BridgeTransportError()));
     }
-    return { status, payload: parsed, reader, socket };
+    return { status, payload: parsed, reader, socket, challenge, requestId };
   } catch (error) {
     cleanup();
     socket.destroy();
@@ -345,6 +355,107 @@ async function requestJson(
   } finally { clearTimeout(timer); }
 }
 
+type StreamLevelEvent = Extract<LevelEvent, { type: "observation" | "unavailable" }> |
+  { type: "terminal"; state: string };
+
+function validLevelEvent(value: unknown): value is StreamLevelEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Record<string, unknown>;
+  if (event.type === "observation") {
+    return exactObject(event, ["type", "sequence", "capturedAtMs", "dbfs"]) &&
+      Number.isSafeInteger(event.sequence) && Number(event.sequence) >= 0 &&
+      event.capturedAtMs === Number(event.sequence) * LEVEL_INTERVAL_MS &&
+      (event.dbfs === "silence" || (typeof event.dbfs === "number" && Number.isFinite(event.dbfs)));
+  }
+  if (event.type === "unavailable") {
+    return exactObject(event, ["type", "sequence", "capturedAtMs"]) &&
+      Number.isSafeInteger(event.sequence) && Number(event.sequence) >= 0 &&
+      event.capturedAtMs === Number(event.sequence) * LEVEL_INTERVAL_MS;
+  }
+  return event.type === "terminal" && exactObject(event, ["type", "state"]) &&
+    ["finalizing", "result-ready", "cancelled", "failed", "expired"].includes(String(event.state));
+}
+
+function sameLevelEvent(left: LevelEvent, right: LevelEvent): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function streamLevels(
+  config: BridgeRecorderConfig,
+  credential: Credential,
+  owned: { recordingId: string; leaseSecret: string },
+  signal: AbortSignal,
+  onLevel: (event: LevelEvent) => void
+): Promise<void> {
+  let afterSequence = -1;
+  let retryDelay = 100;
+  let requestId = randomUUID();
+  const confirmed = new Map<number, Extract<LevelEvent, { type: "observation" | "unavailable" }>>();
+  while (!signal.aborted) {
+    let response: ResponseFrame | undefined;
+    let established = false;
+    try {
+      response = await authenticatedRequest(
+        config, credential, requestId, "subscribe-levels", { ...owned, afterSequence }, signal
+      );
+      if (response.status === "invalid-state" || response.status === "not-found") return;
+      if (response.status !== "ok") throw new BridgeResponseError(response.status);
+      const bounds = response.payload;
+      if (!exactObject(bounds, ["recordingId", "intervalMs", "oldestSequence", "nextSequence"]) ||
+          bounds.recordingId !== owned.recordingId || bounds.intervalMs !== LEVEL_INTERVAL_MS ||
+          !Number.isSafeInteger(bounds.oldestSequence) || !Number.isSafeInteger(bounds.nextSequence) ||
+          Number(bounds.oldestSequence) < 0 || Number(bounds.nextSequence) < Number(bounds.oldestSequence)) {
+        throw new BridgeProtocolError();
+      }
+      established = true;
+      onLevel({ type: "transport", state: "connected" });
+      if (Number(bounds.oldestSequence) > afterSequence + 1) {
+        onLevel({ type: "gap", fromSequence: afterSequence + 1, toSequence: Number(bounds.oldestSequence) - 1 });
+        afterSequence = Number(bounds.oldestSequence) - 1;
+      }
+      let streamSequence = 0;
+      while (!signal.aborted) {
+        const message = await response.reader.readFrame();
+        if (!exactObject(message, ["type", "version", "requestId", "streamSequence", "payload", "hmac"]) ||
+            message.type !== "level-event" || message.version !== PROTOCOL_VERSION ||
+            message.requestId !== response.requestId || message.streamSequence !== streamSequence ||
+            typeof message.payload !== "string" || typeof message.hmac !== "string") throw new BridgeProtocolError();
+        const payload = decodeCanonicalBase64(message.payload);
+        const expected = authenticationTag(credential.secret, [
+          "stream", PROTOCOL_VERSION, PROTOCOL_VERSION, response.challenge, credential.id,
+          response.requestId, streamSequence, payload,
+        ]);
+        const actual = decodeCanonicalHex(message.hmac, expected.length);
+        if (!timingSafeEqual(actual, expected)) throw new BridgeProtocolError();
+        const event = parseStrictJson(payload);
+        if (!validLevelEvent(event)) throw new BridgeProtocolError();
+        streamSequence += 1;
+        if (event.type === "terminal") return;
+        retryDelay = 100;
+        const sequence = event.sequence;
+        if (sequence > afterSequence + 600) throw new BridgeProtocolError();
+        const previous = confirmed.get(sequence);
+        if (previous) {
+          if (!sameLevelEvent(previous, event)) throw new BridgeProtocolError();
+          continue;
+        }
+        confirmed.set(sequence, event);
+        onLevel(event);
+        while (confirmed.has(afterSequence + 1)) afterSequence += 1;
+        for (const retained of confirmed.keys()) if (retained < afterSequence - 599) confirmed.delete(retained);
+      }
+    } catch (error) {
+      if (signal.aborted || error instanceof RecorderError) return;
+      if (established) requestId = randomUUID();
+      onLevel({ type: "transport", state: "unavailable" });
+      await abortableDelay(retryDelay, signal).catch(() => {});
+      retryDelay = Math.min(1600, retryDelay * 2);
+    } finally {
+      response?.socket.destroy();
+    }
+  }
+}
+
 function safeError(error: unknown): RecorderError {
   if (error instanceof RecorderError) return error;
   if (error instanceof BridgeOutcomeUnknownError) return new RecorderError("outcome-unknown", { cause: error });
@@ -390,7 +501,8 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const recordingId = randomUUID();
       const leaseSecret = randomBytes(32).toString("base64");
       const owned = leasePayload(recordingId, leaseSecret);
-      const piDurationDeadline = Date.now() + options.maxDurationMs;
+      const recordingStartedAt = Date.now();
+      const piDurationDeadline = recordingStartedAt + options.maxDurationMs;
       let startPayload: unknown;
       const startRequestId = randomUUID();
       try {
@@ -426,25 +538,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       let durationReached = false;
       let acknowledgementStarted = false;
       let acknowledged = false;
-      let levelInFlight = false;
-      let lastSequence = -1;
       const stopController = new AbortController();
-      const levelTimer = setInterval(async () => {
-        if (state !== "active" || levelInFlight) return;
-        levelInFlight = true;
-        try {
-          const value = await requestJson(config, credential, "levels", { ...owned, afterSequence: lastSequence });
-          if (!exactObject(value, ["observations"]) || !Array.isArray(value.observations)) return;
-          for (const observation of value.observations) {
-            if (!exactObject(observation, ["sequence", "capturedAtMs", "dbfs"]) ||
-                !Number.isInteger(observation.sequence) || typeof observation.capturedAtMs !== "number" ||
-                (observation.dbfs !== "silence" && typeof observation.dbfs !== "number") || Number(observation.sequence) <= lastSequence) continue;
-            lastSequence = Number(observation.sequence);
-            options.onLevel(observation as never);
-          }
-        } catch {} finally { levelInFlight = false; }
-      }, LEVEL_INTERVAL_MS);
-      levelTimer.unref?.();
+      const levelController = new AbortController();
+      void streamLevels(config, credential, owned, levelController.signal, options.onLevel);
 
       const partial = `${options.destination}.partial-${randomUUID()}`;
       const ensureNotCancelled = () => {
@@ -454,7 +550,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
         if (stopPromise) return stopPromise;
         if (Date.now() >= piDurationDeadline) durationReached = true;
         state = "stopping";
-        clearInterval(levelTimer);
+        levelController.abort();
         stopPromise = (async () => {
           let resultCompletion: "stopped" | "duration-limit" = "stopped";
           try {
@@ -619,7 +715,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const cancelRemotely = async (): Promise<void> => {
         cancellationRequested = true;
         state = "cancelling";
-        clearInterval(levelTimer);
+        levelController.abort();
         clearTimeout(durationTimer);
         stopController.abort();
         const controller = new AbortController();
@@ -651,6 +747,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       };
 
       const recording: Recording = {
+        startedAt: recordingStartedAt,
         stop() {
           if (state === "stopped") return Promise.resolve();
           if (state === "cancelled" || state === "cancelling") return Promise.reject(new RecorderError("cancelled"));

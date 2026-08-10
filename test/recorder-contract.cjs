@@ -3,6 +3,18 @@ const { existsSync, readFileSync } = require("node:fs");
 const { test } = require("node:test");
 
 function runRecorderContract(name, createHarness) {
+  test(`${name} Recorder contract: exposes the recording timeline origin`, async () => {
+    const harness = await createHarness();
+    const beforeStart = Date.now();
+    try {
+      const recording = await harness.recorder.start(harness.startOptions);
+      await recording.cancel();
+      assert.equal(Number.isFinite(recording.startedAt) && recording.startedAt >= beforeStart && recording.startedAt <= Date.now(), true);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   test(`${name} Recorder contract: stop commits the destination`, async () => {
     const harness = await createHarness();
     try {
