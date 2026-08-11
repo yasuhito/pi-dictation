@@ -224,7 +224,10 @@ test("production companion launches its instance-bound watchdog on the capture d
 });
 
 test("native companion enforces authenticated owner liveness independently", macOnly, async (t) => {
-  const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "300" });
+  const instance = await nativeHarness(undefined, {
+    PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "300",
+    PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS: "120",
+  });
   try {
     const owner = instance.owners[0].credential;
     const abandoned = capability();
@@ -235,12 +238,29 @@ test("native companion enforces authenticated owner liveness independently", mac
 
     const live = capability();
     await request(instance.socket, owner, "start", { ...live, maxDurationMs: 10000 });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 130));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 240));
     await request(instance.socket, owner, "status", live);
     const proofAt = Date.now();
-    await new Promise((resolveWait) => setTimeout(resolveWait, 340));
-    const refreshed = await request(instance.socket, owner, "status", live);
-    const elapsedFromProof = Date.now() - proofAt;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 90));
+    const afterOriginalDeadline = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
+    let terminalObservedAt;
+    const terminalDeadline = Date.now() + 1000;
+    while (Date.now() < terminalDeadline) {
+      const observation = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
+      if (observation.status === "invalid-state") {
+        terminalObservedAt = Date.now();
+        break;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    let refreshed;
+    const resultDeadline = Date.now() + 1000;
+    while (Date.now() < resultDeadline) {
+      refreshed = await request(instance.socket, owner, "status", live);
+      if (refreshed.payload.state === "result-ready") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    const elapsedFromProof = terminalObservedAt === undefined ? Number.POSITIVE_INFINITY : terminalObservedAt - proofAt;
 
     await t.test("ends capture after the owner-proof deadline", () => {
       assert.equal(lost.payload.state, "result-ready");
@@ -252,10 +272,13 @@ test("native companion enforces authenticated owner liveness independently", mac
       assert.equal(existsSync(retainedPath), true);
     });
     await t.test("reschedules exact expiry from the most recent owner proof", () => {
-      assert.equal(refreshed.payload.completion, "owner-liveness-loss");
+      assert.equal(afterOriginalDeadline.status, "ok");
+    });
+    await t.test("records owner-liveness loss after the refreshed proof expires", () => {
+      assert.equal(refreshed?.payload.completion, "owner-liveness-loss");
     });
     await t.test("does not overshoot the refreshed owner-liveness bound by a polling interval", () => {
-      assert.equal(elapsedFromProof < 390, true);
+      assert.equal(elapsedFromProof >= 280 && elapsedFromProof < 390, true);
     });
   } finally { await instance.cleanup(); }
 });

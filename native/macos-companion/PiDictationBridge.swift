@@ -904,6 +904,7 @@ func commitFailedRecordingState(
 private final class RecordingManager {
     private let runtime: String
     private let lock = NSCondition()
+    private let ownerLivenessQueue = DispatchQueue(label: "com.yasuhito.pi-dictation.bridge.owner-liveness", qos: .userInitiated)
     private var recordings: [String: BridgeRecording] = [:]
     private var activeId: String?
     private var requests: [String: PersistedRequestReceipt] = [:]
@@ -1327,7 +1328,7 @@ private final class RecordingManager {
         current.levelTimer = levels
         levels.resume()
         current.lastOwnerProofUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        let liveness = DispatchSource.makeTimerSource(queue: .global())
+        let liveness = DispatchSource.makeTimerSource(queue: ownerLivenessQueue)
         liveness.setEventHandler { [weak self, weak current] in
             guard let self, let current else { return }
             self.enforceOwnerLiveness(current)
@@ -1598,6 +1599,12 @@ private final class RecordingManager {
     }
 
     private func completeFinalization(_ current: BridgeRecording) {
+#if PROTOCOL_TESTING
+        if let delayText = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS"],
+           let delay = UInt32(delayText), delay > 0 {
+            usleep(delay * 1_000)
+        }
+#endif
         current.levelReaderLock.lock()
         lock.lock()
         let startingSequence = current.sequence
