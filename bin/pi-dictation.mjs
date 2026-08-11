@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -24,9 +25,16 @@ import { fileURLToPath } from "node:url";
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeHostError,
+  configuredAliases,
+  diagnoseHosts,
+  hasPendingRotation,
+  hostLogs,
   hostStatus,
+  inspectHostEffects,
   installHost,
   listHosts,
+  precheckUpgrade,
+  repairHost,
   remoteCredentialCommit,
   remoteCredentialRevoke,
   remoteHealth,
@@ -60,8 +68,12 @@ function paths() {
     runtime,
     socket: join(runtime, "companion.sock"),
     credential: join(root, "credential.json"),
+    nextCredential: join(root, "credential.next.json"),
+    previousCredential: join(root, "credential.previous.json"),
+    sharedRevocation: join(root, "credential.revocation.json"),
     receipt: join(root, "ownership.json"),
     preflight: join(root, "preflight.json"),
+    upgrade: join(root, "upgrade.json"),
     plist: join(home, "Library", "LaunchAgents", `${LABEL}.plist`),
   };
 }
@@ -321,12 +333,20 @@ function existingInstallId(p) {
 
 function proveApp(path, installId) {
   inspectPath(path, "directory", 0o700, "installed companion app");
+  if (readdirSync(path).join("\0") !== "Contents") throw new CliError("Refusing a companion app with unexpected entries.");
   const contents = join(path, "Contents");
   const resources = join(contents, "Resources");
   const macos = join(contents, "MacOS");
   inspectPath(contents, "directory", 0o700, "companion Contents directory");
+  if (readdirSync(contents).sort().join("\0") !== ["Info.plist", "MacOS", "Resources", "_CodeSignature"].sort().join("\0")) throw new CliError("Refusing companion Contents with unexpected entries.");
+  const signature = join(contents, "_CodeSignature");
+  inspectPath(signature, "directory", 0o700, "companion code signature directory");
+  if (readdirSync(signature).join("\0") !== "CodeResources") throw new CliError("Refusing companion code signature with unexpected entries.");
+  inspectPath(join(signature, "CodeResources"), "file", 0o644, "companion code signature resources");
   inspectPath(resources, "directory", 0o700, "companion Resources directory");
+  if (readdirSync(resources).join("\0") !== "ownership.json") throw new CliError("Refusing companion Resources with unexpected entries.");
   inspectPath(macos, "directory", 0o700, "companion executable directory");
+  if (readdirSync(macos).sort().join("\0") !== [APP_NAME, "PiDictationDurationWatchdog"].sort().join("\0")) throw new CliError("Refusing companion executables with unexpected entries.");
   inspectPath(join(contents, "Info.plist"), "file", 0o600, "companion metadata");
   inspectPath(join(macos, APP_NAME), "file", 0o700, "companion executable");
   inspectPath(join(macos, "PiDictationDurationWatchdog"), "file", 0o700, "duration watchdog executable");
@@ -395,6 +415,8 @@ function install() {
     chmodSync(join(stagedApp, "Contents"), 0o700);
     chmodSync(join(stagedApp, "Contents", "MacOS"), 0o700);
     chmodSync(join(stagedApp, "Contents", "Resources"), 0o700);
+    chmodSync(join(stagedApp, "Contents", "_CodeSignature"), 0o700);
+    chmodSync(join(stagedApp, "Contents", "_CodeSignature", "CodeResources"), 0o644);
     chmodSync(join(stagedApp, "Contents", "Info.plist"), 0o600);
     chmodSync(join(stagedApp, "Contents", "MacOS", APP_NAME), 0o700);
     chmodSync(join(stagedApp, "Contents", "MacOS", "PiDictationDurationWatchdog"), 0o700);
@@ -734,6 +756,476 @@ async function authenticatedHealth() {
   console.log(`Default input: ${health.defaultInputAvailable ? "available" : "unavailable"}`);
 }
 
+function inspectSharedArtifacts() {
+  const p = paths();
+  if (!pathExists(p.root)) {
+    return {
+      paths: p,
+      report: {
+        installation: "not-installed", permission: "not-observed-read-only", realAudioPreflight: "not-run",
+        companionLaunchAgent: "not-configured", companionProcess: "not-running",
+        protocolCompatibility: "unverified", storageBounds: "unverified",
+        connectionBounds: "unverified", levelAvailability: "unverified",
+      },
+    };
+  }
+  inspectPath(p.root, "directory", 0o700, "bridge support directory");
+  const receipt = readJsonOwned(p.receipt, "bridge ownership receipt");
+  if (receipt.product !== LABEL || typeof receipt.installId !== "string" || !/^[0-9a-f-]{36}$/i.test(receipt.installId)) {
+    throw new CliError("Refusing bridge artifacts whose ownership cannot be proven.");
+  }
+  let installation = "incomplete";
+  if (pathExists(p.app)) { proveApp(p.app, receipt.installId); installation = "installed"; }
+  if (pathExists(p.credential)) validateCredential(p.credential);
+  let companionLaunchAgent = "not-configured";
+  let launchAgentLoaded = false;
+  if (pathExists(p.plist)) {
+    inspectPath(p.plist, "file", 0o600, "bridge LaunchAgent");
+    if (!readFileSync(p.plist, "utf8").includes(`pi-dictation-install-id:${receipt.installId}`)) {
+      throw new CliError("Refusing a LaunchAgent whose ownership cannot be proven.");
+    }
+    const observation = sharedLaunchAgentObservation();
+    launchAgentLoaded = observation === "loaded";
+    companionLaunchAgent = observation === "unavailable" ? "process-state-unavailable" : launchAgentLoaded ? "loaded" : "configured-not-loaded";
+  }
+  const socketPresent = pathExists(p.socket);
+  if (socketPresent) inspectSocket(p.socket);
+  const companionProcess = launchAgentLoaded
+    ? (socketPresent ? "supervised-socket-present" : "supervised-socket-absent")
+    : (socketPresent ? "socket-present-process-unverified" : "not-running");
+  let preflightState = "not-run";
+  if (pathExists(p.preflight)) {
+    const ready = readJsonOwned(p.preflight, "preflight receipt");
+    if (ready.product !== LABEL || ready.installId !== receipt.installId) throw new CliError("Refusing an unowned preflight receipt.");
+    preflightState = installation === "installed" && ready.executableSha256 === executableDigest(p)
+      ? "passed-current-build" : "stale";
+  }
+  return {
+    paths: p,
+    receipt,
+    report: {
+      installation, permission: "not-observed-read-only", realAudioPreflight: preflightState,
+      companionLaunchAgent, companionProcess, protocolCompatibility: "unverified", storageBounds: "unverified",
+      connectionBounds: "unverified", levelAvailability: "unverified",
+    },
+  };
+}
+
+async function bridgeDoctor(args) {
+  const json = args.includes("--json");
+  const positional = args.filter((argument) => argument !== "--json");
+  if (positional.length > 1 || args.some((argument) => argument.startsWith("--") && argument !== "--json")) {
+    throw new CliError("Usage: pi-dictation bridge doctor [ssh-alias] [--json]");
+  }
+  const inspected = inspectSharedArtifacts();
+  const hosts = inspected.report.installation === "not-installed" ? [] : diagnoseHosts(positional[0]);
+  const configured = hosts.some((host) => host.stages.protocolCompatibility.startsWith("configured-exact-v"));
+  const report = {
+    schemaVersion: 1,
+    shared: {
+      ...inspected.report,
+      protocolCompatibility: configured ? `configured-exact-v${BRIDGE_PROTOCOL_VERSION}` : "unverified",
+      storageBounds: configured ? "configured-bounded" : "unverified",
+      connectionBounds: configured ? "configured-bounded" : "unverified",
+      levelAvailability: configured ? "supported-not-observed" : "unverified",
+    },
+    hosts,
+  };
+  const encoded = JSON.stringify(report);
+  if (Buffer.byteLength(encoded) > 512 * 1024) throw new CliError("Bridge doctor output exceeds its safe limit.");
+  if (json) return console.log(encoded);
+  console.log("Pi Dictation Bridge doctor (read-only)");
+  for (const [stage, status] of Object.entries(report.shared)) console.log(`Shared ${stage}: ${status}`);
+  for (const host of report.hosts) {
+    console.log(`SSH alias: ${host.sshAlias}`);
+    for (const [stage, status] of Object.entries(host.stages)) console.log(`  ${stage}: ${status}`);
+  }
+  console.log("Logs are omitted. Request them separately with `pi-dictation bridge logs SSH_ALIAS`.");
+}
+
+function validateEffects(value) {
+  const keys = ["connections", "activeRecordingLease", "incompleteAudio", "retainedWav"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== keys.sort().join() ||
+      keys.some((key) => !Number.isInteger(value[key]) || value[key] < 0 || value[key] > 100000)) {
+    throw new CliError("The companion returned invalid credential effects.");
+  }
+  return value;
+}
+
+function administrationRequestId(credentialId, operation) {
+  const hex = createHash("sha256").update(`${LABEL}\0${credentialId}\0${operation}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+async function primaryEffects(p) {
+  const credential = validateCredential(p.credential);
+  return validateEffects(await companionRequestAt({ type: "unix", path: p.socket }, credential, "credential-effects"));
+}
+
+function validCredentialValue(value) {
+  return value && typeof value.id === "string" && /^[0-9a-f-]{36}$/i.test(value.id) &&
+    typeof value.secret === "string" && /^[A-Za-z0-9+/]{43}=$/.test(value.secret) && Buffer.from(value.secret, "base64").length === 32;
+}
+
+function validatePrimaryUpgrade(primary) {
+  if (primary === undefined) return;
+  if (!primary || typeof primary !== "object" || !["preparing", "staged", "revoked", "promoted"].includes(primary.phase) ||
+      typeof primary.oldCredentialId !== "string" || typeof primary.nextCredentialId !== "string" || primary.oldCredentialId === primary.nextCredentialId ||
+      !/^[0-9a-f-]{36}$/i.test(primary.requestId) || !["credential-revoke", "credential-revoke-if-idle"].includes(primary.operation) ||
+      (primary.phase === "preparing" && !validCredentialValue(primary.replacement)) ||
+      (primary.phase !== "preparing" && primary.replacement !== undefined)) {
+    throw new CliError("Refusing invalid shared credential upgrade state.");
+  }
+}
+
+function readUpgradeState(p) {
+  if (!pathExists(p.upgrade)) return undefined;
+  const value = readJsonOwned(p.upgrade, "bridge upgrade state");
+  const aliasesValid = (aliases) => Array.isArray(aliases) && aliases.length <= 1000 &&
+    aliases.every((alias) => typeof alias === "string" && /^[A-Za-z0-9_.@-]{1,255}$/.test(alias));
+  validatePrimaryUpgrade(value.primary);
+  if (value.product !== LABEL || !["gating", "quiescing", "installing", "awaiting-preflight"].includes(value.phase) || !aliasesValid(value.hosts) ||
+      (["gating", "quiescing"].includes(value.phase) && (!aliasesValid(value.completed) || value.completed.some((alias) => !value.hosts.includes(alias)) || typeof value.cancelActive !== "boolean"))) {
+    throw new CliError("Refusing invalid bridge upgrade state.");
+  }
+  return value;
+}
+
+async function gatePrimaryUpgrade(p, state) {
+  let current = state;
+  let primary = current.primary;
+  if (!primary) {
+    const oldCredential = validateCredential(p.credential);
+    const replacement = { id: randomUUID(), secret: randomBytes(32).toString("base64") };
+    primary = {
+      phase: "preparing", oldCredentialId: oldCredential.id, nextCredentialId: replacement.id,
+      replacement, operation: current.cancelActive ? "credential-revoke" : "credential-revoke-if-idle",
+      requestId: administrationRequestId(oldCredential.id, current.cancelActive ? "credential-revoke" : "credential-revoke-if-idle"),
+    };
+    current = { ...current, primary };
+    atomicWrite(p.upgrade, `${JSON.stringify(current)}\n`);
+  }
+  if (primary.phase === "preparing") {
+    if (pathExists(p.nextCredential)) throw new CliError("Refusing an unexpected staged shared credential.");
+    atomicWrite(p.nextCredential, `${JSON.stringify(primary.replacement)}\n`);
+    primary = { ...primary, phase: "staged", replacement: undefined };
+    current = { ...current, primary };
+    atomicWrite(p.upgrade, `${JSON.stringify(current)}\n`);
+  }
+  if (primary.phase === "staged") {
+    const oldCredential = validateCredential(p.credential);
+    const nextCredential = validateCredential(p.nextCredential);
+    if (oldCredential.id !== primary.oldCredentialId || nextCredential.id !== primary.nextCredentialId) {
+      throw new CliError("Refusing inconsistent staged shared credentials.");
+    }
+    try {
+      validateEffects(await companionRequestAt({ type: "unix", path: p.socket }, oldCredential, primary.operation, primary.requestId));
+    } catch (error) {
+      if (error?.status === "invalid-state" && primary.operation === "credential-revoke-if-idle") {
+        rmSync(p.nextCredential, { force: true });
+        rmSync(p.upgrade);
+        throw new CliError("Shared companion recording or retained audio atomically blocked upgrade; no upgrade effect was applied. Rerun with --confirm --cancel-active.");
+      }
+      throw error;
+    }
+    primary = { ...primary, phase: "revoked" };
+    current = { ...current, primary };
+    atomicWrite(p.upgrade, `${JSON.stringify(current)}\n`);
+  }
+  if (primary.phase === "revoked") {
+    if (pathExists(p.credential) && !pathExists(p.previousCredential)) renameSync(p.credential, p.previousCredential);
+    if (!pathExists(p.credential) && pathExists(p.nextCredential)) renameSync(p.nextCredential, p.credential);
+    const currentCredential = validateCredential(p.credential);
+    const oldCredential = validateCredential(p.previousCredential);
+    if (currentCredential.id !== primary.nextCredentialId || oldCredential.id !== primary.oldCredentialId || pathExists(p.nextCredential)) {
+      throw new CliError("Refusing inconsistent promoted shared credentials.");
+    }
+    primary = { ...primary, phase: "promoted" };
+    current = { ...current, primary };
+    atomicWrite(p.upgrade, `${JSON.stringify(current)}\n`);
+  }
+  return current;
+}
+
+function sharedLaunchAgentObservation() {
+  const result = spawnSync("launchctl", ["print", `gui/${uid()}/${LABEL}`], { encoding: "utf8", timeout: 5000 });
+  if (result.error) return "unavailable";
+  return result.status === 0 ? "loaded" : "not-loaded";
+}
+
+function proveExactSharedLaunchAgent(inspected) {
+  const { paths: p, receipt } = inspected;
+  inspectPath(p.plist, "file", 0o600, "bridge LaunchAgent");
+  const enabled = pathExists(p.preflight);
+  if (readFileSync(p.plist, "utf8") !== launchAgentPlist(p, receipt.installId, enabled)) {
+    throw new CliError("Refusing a shared LaunchAgent that is not the exact owned configuration.");
+  }
+}
+
+function stopSharedCompanion(inspected) {
+  proveExactSharedLaunchAgent(inspected);
+  const observation = sharedLaunchAgentObservation();
+  if (observation === "unavailable") throw new CliError("The shared companion process state could not be observed safely; no files were deleted.");
+  if (observation === "loaded") {
+    const stopped = spawnSync("launchctl", ["bootout", `gui/${uid()}/${LABEL}`], { encoding: "utf8", timeout: 10000 });
+    if (stopped.error || stopped.status !== 0) throw new CliError("The shared companion LaunchAgent could not be stopped; no files were deleted.");
+  }
+  const deadline = Date.now() + 5000;
+  while (pathExists(inspected.paths.socket) && Date.now() < deadline) {
+    inspectSocket(inspected.paths.socket);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  if (pathExists(inspected.paths.socket)) {
+    inspectSocket(inspected.paths.socket);
+    throw new CliError("The companion socket remains while its process may still be live; no files were deleted.");
+  }
+}
+
+async function continueQuiescedUpgrade(inspected, initialState) {
+  let current = initialState;
+  if (current.phase === "gating") {
+    current = await gatePrimaryUpgrade(inspected.paths, current);
+    for (const alias of current.hosts) {
+      if (current.completed.includes(alias)) continue;
+      await rotateHost(alias, companionRequestAt, current.cancelActive, true, undefined, true);
+      current = { ...current, completed: [...current.completed, alias] };
+      atomicWrite(inspected.paths.upgrade, `${JSON.stringify(current)}\n`);
+    }
+    current = { ...current, phase: "quiescing", completed: [] };
+    atomicWrite(inspected.paths.upgrade, `${JSON.stringify(current)}\n`);
+  }
+  for (const alias of current.hosts) {
+    const completed = current.completed.includes(alias);
+    if (completed && !hasPendingRotation(alias)) continue;
+    await rotateHost(alias, companionRequestAt, current.cancelActive, true, async () => {
+      if (!current.completed.includes(alias)) {
+        current = { ...current, completed: [...current.completed, alias] };
+        atomicWrite(inspected.paths.upgrade, `${JSON.stringify(current)}\n`);
+      }
+    });
+  }
+  stopSharedCompanion(inspected);
+  if (pathExists(inspected.paths.previousCredential)) {
+    validateCredential(inspected.paths.previousCredential);
+    rmSync(inspected.paths.previousCredential);
+  }
+  current = { product: LABEL, phase: "installing", hosts: current.hosts, primary: current.primary };
+  atomicWrite(inspected.paths.upgrade, `${JSON.stringify(current)}\n`);
+  install();
+  atomicWrite(inspected.paths.upgrade, `${JSON.stringify({ ...current, phase: "awaiting-preflight" })}\n`);
+  console.log("Upgrade installed. Real-audio preflight is required before all-host health reconciliation.");
+  console.log("Run `pi-dictation bridge preflight`, then `pi-dictation bridge upgrade --confirm`.");
+}
+
+async function bridgeUpgrade(args) {
+  const confirmed = args.includes("--confirm");
+  const cancelActive = args.includes("--cancel-active");
+  if (args.some((argument) => !["--confirm", "--cancel-active"].includes(argument))) {
+    throw new CliError("Usage: pi-dictation bridge upgrade [--confirm] [--cancel-active]");
+  }
+  const inspected = inspectSharedArtifacts();
+  const pending = readUpgradeState(inspected.paths);
+  if (inspected.report.installation !== "installed" && pending?.phase !== "installing") {
+    throw new CliError("A complete owned Bridge installation is required before upgrade.");
+  }
+  if (pending) {
+    if (!confirmed) throw new CliError(["gating", "quiescing"].includes(pending.phase)
+      ? "Upgrade host gating or quiescence is pending; rerun upgrade --confirm to reconcile it."
+      : pending.phase === "installing"
+        ? "Upgrade installation is pending; rerun upgrade --confirm to reconcile it."
+        : "Upgrade is awaiting real-audio preflight; run `pi-dictation bridge preflight`, then rerun upgrade --confirm.");
+    if (["gating", "quiescing"].includes(pending.phase)) {
+      await continueQuiescedUpgrade(inspected, pending);
+      return;
+    }
+    if (pending.phase === "installing") {
+      if (pathExists(inspected.paths.socket)) {
+        inspectSocket(inspected.paths.socket);
+        throw new CliError("The companion process is still stopping; rerun upgrade --confirm.");
+      }
+      install();
+      atomicWrite(inspected.paths.upgrade, `${JSON.stringify({ ...pending, phase: "awaiting-preflight" })}\n`);
+      console.log("Upgrade installed. Run `pi-dictation bridge preflight`, then `pi-dictation bridge upgrade --confirm`.");
+      return;
+    }
+    const { p, receipt } = verifyInstallation();
+    const ready = readJsonOwned(p.preflight, "preflight receipt");
+    if (ready.product !== LABEL || ready.installId !== receipt.installId || ready.executableSha256 !== executableDigest(p)) {
+      throw new CliError("The upgraded companion requires real-audio preflight before host reconciliation.");
+    }
+    for (const alias of pending.hosts) repairHost(alias, true, true);
+    const diagnosis = diagnoseHosts();
+    if (diagnosis.some((host) => host.stages.authenticatedHealth !== "last-observed-ready" || !host.stages.protocolCompatibility.startsWith("configured-exact-v"))) {
+      throw new CliError("All-host authenticated health has not reconciled; rerun upgrade --confirm.");
+    }
+    rmSync(p.upgrade);
+    console.log("Bridge upgrade reconciled after real-audio preflight and all-host health checks.");
+    return;
+  }
+  const checked = await precheckUpgrade(companionRequestAt);
+  const sharedEffects = await primaryEffects(inspected.paths);
+  console.log(`Upgrade candidate: package ${packageVersion()}, protocol ${BRIDGE_PROTOCOL_VERSION}`);
+  console.log(`Shared companion clients: active=${sharedEffects.activeRecordingLease}, incomplete=${sharedEffects.incompleteAudio}, retained=${sharedEffects.retainedWav}`);
+  for (const host of checked) {
+    console.log(`SSH alias ${host.sshAlias}: compatible; active=${host.effects.activeRecordingLease}, incomplete=${host.effects.incompleteAudio}, retained=${host.effects.retainedWav}`);
+  }
+  const affected = checked.filter(({ effects }) => effects.activeRecordingLease || effects.incompleteAudio || effects.retainedWav);
+  const activeNames = [
+    ...(sharedEffects.activeRecordingLease ? ["shared companion clients"] : []),
+    ...affected.filter(({ effects }) => effects.activeRecordingLease).map(({ sshAlias }) => sshAlias),
+  ];
+  if (activeNames.length && !cancelActive) {
+    throw new CliError(`Active recording blocks upgrade for: ${activeNames.join(", ")}. Rerun with --confirm --cancel-active to cancel it explicitly.`);
+  }
+  const sharedOwnedAudio = sharedEffects.activeRecordingLease || sharedEffects.incompleteAudio || sharedEffects.retainedWav;
+  if (!confirmed) {
+    console.log(`Preview only. Rerun with: pi-dictation bridge upgrade --confirm${affected.length || sharedOwnedAudio ? " --cancel-active" : ""}`);
+    return;
+  }
+  if ((affected.length || sharedOwnedAudio) && !cancelActive) throw new CliError("Owned retained or incomplete audio blocks upgrade without --cancel-active.");
+  const state = { product: LABEL, phase: "gating", hosts: checked.map(({ sshAlias }) => sshAlias), completed: [], cancelActive };
+  atomicWrite(inspected.paths.upgrade, `${JSON.stringify(state)}\n`);
+  await continueQuiescedUpgrade(inspected, state);
+}
+
+function readSharedRevocation(p) {
+  if (!pathExists(p.sharedRevocation)) return undefined;
+  const value = readJsonOwned(p.sharedRevocation, "shared credential revocation state");
+  if (value.product !== LABEL || !["confirmed", "revoked"].includes(value.phase) ||
+      typeof value.credentialId !== "string" || !["credential-revoke", "credential-revoke-if-idle"].includes(value.operation) ||
+      !/^[0-9a-f-]{36}$/i.test(value.requestId)) {
+    throw new CliError("Refusing invalid shared credential revocation state.");
+  }
+  validateEffects(value.effects);
+  return value;
+}
+
+async function revokeSharedCredential(p, cancelActive, effects) {
+  let state = readSharedRevocation(p);
+  const operation = cancelActive ? "credential-revoke" : "credential-revoke-if-idle";
+  if (!state) {
+    const credential = validateCredential(p.credential);
+    state = {
+      product: LABEL, phase: "confirmed", credentialId: credential.id, operation,
+      requestId: administrationRequestId(credential.id, operation), effects,
+    };
+    atomicWrite(p.sharedRevocation, `${JSON.stringify(state)}\n`);
+  } else if (state.phase === "confirmed" && state.operation !== operation) {
+    throw new CliError("Confirmed shared cleanup has different cancellation semantics; finish it with the original options.");
+  }
+  if (state.phase === "confirmed") {
+    const credential = validateCredential(p.credential);
+    if (credential.id !== state.credentialId) throw new CliError("Shared credential changed during confirmed uninstall.");
+    try {
+      validateEffects(await companionRequestAt({ type: "unix", path: p.socket }, credential, state.operation, state.requestId));
+    } catch (error) {
+      if (error?.status === "invalid-state" && state.operation === "credential-revoke-if-idle") {
+        rmSync(p.sharedRevocation);
+        throw new CliError("Shared companion recording or retained audio atomically blocked uninstall. Rerun with --confirm --cancel-active.");
+      }
+      throw new CliError(`${error instanceof Error ? error.message : "Shared credential revocation failed"} Confirmed shared cleanup was preserved for retry.`);
+    }
+    state = { ...state, phase: "revoked" };
+    atomicWrite(p.sharedRevocation, `${JSON.stringify(state)}\n`);
+  }
+  return state;
+}
+
+function validateRuntimeForRemoval(p) {
+  if (!pathExists(p.runtime)) return;
+  inspectPath(p.runtime, "directory", 0o700, "bridge runtime directory");
+  for (const name of readdirSync(p.runtime)) {
+    const path = join(p.runtime, name);
+    if (name === "companion.sock") { inspectSocket(path); continue; }
+    if (!/^(?:companion\.log|request-receipts\.json|resource-metrics\.json|recording-[0-9a-f-]+\.(?:wav|reserve|json)|revocation-[0-9a-f-]+\.json)$/.test(name)) {
+      throw new CliError("Refusing an unprovable artifact in bridge runtime directory.");
+    }
+    inspectPath(path, "file", 0o600, "owned bridge runtime artifact");
+  }
+}
+
+function validateSharedRemovalCandidate() {
+  const inspected = inspectSharedArtifacts();
+  const { paths: p } = inspected;
+  if (inspected.report.installation === "not-installed") return inspected;
+  const allowed = new Set([`${APP_NAME}.app`, "credential.json", "credential.next.json", "credential.previous.json", "credential.revocation.json", "ownership.json", "preflight.json", "upgrade.json", "hosts"]);
+  if (readdirSync(p.root).some((name) => !allowed.has(name))) throw new CliError("Refusing unprovable artifacts in bridge support directory.");
+  if (pathExists(p.credential)) validateCredential(p.credential);
+  if (pathExists(p.nextCredential)) validateCredential(p.nextCredential);
+  if (pathExists(p.previousCredential)) validateCredential(p.previousCredential);
+  if (pathExists(p.sharedRevocation)) readSharedRevocation(p);
+  if (pathExists(p.upgrade)) readUpgradeState(p);
+  validateRuntimeForRemoval(p);
+  return inspected;
+}
+
+function removeSharedCompanion() {
+  const inspected = validateSharedRemovalCandidate();
+  const { paths: p } = inspected;
+  if (inspected.report.installation === "not-installed") return;
+  const hostsRoot = join(p.root, "hosts");
+  if (pathExists(hostsRoot)) {
+    inspectPath(hostsRoot, "directory", 0o700, "bridge hosts directory");
+    if (readdirSync(hostsRoot).length !== 0) throw new CliError("Refusing to remove the shared companion while host bridges remain.");
+  }
+  stopSharedCompanion(inspected);
+  validateRuntimeForRemoval(p);
+  if (pathExists(p.plist)) { inspectPath(p.plist, "file", 0o600, "bridge LaunchAgent"); rmSync(p.plist); }
+  validateSharedRemovalCandidate();
+  rmSync(p.root, { recursive: true });
+  if (pathExists(p.runtime)) { validateRuntimeForRemoval(p); rmSync(p.runtime, { recursive: true }); }
+  console.log("Shared companion and owned LaunchAgent removed.");
+  console.log("macOS microphone permission history may remain in Privacy & Security and is not changed by uninstall.");
+}
+
+async function bridgeUninstall(args) {
+  const confirmed = args.includes("--confirm");
+  const cancelActive = args.includes("--cancel-active");
+  const positional = args.filter((argument) => !argument.startsWith("--"));
+  const all = args.includes("--all");
+  if ((all && positional.length) || (!all && positional.length !== 1) ||
+      args.some((argument) => argument.startsWith("--") && !["--all", "--confirm", "--cancel-active"].includes(argument))) {
+    throw new CliError("Usage: pi-dictation bridge uninstall <ssh-alias>|--all [--confirm] [--cancel-active]");
+  }
+  const registered = configuredAliases();
+  const aliases = all ? registered : positional;
+  if (aliases.length === 0 && !all) throw new CliError("No bridge selected for uninstall.");
+  const removesShared = aliases.length === registered.length;
+  if (removesShared) validateSharedRemovalCandidate();
+  const sharedState = removesShared ? readSharedRevocation(paths()) : undefined;
+  const sharedEffects = removesShared ? (sharedState?.effects || await primaryEffects(paths())) : undefined;
+  const previews = [];
+  for (const alias of aliases) previews.push({ alias, effects: await inspectHostEffects(alias, companionRequestAt) });
+  for (const { alias, effects } of previews) {
+    console.log(`SSH alias ${alias}: credentials=1, active=${effects.activeRecordingLease}, incomplete=${effects.incompleteAudio}, retained=${effects.retainedWav}`);
+  }
+  if (removesShared) {
+    console.log(`Shared credential: credentials=1, active=${sharedEffects.activeRecordingLease}, incomplete=${sharedEffects.incompleteAudio}, retained=${sharedEffects.retainedWav}`);
+    console.log("Shared companion and owned LaunchAgent: remove only after every credential and retained WAV deletion is confirmed.");
+    console.log("macOS microphone permission history may remain in Privacy & Security.");
+  } else {
+    console.log("Other host bridges and the shared companion: preserve.");
+  }
+  const active = previews.filter(({ effects }) => effects.activeRecordingLease > 0);
+  const activeNames = [...active.map(({ alias }) => alias), ...(sharedEffects?.activeRecordingLease ? ["shared companion clients"] : [])];
+  if (activeNames.length && !cancelActive && !confirmed) {
+    throw new CliError(`Active recording blocks uninstall for: ${activeNames.join(", ")}. Rerun with --confirm --cancel-active.`);
+  }
+  if (!confirmed) {
+    console.log(`Preview only. Rerun with: pi-dictation bridge uninstall ${all ? "--all" : aliases[0]} --confirm${activeNames.length ? " --cancel-active" : ""}`);
+    return;
+  }
+  if (removesShared) {
+    try { await revokeSharedCredential(paths(), cancelActive, sharedEffects); }
+    catch (error) {
+      throw new CliError(`${error instanceof Error ? error.message : "Shared credential cleanup failed"} Affected bridges: ${aliases.join(", ") || "shared companion clients"}.`);
+    }
+  }
+  for (const alias of aliases) await revokeHost(alias, true, companionRequestAt, { uninstall: true, cancelActive });
+  if (configuredAliases().length === 0) removeSharedCompanion();
+  else console.log("Other host bridges and the shared companion were preserved.");
+}
+
 function build(args) {
   const index = args.indexOf("--output");
   if (index === -1 || !args[index + 1] || args.length !== 2) {
@@ -745,7 +1237,7 @@ function build(args) {
 }
 
 function usage() {
-  console.log("Usage: pi-dictation bridge <build|install [ssh-alias]|preflight|health|status ssh-alias|list [--json]|rotate ssh-alias|revoke ssh-alias [--confirm]>");
+  console.log("Usage: pi-dictation bridge <build|install [ssh-alias]|preflight|health|doctor [ssh-alias] [--json]|logs ssh-alias [--json]|status ssh-alias|list [--json]|repair ssh-alias [--confirm]|upgrade [--confirm] [--cancel-active]|rotate ssh-alias|revoke ssh-alias [--confirm] [--cancel-active]|uninstall <ssh-alias>|--all [--confirm] [--cancel-active]>");
 }
 
 async function main() {
@@ -757,10 +1249,17 @@ async function main() {
   if (command === "build") return build(args);
   if (command === "install" && args.length === 0) return install();
   if (command === "install" && args.length >= 1) return installHost(args[0], args.slice(1));
+  if (command === "doctor") return bridgeDoctor(args);
+  if (command === "logs" && (args.length === 1 || args.length === 2 && args[1] === "--json")) return hostLogs(args[0], args[1] === "--json");
   if (command === "status" && args.length === 1) return hostStatus(args[0]);
   if (command === "list" && (args.length === 0 || args.length === 1 && args[0] === "--json")) return listHosts(args[0] === "--json");
+  if (command === "repair" && (args.length === 1 || args.length === 2 && args[1] === "--confirm")) return repairHost(args[0], args[1] === "--confirm");
+  if (command === "upgrade") return bridgeUpgrade(args);
   if (command === "rotate" && args.length === 1) return rotateHost(args[0], companionRequestAt);
-  if (command === "revoke" && (args.length === 1 || args.length === 2 && args[1] === "--confirm")) return revokeHost(args[0], args[1] === "--confirm", companionRequestAt);
+  if (command === "revoke" && args.length >= 1 && args.length <= 3 && args.slice(1).every((argument) => ["--confirm", "--cancel-active"].includes(argument)) && new Set(args.slice(1)).size === args.slice(1).length) {
+    return revokeHost(args[0], args.includes("--confirm"), companionRequestAt, { cancelActive: args.includes("--cancel-active") });
+  }
+  if (command === "uninstall") return bridgeUninstall(args);
   if (command === "preflight" && args.length === 0) return preflight();
   if (command === "health" && args.length === 0) return authenticatedHealth();
   if (command === "remote-info" && args.length === 0) return remoteInfo();
@@ -768,7 +1267,7 @@ async function main() {
   if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
   if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
-  if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);
+  if (command === "remote-health" && (args.length === 1 || args.length === 2 && args[1] === "staged")) return remoteHealth(args[0], healthAt, args[1] === "staged");
   usage();
   throw new CliError("Unknown bridge command.");
 }

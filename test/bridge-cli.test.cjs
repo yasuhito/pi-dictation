@@ -9,6 +9,7 @@ const {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -79,7 +80,15 @@ if [ "$1" = '--sdk' ] && [ "$2" = 'macosx' ] && [ "$3" = '--show-sdk-path' ]; th
 exit 1
 `
   );
-  writeExecutable(join(tools, "codesign"), "#!/bin/sh\nexit 0\n");
+  writeExecutable(join(tools, "codesign"), `#!/bin/sh
+if [ "$1" = '--verify' ]; then exit 0; fi
+for argument in "$@"; do output="$argument"; done
+/bin/mkdir -p "$output/Contents/_CodeSignature"
+printf 'signed\n' > "$output/Contents/_CodeSignature/CodeResources"
+/bin/chmod 700 "$output/Contents/_CodeSignature"
+/bin/chmod 644 "$output/Contents/_CodeSignature/CodeResources"
+exit 0
+`);
   return tools;
 }
 
@@ -164,6 +173,19 @@ test("packaged real-device certification lists every required gate scenario with
       source.includes("packagedPiCommand(state.predecessor") &&
       source.includes("state.predecessorSha256 === state.tarballSha256"), true);
   });
+  await t.test("certifies the operational upgrade and uninstall commands", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('["bridge", "upgrade", "--confirm"]') &&
+      source.includes('["bridge", "uninstall", state.alias, "--confirm"]') &&
+      source.includes('phase: "awaiting-upgrade-preflight"') &&
+      source.includes("for (const host of registered) installCandidateOnRemote(host.sshAlias, state.tarball)"), true);
+  });
+  await t.test("uses predecessor-compatible diagnosis before candidate-only doctor", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('packagedPiCommand(state.predecessor, ["bridge", "status"') &&
+      source.includes('certificationCommand("pi-dictation", ["bridge", "doctor", state.alias]') &&
+      !source.includes('packagedPiCommand(state.predecessor, ["bridge", "doctor"'), true);
+  });
   await t.test("does not import a repository test fixture", () => {
     assert.equal(readFileSync(certificationPath, "utf8").includes("test/fixtures"), false);
   });
@@ -233,6 +255,9 @@ test("bridge build creates a fixed hidden native app bundle", async (t) => {
     });
     await t.test("contains the independent duration watchdog executable", () => {
       assert.equal(lstatSync(join(output, "Contents", "MacOS", "PiDictationDurationWatchdog")).isFile(), true);
+    });
+    await t.test("contains the exact private code signature tree", () => {
+      assert.deepEqual(readdirSync(join(output, "Contents", "_CodeSignature")), ["CodeResources"]);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

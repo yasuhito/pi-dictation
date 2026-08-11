@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
 const { createHash } = require("node:crypto");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -29,6 +29,7 @@ function fixture() {
   const sshLog = join(home, "ssh.log");
   executable(join(tools, "ssh"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$SSH_LOG"
+if [ -n "$SSH_UNREACHABLE_ALIAS" ]; then case "$*" in *"$SSH_UNREACHABLE_ALIAS"*) exit 255;; esac; fi
 case "$*" in
   *" -G "*) printf 'host %s\\nhostname pi.example.test\\nuser pi\\nport 22\\nstricthostkeychecking true\\nuserknownhostsfile ~/.ssh/known_hosts\\nproxyjump bastion\\nidentityfile ~/.ssh/id_ed25519\\n' "$*"; exit 0 ;;
   *" true") if [ "$SSH_AUTH_FAIL" = 1 ]; then echo denied >&2; exit 255; fi; exit 0 ;;
@@ -41,7 +42,14 @@ case "$*" in
 esac
 exit 2
 `);
-  executable(join(tools, "launchctl"), "#!/bin/sh\nexit 0\n");
+  executable(join(tools, "launchctl"), `#!/bin/sh
+if [ -n "$LAUNCHCTL_LOG" ]; then printf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"; fi
+if [ "$1" = print ] && [ -n "$LAUNCHCTL_NOT_RUNNING" ]; then case "$*" in *"$LAUNCHCTL_NOT_RUNNING"*) exit 1;; esac; fi
+if [ "$1" = bootout ] && [ -n "$LAUNCHCTL_FAIL_BOOTOUT" ]; then case "$*" in *"$LAUNCHCTL_FAIL_BOOTOUT"*) exit 1;; esac; fi
+if [ "$1" = bootout ] && [ "$LAUNCHCTL_FAIL_SHARED" = 1 ]; then case "$*" in *com.yasuhito.pi-dictation.bridge) exit 1;; esac; fi
+if [ "$1" = bootout ]; then case "$*" in *com.yasuhito.pi-dictation.bridge) /bin/rm -f "$HOME/Library/Caches/pi-dictation/bridge/companion.sock";; esac; fi
+exit 0
+`);
   return { home, tools, bridge, sshLog };
 }
 
@@ -58,25 +66,54 @@ function hostDirectories(bridge) {
   return existsSync(hosts) ? require("node:fs").readdirSync(hosts) : [];
 }
 
-async function startCredentialServer(f, busyFile, dropFile) {
+function completeCompanion(f) {
+  const installId = JSON.parse(readFileSync(join(f.bridge, "ownership.json"), "utf8")).installId;
+  const app = join(f.bridge, "PiDictationBridge.app");
+  for (const directory of [app, join(app, "Contents"), join(app, "Contents", "MacOS"), join(app, "Contents", "Resources"), join(app, "Contents", "_CodeSignature")]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+  }
+  writeFileSync(join(app, "Contents", "Info.plist"), "owned\n", { mode: 0o600 });
+  writeFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "signed\n", { mode: 0o644 });
+  executable(join(app, "Contents", "MacOS", "PiDictationBridge"), "#!/bin/sh\nexit 0\n");
+  executable(join(app, "Contents", "MacOS", "PiDictationDurationWatchdog"), "#!/bin/sh\nexit 0\n");
+  writeFileSync(join(app, "Contents", "Resources", "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId }), { mode: 0o600 });
+  writeFileSync(join(f.bridge, "credential.json"), JSON.stringify({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", secret: Buffer.alloc(32, 4).toString("base64") }), { mode: 0o600 });
+  const runtime = join(f.home, "Library", "Caches", "pi-dictation", "bridge");
+  mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  const plist = join(f.home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist");
+  const executablePath = join(app, "Contents", "MacOS", "PiDictationBridge");
+  writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- pi-dictation-install-id:${installId} -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.yasuhito.pi-dictation.bridge</string>
+  <key>ProgramArguments</key><array><string>${executablePath}</string></array>
+  <key>ProcessType</key><string>Background</string>
+</dict></plist>
+`, { mode: 0o600 });
+  return { app, runtime };
+}
+
+async function startCredentialServer(f, busyFile, dropFile, raceFile) {
   const script = join(f.home, "credential-server.cjs");
   const socket = join(f.home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
   mkdirSync(join(socket, ".."), { recursive: true, mode: 0o700 });
   writeFileSync(script, String.raw`
 const { createHmac, randomBytes } = require("node:crypto");
-const { appendFileSync, chmodSync, existsSync, readFileSync, readdirSync, rmSync } = require("node:fs");
+const { appendFileSync, chmodSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const net = require("node:net");
-const [bridge, socket, busyFile, dropFile] = process.argv.slice(2);
+const [bridge, socket, busyFile, dropFile, raceFile] = process.argv.slice(2);
 const outcomes = new Map();
 function encode(fields) { const pieces=[Buffer.from("pi-dictation-bridge-auth-v1\0")]; for (const field of fields) { const value=Buffer.isBuffer(field)?field:Buffer.from(String(field)); const length=Buffer.alloc(4); length.writeUInt32BE(value.length); pieces.push(length,value); } return Buffer.concat(pieces); }
 function tag(secret, fields) { return createHmac("sha256", Buffer.from(secret,"base64")).update(encode(fields)).digest(); }
 function frame(value) { const body=Buffer.from(JSON.stringify(value)); const header=Buffer.alloc(4); header.writeUInt32BE(body.length); return Buffer.concat([header,body]); }
-function credentials() { const result=new Map(); for (const id of readdirSync(join(bridge,"hosts"))) for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,"hosts",id,name))); result.set(value.id,value); } catch {} } return result; }
-const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const rejected=request.operation==="credential-revoke-if-idle"&&existsSync(busyFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:0,incompleteAudio:0,retainedWav:0}}; outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.operation+" "+request.requestId+"\n"); } if(request.operation==="credential-revoke"&&existsSync(dropFile)){rmSync(dropFile);return client.destroy();} const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
+function credentials() { const result=new Map(); for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,name))); result.set(value.id,value); } catch {} } for (const id of readdirSync(join(bridge,"hosts"))) for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,"hosts",id,name))); result.set(value.id,value); } catch {} } return result; }
+const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const rejected=request.operation==="credential-revoke-if-idle"&&existsSync(busyFile); const race=existsSync(raceFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:race?0:(existsSync(busyFile)?1:0),incompleteAudio:0,retainedWav:0}}; if(request.operation==="credential-effects"&&race)writeFileSync(busyFile,"raced\n"); outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.operation+" "+request.requestId+"\n"); } if(request.operation.startsWith("credential-revoke")&&existsSync(dropFile)){rmSync(dropFile);return client.destroy();} const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
 rmSync(socket,{force:true}); server.listen(socket,()=>{chmodSync(socket,0o600);if(process.send)process.send("ready");});
 `);
-  const child = spawn(process.execPath, [script, f.bridge, socket, busyFile, dropFile || `${busyFile}.never-drop`], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  const child = spawn(process.execPath, [script, f.bridge, socket, busyFile, dropFile || `${busyFile}.never-drop`, raceFile || `${busyFile}.never-race`], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
   await once(child, "message");
   return child;
 }
@@ -137,6 +174,26 @@ test("confirmed revocation retries a lost response from durable local intent", a
     await t.test("list reports the ambiguous revocation as pending", () => assert.equal(pendingLifecycle, "revocation-pending"));
     await t.test("rotation is refused while revocation is pending", () => assert.notEqual(rotationWhilePending.status, 0));
     await t.test("retry completes with the original request identity", () => assert.equal(retried.status, 0, retried.stderr));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("credential revoke supports its advertised active-recording confirmation", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "active-revoke");
+  let server;
+  try {
+    const installed = run(f, ["install", "revoke-active-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    writeFileSync(busy, "active\n");
+    server = await startCredentialServer(f, busy);
+    const blocked = run(f, ["revoke", "revoke-active-pi", "--confirm"]);
+    const cancelled = run(f, ["revoke", "revoke-active-pi", "--confirm", "--cancel-active"]);
+    await t.test("blocks without the advertised cancellation flag", () => assert.match(blocked.stderr, /--cancel-active/));
+    await t.test("accepts the advertised cancellation flag", () => assert.equal(cancelled.status, 0, cancelled.stderr));
   } finally {
     server?.kill("SIGTERM");
     if (server) await once(server, "exit").catch(() => {});
@@ -292,6 +349,443 @@ test("bridge status reports tunnel, listener, and authenticated health separatel
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("bridge doctor emits bounded privacy-safe JSON without changing managed state", async (t) => {
+  const f = fixture();
+  const requestBase = join(f.home, "doctor-requests");
+  let server;
+  try {
+    const installed = run(f, ["install", "doctor-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    server = await startCredentialServer(f, requestBase);
+    const snapshot = () => readdirSync(f.bridge, { recursive: true }).sort().map((name) => {
+      const path = join(f.bridge, name);
+      try { return `${name}:${readFileSync(path).toString("base64")}`; } catch { return `${name}:directory`; }
+    }).join("\n");
+    const before = snapshot();
+    const sshBefore = readFileSync(f.sshLog, "utf8");
+    const result = run(f, ["doctor", "--json"]);
+    const report = JSON.parse(result.stdout);
+    const after = snapshot();
+    const sshAfter = readFileSync(f.sshLog, "utf8");
+    await t.test("succeeds", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("reports each host layer separately", () => assert.deepEqual(Object.keys(report.hosts[0].stages), [
+      "tunnelProcess", "listener", "authenticatedHealth", "protocolCompatibility", "storageBounds", "connectionBounds", "levelAvailability",
+    ]));
+    await t.test("does not expose credentials or private paths", () => assert.equal(/credential|secret|\/Library\//i.test(result.stdout), false));
+    await t.test("does not mutate managed bridge state", () => assert.equal(after, before));
+    await t.test("does not issue SSH probes", () => assert.equal(sshAfter, sshBefore));
+    await t.test("does not persist authenticated companion receipts", () => assert.equal(existsSync(`${requestBase}.requests`), false));
+    await t.test("types permission as unobserved", () => assert.equal(report.shared.permission, "not-observed-read-only"));
+    await t.test("does not claim Level availability", () => assert.equal(report.shared.levelAvailability, "supported-not-observed"));
+    await t.test("keeps JSON bounded", () => assert.equal(Buffer.byteLength(result.stdout) <= 64 * 1024, true));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("bridge logs are separately requested, bounded, and redacted", async (t) => {
+  const f = fixture();
+  try {
+    const installed = run(f, ["install", "logs-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const records = [{ component: "tunnel", code: "failure", stage: "secret value /private/path" }];
+    for (let index = 0; index < 2000; index += 1) records.push({ component: "tunnel", code: "retry", retry: index });
+    writeFileSync(join(host, "tunnel.log"), records.map(JSON.stringify).join("\n") + "\n", { mode: 0o600 });
+    const doctor = run(f, ["doctor", "--json"]);
+    const result = run(f, ["logs", "logs-pi", "--json"]);
+    const output = JSON.parse(result.stdout);
+    await t.test("returns at most two hundred records", () => assert.equal(output.records.length, 200));
+    await t.test("accounts only retained records while keeping the newest", () => assert.equal(output.records.at(-1).retry, 1999));
+    await t.test("redacts rejected log fields", () => assert.equal(/secret value|private\/path/.test(result.stdout), false));
+    await t.test("keeps raw logs out of doctor", () => assert.equal(doctor.stdout.includes('"code":"retry"'), false));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("bridge repair previews before reloading only the owned tunnel", async (t) => {
+  const f = fixture();
+  const launchctlLog = join(f.home, "launchctl.log");
+  try {
+    const installed = run(f, ["install", "repair-pi"], { LAUNCHCTL_LOG: launchctlLog });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const setupPath = join(host, "setup.json");
+    const mutations = (text) => text.split("\n").filter((line) => line && !line.startsWith("print "));
+    const beforeLog = readFileSync(launchctlLog, "utf8");
+    const preview = run(f, ["repair", "repair-pi"], { LAUNCHCTL_LOG: launchctlLog, LAUNCHCTL_NOT_RUNNING: ".tunnel." });
+    const afterPreviewLog = readFileSync(launchctlLog, "utf8");
+    const repaired = run(f, ["repair", "repair-pi", "--confirm"], { LAUNCHCTL_LOG: launchctlLog, LAUNCHCTL_NOT_RUNNING: ".tunnel." });
+    const finalSetup = JSON.parse(readFileSync(setupPath, "utf8"));
+    await t.test("prints exact non-destructive preview", () => assert.match(preview.stdout, /reload owned tunnel LaunchAgent[\s\S]*Credentials, microphone permission, retained WAVs, and incomplete audio: unchanged/));
+    await t.test("preview invokes no mutating launchctl operation", () => assert.deepEqual(mutations(afterPreviewLog), mutations(beforeLog)));
+    await t.test("confirmed repair succeeds", () => assert.equal(repaired.status, 0, repaired.stderr));
+    await t.test("confirmed repair reconciles health", () => assert.equal(finalSetup.stages.authenticatedHealth, "ready"));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("bridge repair refuses a tunnel configuration that is not exact", async (t) => {
+  const f = fixture();
+  const launchctlLog = join(f.home, "launchctl.log");
+  try {
+    const installed = run(f, ["install", "tampered-repair-pi"], { LAUNCHCTL_LOG: launchctlLog });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const tunnelPath = join(host, "tunnel.json");
+    const tunnel = JSON.parse(readFileSync(tunnelPath, "utf8"));
+    tunnel.sshArguments.push("-A");
+    writeFileSync(tunnelPath, JSON.stringify(tunnel), { mode: 0o600 });
+    const before = readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line && !line.startsWith("print "));
+    const result = run(f, ["repair", "tampered-repair-pi", "--confirm"], { LAUNCHCTL_LOG: launchctlLog, LAUNCHCTL_NOT_RUNNING: ".tunnel." });
+    const after = readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line && !line.startsWith("print "));
+    await t.test("refuses the inexact tunnel", () => assert.match(result.stderr, /not the exact owned configuration/));
+    await t.test("does not mutate LaunchAgents", () => assert.deepEqual(after, before));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("uninstall reconciles a lost confirmed deletion response", async (t) => {
+  const f = fixture();
+  const drop = join(f.home, "drop-uninstall-response");
+  let server;
+  try {
+    const installed = run(f, ["install", "retry-uninstall-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    writeFileSync(drop, "drop\n");
+    server = await startCredentialServer(f, join(f.home, "idle"), drop);
+    const interrupted = run(f, ["uninstall", "retry-uninstall-pi", "--confirm"]);
+    const pending = existsSync(join(f.bridge, "credential.revocation.json"));
+    const retried = run(f, ["uninstall", "retry-uninstall-pi", "--confirm"]);
+    await t.test("first attempt reports the lost response", () => assert.notEqual(interrupted.status, 0));
+    await t.test("persists confirmed shared cleanup state", () => assert.equal(pending, true));
+    await t.test("retry completes cleanup", () => assert.equal(retried.status, 0, retried.stderr));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("idle uninstall atomically refuses a recording that starts after preview", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "raced-uninstall");
+  const race = join(f.home, "race-uninstall");
+  let server;
+  try {
+    const installed = run(f, ["install", "race-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    writeFileSync(race, "race\n");
+    server = await startCredentialServer(f, busy, undefined, race);
+    const result = run(f, ["uninstall", "race-pi", "--confirm"]);
+    const requests = readFileSync(`${busy}.requests`, "utf8");
+    await t.test("is blocked by the atomic idle operation", () => assert.match(result.stderr, /atomically blocked uninstall/));
+    await t.test("uses credential-revoke-if-idle", () => assert.match(requests, /^credential-revoke-if-idle /m));
+    await t.test("does not use destructive credential revocation", () => assert.equal(/^credential-revoke /m.test(requests), false));
+    await t.test("preserves the host for retry", () => assert.equal(hostDirectories(f.bridge).length, 1));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("scoped uninstall refuses unexpected host entries before deletion", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    for (const alias of ["foreign-pi", "keep-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    const foreignHost = join(f.bridge, "hosts", hostDirectories(f.bridge).find((id) =>
+      JSON.parse(readFileSync(join(f.bridge, "hosts", id, "ownership.json"), "utf8")).sshAlias === "foreign-pi"));
+    writeFileSync(join(foreignHost, "foreign"), "preserve\n", { mode: 0o600 });
+    const requestBase = join(f.home, "foreign-delete");
+    server = await startCredentialServer(f, requestBase);
+    const result = run(f, ["uninstall", "foreign-pi", "--confirm"]);
+    const requests = readFileSync(`${requestBase}.requests`, "utf8");
+    await t.test("refuses the unexpected host entry", () => assert.match(result.stderr, /unexpected or unprovable entry/));
+    await t.test("does not revoke the credential", () => assert.equal(/credential-revoke/.test(requests), false));
+    await t.test("preserves the unexpected entry", () => assert.equal(readFileSync(join(foreignHost, "foreign"), "utf8"), "preserve\n"));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("scoped uninstall preserves another bridge and the shared companion", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    for (const alias of ["remove-pi", "keep-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    server = await startCredentialServer(f, join(f.home, "idle"));
+    const result = run(f, ["uninstall", "remove-pi", "--confirm"]);
+    const list = JSON.parse(run(f, ["list", "--json"]).stdout);
+    await t.test("succeeds", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("preserves the other host", () => assert.deepEqual(list.hosts.map(({ sshAlias }) => sshAlias), ["keep-pi"]));
+    await t.test("preserves the shared companion root", () => assert.equal(existsSync(f.bridge), true));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall removes owned bridge state and explains permission history", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    const installed = run(f, ["install", "last-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    server = await startCredentialServer(f, join(f.home, "idle"));
+    const result = run(f, ["uninstall", "--all", "--confirm"]);
+    const requests = readFileSync(`${join(f.home, "idle")}.requests`, "utf8");
+    await t.test("succeeds", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("atomically gates the shared and host credentials", () => assert.equal(requests.match(/^credential-revoke-if-idle /gm)?.length, 2));
+    await t.test("removes the shared owned root", () => assert.equal(existsSync(f.bridge), false));
+    await t.test("explains retained macOS permission history", () => assert.match(result.stdout, /microphone permission history may remain/i));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall preserves shared files when companion bootout fails", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    const installed = run(f, ["install", "bootout-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const { app } = completeCompanion(f);
+    server = await startCredentialServer(f, join(f.home, "idle"));
+    const result = run(f, ["uninstall", "--all", "--confirm"], { LAUNCHCTL_FAIL_SHARED: "1" });
+    await t.test("reports the bootout failure", () => assert.match(result.stderr, /could not be stopped/));
+    await t.test("preserves the shared companion app", () => assert.equal(existsSync(app), true));
+    await t.test("preserves the shared LaunchAgent", () => assert.equal(existsSync(join(f.home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist")), true));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall refuses an unprovable artifact before deleting a host", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    const installed = run(f, ["install", "owned-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    writeFileSync(join(f.bridge, "foreign-artifact"), "preserve\n", { mode: 0o600 });
+    server = await startCredentialServer(f, join(f.home, "idle"));
+    const result = run(f, ["uninstall", "--all", "--confirm"]);
+    await t.test("refuses the unprovable artifact", () => assert.match(result.stderr, /unprovable artifact/));
+    await t.test("preserves the configured host", () => assert.equal(hostDirectories(f.bridge).length, 1));
+    await t.test("preserves the foreign artifact", () => assert.equal(readFileSync(join(f.bridge, "foreign-artifact"), "utf8"), "preserve\n"));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("active recording blocks uninstall without explicit cancellation", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "active");
+  let server;
+  try {
+    const installed = run(f, ["install", "busy-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    writeFileSync(busy, "active\n");
+    server = await startCredentialServer(f, busy);
+    const blocked = run(f, ["uninstall", "busy-pi", "--confirm"]);
+    const idleRequestUsed = /^credential-revoke-if-idle /m.test(readFileSync(`${busy}.requests`, "utf8"));
+    const preserved = hostDirectories(f.bridge).length;
+    const cancelled = run(f, ["uninstall", "busy-pi", "--confirm", "--cancel-active"]);
+    await t.test("names the affected bridge", () => assert.match(blocked.stderr, /busy-pi/));
+    await t.test("uses the atomic idle gate while blocked", () => assert.equal(idleRequestUsed, true));
+    await t.test("preserves state while blocked", () => assert.equal(preserved, 1));
+    await t.test("confirmed cancellation completes", () => assert.equal(cancelled.status, 0, cancelled.stderr));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("upgrade prechecks every host before changing the shared companion", async (t) => {
+  const f = fixture();
+  let server;
+  try {
+    for (const alias of ["reachable-pi", "unreachable-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    const { app } = completeCompanion(f);
+    server = await startCredentialServer(f, join(f.home, "idle"));
+    const before = createHash("sha256").update(readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"))).digest("hex");
+    const result = run(f, ["upgrade", "--confirm"], { SSH_UNREACHABLE_ALIAS: "unreachable-pi" });
+    const after = createHash("sha256").update(readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"))).digest("hex");
+    const calls = readFileSync(f.sshLog, "utf8");
+    await t.test("fails before upgrade", () => assert.notEqual(result.status, 0));
+    await t.test("checks the unreachable destination", () => assert.match(calls, /unreachable-pi.*remote-info/));
+    await t.test("leaves the shared executable unchanged", () => assert.equal(after, before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("idle upgrade atomically refuses a recording that starts after precheck", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "raced-upgrade");
+  const race = join(f.home, "race-upgrade");
+  let server;
+  try {
+    const installed = run(f, ["install", "upgrade-race-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const { app } = completeCompanion(f);
+    writeFileSync(race, "race\n");
+    server = await startCredentialServer(f, busy, undefined, race);
+    const before = readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"));
+    const result = run(f, ["upgrade", "--confirm"]);
+    const requests = readFileSync(`${busy}.requests`, "utf8");
+    const upgradeStateExists = existsSync(join(f.bridge, "upgrade.json"));
+    const stagedCredentialExists = existsSync(join(f.bridge, "credential.next.json"));
+    await t.test("uses atomic idle revocation", () => assert.match(requests, /^credential-revoke-if-idle /m));
+    await t.test("blocks the raced recording", () => assert.notEqual(result.status, 0));
+    await t.test("clears the effect-free upgrade journal so explicit cancellation can restart", () => assert.equal(upgradeStateExists, false));
+    await t.test("clears the unused staged credential", () => assert.equal(stagedCredentialExists, false));
+    await t.test("does not replace the companion", () => assert.deepEqual(readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge")), before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("multi-host upgrade gates every credential before stopping any process", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "multi-host-race");
+  const race = join(f.home, "multi-host-race-trigger");
+  const launchctlLog = join(f.home, "multi-host-launchctl.log");
+  let server;
+  try {
+    for (const alias of ["first-gate-pi", "second-gate-pi"]) {
+      const installed = run(f, ["install", alias], { LAUNCHCTL_LOG: launchctlLog });
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    completeCompanion(f);
+    writeFileSync(race, "race\n");
+    server = await startCredentialServer(f, busy, undefined, race);
+    const bootouts = () => readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line.startsWith("bootout ")).length;
+    const before = bootouts();
+    const result = run(f, ["upgrade", "--confirm"], { LAUNCHCTL_LOG: launchctlLog });
+    const after = bootouts();
+    await t.test("blocks on the raced host gate", () => assert.notEqual(result.status, 0));
+    await t.test("stops no process before every gate succeeds", () => assert.equal(after, before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("cancel-active upgrade revokes destructively before a tunnel stop failure", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "destructive-upgrade");
+  let server;
+  try {
+    const installed = run(f, ["install", "cancel-upgrade-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const { app } = completeCompanion(f);
+    writeFileSync(busy, "active\n");
+    server = await startCredentialServer(f, busy);
+    const before = readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"));
+    const result = run(f, ["upgrade", "--confirm", "--cancel-active"], { LAUNCHCTL_FAIL_BOOTOUT: ".tunnel." });
+    const requests = readFileSync(`${busy}.requests`, "utf8");
+    await t.test("uses destructive credential revocation", () => assert.match(requests, /^credential-revoke /m));
+    await t.test("reports the checked tunnel stop failure", () => assert.match(result.stderr, /tunnel could not be stopped/));
+    await t.test("does not replace the companion", () => assert.deepEqual(readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge")), before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("upgrade preserves shared files when companion bootout fails", async (t) => {
+  const f = fixture();
+  const requestBase = join(f.home, "shared-bootout-upgrade");
+  let server;
+  try {
+    const installed = run(f, ["install", "shared-bootout-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const { app } = completeCompanion(f);
+    server = await startCredentialServer(f, requestBase);
+    const before = readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"));
+    const result = run(f, ["upgrade", "--confirm"], { LAUNCHCTL_FAIL_SHARED: "1" });
+    const state = JSON.parse(readFileSync(join(f.bridge, "upgrade.json"), "utf8"));
+    await t.test("reports the checked shared bootout failure", () => assert.match(result.stderr, /shared companion LaunchAgent could not be stopped/));
+    await t.test("preserves the shared executable", () => assert.deepEqual(readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge")), before));
+    await t.test("preserves resumable quiescing state", () => assert.deepEqual(state.completed, ["shared-bootout-pi"]));
+    await t.test("durably promotes a replacement shared credential", () => assert.equal(state.primary.phase, "promoted"));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("interrupted upgrade keeps durable reconciliation state", async (t) => {
+  const f = fixture();
+  try {
+    const { app } = completeCompanion(f);
+    writeFileSync(join(f.bridge, "upgrade.json"), JSON.stringify({
+      product: "com.yasuhito.pi-dictation.bridge", phase: "installing", hosts: [],
+    }), { mode: 0o600 });
+    const result = run(f, ["upgrade", "--confirm"], { PATH: f.tools });
+    const state = JSON.parse(readFileSync(join(f.bridge, "upgrade.json"), "utf8"));
+    await t.test("reports the failed resumed installation", () => assert.notEqual(result.status, 0));
+    await t.test("preserves the installing phase for retry", () => assert.equal(state.phase, "installing"));
+    await t.test("preserves the previously installed companion", () => assert.equal(existsSync(app), true));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("active recording blocks upgrade and names the affected bridge", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "active-upgrade");
+  let server;
+  try {
+    const installed = run(f, ["install", "recording-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const { app } = completeCompanion(f);
+    writeFileSync(busy, "active\n");
+    server = await startCredentialServer(f, busy);
+    const before = readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"));
+    const result = run(f, ["upgrade", "--confirm"]);
+    const after = readFileSync(join(app, "Contents", "MacOS", "PiDictationBridge"));
+    await t.test("names the affected bridge", () => assert.match(result.stderr, /recording-pi/));
+    await t.test("requires explicit cancellation", () => assert.match(result.stderr, /--cancel-active/));
+    await t.test("leaves the companion unchanged", () => assert.deepEqual(after, before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
 test("repeated install preserves completed setup stages when authentication later fails", () => {
   const f = fixture();
   try {
@@ -333,6 +827,74 @@ test("remote prepare installs private Recorder endpoint state without a package 
     await t.test("configures the Recorder file consumed by Pi", () => assert.deepEqual(runtimeConfig.recorder, recorder));
     await t.test("keeps host state private", () => assert.equal(require("node:fs").lstatSync(host).mode & 0o777, 0o700));
     await t.test("keeps the shared credential private", () => assert.equal(require("node:fs").lstatSync(join(host, "credential.json")).mode & 0o777, 0o600));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote uninstall removes only its owned Recorder configuration transaction", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-reinstall-"));
+  const firstId = "abcdefabcdefabcd";
+  const secondId = "0123012301230123";
+  const credential = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", secret: Buffer.alloc(32, 17).toString("base64") };
+  const prepare = (id) => {
+    const endpoint = { type: "unix", path: join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id, "listener.sock") };
+    return spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+    });
+  };
+  try {
+    const first = prepare(firstId);
+    if (first.status !== 0) throw new Error(first.stderr);
+    const removed = spawnSync(process.execPath, [cli, "bridge", "remote-credential-revoke", firstId], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    const configDirectory = join(home, ".pi", "agent");
+    const configRemoved = !existsSync(join(configDirectory, "pi-dictation.json")) && !existsSync(join(configDirectory, "pi-dictation.bridge-owner.json"));
+    const second = prepare(secondId);
+    await t.test("removes the proven-owned configuration and receipt", () => assert.equal(configRemoved, true, removed.stderr));
+    await t.test("permits a different host to install afterward", () => assert.equal(second.status, 0, second.stderr));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote uninstall resumes after removing its owned configuration", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-uninstall-resume-"));
+  const id = "9999999999999999";
+  const endpoint = { type: "unix", path: join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id, "listener.sock") };
+  const credential = { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", secret: Buffer.alloc(32, 18).toString("base64") };
+  try {
+    const prepared = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+    });
+    if (prepared.status !== 0) throw new Error(prepared.stderr);
+    const interrupted = spawnSync(process.execPath, [cli, "bridge", "remote-credential-revoke", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test", PI_DICTATION_TEST_INTERRUPT: "after-remote-config-removal" },
+    });
+    const retried = spawnSync(process.execPath, [cli, "bridge", "remote-credential-revoke", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test" },
+    });
+    await t.test("interrupts after the owned configuration removal", () => assert.notEqual(interrupted.status, 0));
+    await t.test("retry completes from the private uninstall transaction", () => assert.equal(retried.status, 0, retried.stderr));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote uninstall refuses unexpected host entries before configuration changes", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-uninstall-"));
+  const id = "abcdefabcdefabcd";
+  const host = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const endpoint = { type: "unix", path: join(host, "listener.sock") };
+  const credential = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", secret: Buffer.alloc(32, 17).toString("base64") };
+  try {
+    const prepared = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+    });
+    if (prepared.status !== 0) throw new Error(prepared.stderr);
+    writeFileSync(join(host, "foreign"), "preserve\n", { mode: 0o600 });
+    const result = spawnSync(process.execPath, [cli, "bridge", "remote-credential-revoke", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    const recorder = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8")).recorder;
+    await t.test("refuses the unexpected remote entry", () => assert.match(result.stderr, /unexpected or unprovable entry/));
+    await t.test("preserves the Bridge Recorder configuration", () => assert.equal(recorder.type, "bridge"));
+    await t.test("preserves the unexpected entry", () => assert.equal(readFileSync(join(host, "foreign"), "utf8"), "preserve\n"));
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

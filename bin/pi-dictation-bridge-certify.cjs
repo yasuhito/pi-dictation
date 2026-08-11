@@ -201,6 +201,16 @@ function certificationCommand(command, arguments_, options = {}) {
 function packagedPiCommand(tarball, arguments_, options = {}) {
   return certificationCommand("npm", ["exec", "--yes", "--package", tarball, "--", "pi-dictation", ...arguments_], options);
 }
+function installCandidateOnRemote(alias, tarball) {
+  if (typeof alias !== "string" || !/^[A-Za-z0-9_.@-]{1,255}$/.test(alias)) fail("Refusing an unsafe certification SSH alias.");
+  const remote = `/tmp/pi-dictation-candidate-${randomBytes(12).toString("hex")}.tgz`;
+  const script = `umask 077; candidate=${remote}; trap 'rm -f "$candidate"' 0 1 2 15; cat > "$candidate" && npm install --global "$candidate"`;
+  const result = spawnSync("ssh", [
+    "-o", "BatchMode=yes", "-o", "RequestTTY=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+    "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes", alias, script,
+  ], { input: readFileSync(tarball), timeout: 10 * 60 * 1000, maxBuffer: 64 * 1024 });
+  if (result.error || result.status !== 0) fail(`Candidate package installation failed on SSH alias '${alias}'.`);
+}
 
 async function cleanupLifecycle(state, credential) {
   const expected = scenarios.get(state.scenario);
@@ -277,8 +287,8 @@ async function advanceCleanUser(confirm) {
     packagedPiCommand(state.predecessor, ["bridge", "health"], { failure: "Real-audio preflight is not healthy." });
     packagedPiCommand(state.predecessor, ["bridge", "install", state.alias], { inherit: true, failure: "Host Bridge installation failed." });
     packagedPiCommand(state.predecessor, ["bridge", "install", state.alias], { inherit: true, failure: "Idempotent host Bridge installation failed." });
-    packagedPiCommand(state.predecessor, ["bridge", "status", state.alias], { inherit: true, failure: "Human Bridge diagnosis failed." });
-    const diagnosis = packagedPiCommand(state.predecessor, ["bridge", "list", "--json"], { failure: "JSON Bridge diagnosis failed." });
+    packagedPiCommand(state.predecessor, ["bridge", "status", state.alias], { inherit: true, failure: "Predecessor human Bridge diagnosis failed." });
+    const diagnosis = packagedPiCommand(state.predecessor, ["bridge", "list", "--json"], { failure: "Predecessor JSON Bridge diagnosis failed." });
     JSON.parse(diagnosis);
     const phrase = `Pi Dictation clean user ${randomBytes(3).toString("hex")}`;
     writeFileSync(statePath, `${JSON.stringify({ ...state, phase: "awaiting-recording", phrase })}\n`, { mode: 0o600 });
@@ -287,13 +297,31 @@ async function advanceCleanUser(confirm) {
     console.log("Then run: pi-dictation-bridge-certify advance --confirm");
     return;
   }
-  if (state.phase !== "awaiting-recording") fail("Refusing an invalid clean-user certification phase.");
-  const host = configuredHost(state.alias);
-  await assertNoOwnedAudio(host.credential);
-  certificationCommand("npm", ["install", "--global", state.tarball], { failure: "Actual-tarball upgrade failed." });
-  certificationCommand("pi-dictation", ["bridge", "install", state.alias], { inherit: true, failure: "Bridge reconciliation after upgrade failed." });
+  if (state.phase === "awaiting-recording") {
+    const host = configuredHost(state.alias);
+    await assertNoOwnedAudio(host.credential);
+    certificationCommand("npm", ["install", "--global", state.tarball], { failure: "Actual-tarball package installation failed." });
+    let registered;
+    try { registered = JSON.parse(certificationCommand("pi-dictation", ["bridge", "list", "--json"])).hosts; }
+    catch { fail("Configured Bridge destinations could not be enumerated before upgrade."); }
+    if (!Array.isArray(registered) || registered.length === 0 || registered.some((host) => typeof host?.sshAlias !== "string")) {
+      fail("Upgrade certification requires every registered Bridge destination.");
+    }
+    for (const host of registered) installCandidateOnRemote(host.sshAlias, state.tarball);
+    certificationCommand("pi-dictation", ["bridge", "doctor", state.alias], { inherit: true, failure: "Candidate human Bridge diagnosis failed." });
+    JSON.parse(certificationCommand("pi-dictation", ["bridge", "doctor", state.alias, "--json"], { failure: "Candidate JSON Bridge diagnosis failed." }));
+    certificationCommand("pi-dictation", ["bridge", "upgrade"], { failure: "Bridge upgrade preview failed." });
+    certificationCommand("pi-dictation", ["bridge", "upgrade", "--confirm"], { inherit: true, failure: "Bridge companion upgrade failed." });
+    writeFileSync(statePath, `${JSON.stringify({ ...state, phase: "awaiting-upgrade-preflight" })}\n`, { mode: 0o600 });
+    console.log("Run `pi-dictation bridge preflight`, speak when requested, then run: pi-dictation-bridge-certify advance --confirm");
+    return;
+  }
+  if (state.phase !== "awaiting-upgrade-preflight") fail("Refusing an invalid clean-user certification phase.");
+  certificationCommand("pi-dictation", ["bridge", "health"], { failure: "Upgraded build real-audio preflight is not healthy." });
+  certificationCommand("pi-dictation", ["bridge", "upgrade", "--confirm"], { inherit: true, failure: "All-host upgrade reconciliation failed." });
   certificationCommand("pi-dictation", ["bridge", "rotate", state.alias], { failure: "Credential rotation failed." });
-  certificationCommand("pi-dictation", ["bridge", "revoke", state.alias, "--confirm"], { failure: "Bridge credential uninstall cleanup failed." });
+  certificationCommand("pi-dictation", ["bridge", "uninstall", state.alias], { failure: "Bridge uninstall preview failed." });
+  certificationCommand("pi-dictation", ["bridge", "uninstall", state.alias, "--confirm"], { failure: "Bridge uninstall cleanup failed." });
   certificationCommand("npm", ["uninstall", "--global", "pi-dictation"], { failure: "Tarball package uninstall failed." });
   if (fileDigest(state.externalArtifact) !== state.externalArtifactSha256) fail("Uninstall changed the external artifact.");
   rmSync(statePath, { force: true });
