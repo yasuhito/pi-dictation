@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+  readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -13,6 +13,11 @@ const PRODUCT = "com.yasuhito.pi-dictation.bridge";
 export const BRIDGE_PROTOCOL_VERSION = 3;
 const packageRoot = new URL("..", import.meta.url);
 const supervisorPath = fileURLToPath(new URL("./pi-dictation-tunnel.mjs", import.meta.url));
+const MAX_MANAGED_JSON_BYTES = 64 * 1024;
+const MAX_REMOTE_BODY_BYTES = 64 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 8 * 1024;
+const MAX_REMOTE_ENDPOINT_BYTES = 16 * 1024;
+const MAX_REMOTE_CREDENTIAL_BYTES = 64 * 1024;
 
 export class BridgeHostError extends Error {}
 
@@ -68,8 +73,9 @@ function atomicWrite(path, contents) {
   renameSync(temporary, path);
 }
 
-function readOwnedJson(path, description) {
-  inspect(path, "file", 0o600, description);
+function readOwnedJson(path, description, maximumBytes = MAX_MANAGED_JSON_BYTES) {
+  const info = inspect(path, "file", 0o600, description);
+  if (!info || info.size < 2 || info.size > maximumBytes) throw new BridgeHostError(`Refusing oversized ${description}.`);
   try { return JSON.parse(readFileSync(path, "utf8")); }
   catch { throw new BridgeHostError(`Refusing invalid ${description}.`); }
 }
@@ -99,6 +105,7 @@ function localPaths(alias) {
     endpoint: join(root, "endpoint.json"),
     state: join(root, "setup.json"),
     tunnel: join(root, "tunnel.json"),
+    tunnelLog: join(root, "tunnel.log"),
     companionSocket: join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock"),
     plist: join(home, "Library", "LaunchAgents", `${PRODUCT}.tunnel.${id}.plist`),
   };
@@ -117,8 +124,12 @@ const baseSshOptions = [
 ];
 
 function ssh(alias, remoteArgs, options = {}) {
+  if (typeof options.input === "string" && Buffer.byteLength(options.input) > MAX_REMOTE_BODY_BYTES) {
+    throw new BridgeHostError("Remote request body exceeds the safe limit");
+  }
   const result = spawnSync("ssh", [...baseSshOptions, alias, ...remoteArgs], {
     encoding: "utf8", input: options.input, timeout: options.timeout ?? 15000,
+    maxBuffer: MAX_REMOTE_BODY_BYTES,
   });
   if (result.error || result.status !== 0) {
     throw new BridgeHostError(options.failure || "SSH command failed");
@@ -214,7 +225,9 @@ function parseTransport(args, remoteHome, id) {
 }
 
 function resolvedTunnelArguments(alias, transport, companionSocket) {
-  const result = spawnSync("ssh", [...baseSshOptions, "-G", alias], { encoding: "utf8", timeout: 10000 });
+  const result = spawnSync("ssh", [...baseSshOptions, "-G", alias], {
+    encoding: "utf8", timeout: 10000, maxBuffer: MAX_REMOTE_BODY_BYTES,
+  });
   if (result.error || result.status !== 0) throw new BridgeHostError(`The SSH alias '${alias}' configuration could not be resolved safely.`);
   const values = new Map();
   for (const line of result.stdout.split("\n")) {
@@ -283,7 +296,7 @@ function assertOwnedHost(paths, alias) {
   if (ownership.product !== PRODUCT || ownership.hostId !== paths.id || ownership.sshAlias !== alias) {
     throw new BridgeHostError("Refusing host artifacts whose ownership cannot be proven.");
   }
-  for (const [path, description] of [[paths.credential, "host credential"], [paths.nextCredential, "staged host credential"], [paths.previousCredential, "previous host credential"], [paths.rotation, "credential rotation state"], [paths.revokedCredential, "revoked host credential"], [paths.endpoint, "host endpoint"], [paths.state, "host setup state"], [paths.tunnel, "host tunnel configuration"]]) {
+  for (const [path, description] of [[paths.credential, "host credential"], [paths.nextCredential, "staged host credential"], [paths.previousCredential, "previous host credential"], [paths.rotation, "credential rotation state"], [paths.revokedCredential, "revoked host credential"], [paths.endpoint, "host endpoint"], [paths.state, "host setup state"], [paths.tunnel, "host tunnel configuration"], [paths.tunnelLog, "host tunnel log"]]) {
     if (existsSync(path)) inspect(path, "file", 0o600, description);
   }
   if (existsSync(paths.plist)) {
@@ -315,8 +328,21 @@ function readStages(paths, alias) {
   return { ...pendingStages, ...setup.stages };
 }
 
+function safeDiagnostic(error) {
+  const text = String(error || "setup failed")
+    .replaceAll(homedir(), "[private-path]")
+    .replace(/[A-Za-z0-9+/]{43}=/g, "[redacted]")
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27}/ig, "[redacted]")
+    .replace(/[^\x20-\x7e]/g, "?");
+  const bytes = Buffer.from(text);
+  return bytes.subarray(0, MAX_DIAGNOSTIC_BYTES).toString("utf8");
+}
+
 function state(paths, alias, stages, error) {
-  atomicWrite(paths.state, `${JSON.stringify({ product: PRODUCT, hostId: paths.id, sshAlias: alias, stages, error: error || null, updatedAt: new Date().toISOString() }, null, 2)}\n`);
+  atomicWrite(paths.state, `${JSON.stringify({
+    product: PRODUCT, hostId: paths.id, sshAlias: alias, stages,
+    error: error ? safeDiagnostic(error) : null, updatedAt: new Date().toISOString(),
+  }, null, 2)}\n`);
 }
 
 export function installHost(alias, args = []) {
@@ -359,6 +385,7 @@ export function installHost(alias, args = []) {
       hostId: paths.id,
       sshAlias: alias,
       statusFile: paths.state,
+      logFile: paths.tunnelLog,
       stableAfterMs: 30000,
       sshArguments: resolvedTunnelArguments(alias, transport, paths.companionSocket),
       listenerProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener", paths.id],
@@ -765,12 +792,34 @@ function reconcileRemoteRecorder(id, recorder) {
   atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "ready", sha256: nextSha256 })}\n`);
 }
 
+function readBoundedStandardInput(maximumBytes) {
+  const chunks = [];
+  let bytes = 0;
+  while (true) {
+    const buffer = Buffer.allocUnsafe(Math.min(4096, maximumBytes + 1 - bytes));
+    const count = readSync(0, buffer, 0, buffer.length, null);
+    if (count === 0) break;
+    bytes += count;
+    if (bytes > maximumBytes) throw new BridgeHostError("Remote request body exceeds the safe limit.");
+    chunks.push(Buffer.from(buffer.subarray(0, count)));
+  }
+  return Buffer.concat(chunks, bytes).toString("utf8");
+}
+
 export function remotePrepare(id, encodedEndpoint) {
   let endpoint; let credential;
-  try { endpoint = JSON.parse(Buffer.from(encodedEndpoint, "base64").toString("utf8")); }
-  catch { throw new BridgeHostError("Invalid remote endpoint configuration."); }
-  try { credential = JSON.parse(readFileSync(0, "utf8")); }
-  catch { throw new BridgeHostError("Invalid remote bridge credential."); }
+  try {
+    if (typeof encodedEndpoint !== "string" || Buffer.byteLength(encodedEndpoint) > MAX_REMOTE_ENDPOINT_BYTES ||
+        encodedEndpoint.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encodedEndpoint)) throw new Error();
+    const decoded = Buffer.from(encodedEndpoint, "base64");
+    if (decoded.toString("base64") !== encodedEndpoint) throw new Error();
+    endpoint = JSON.parse(decoded.toString("utf8"));
+  } catch { throw new BridgeHostError("Invalid remote endpoint configuration."); }
+  try { credential = JSON.parse(readBoundedStandardInput(MAX_REMOTE_CREDENTIAL_BYTES)); }
+  catch (error) {
+    if (error instanceof BridgeHostError) throw error;
+    throw new BridgeHostError("Invalid remote bridge credential.");
+  }
   validateCredential(credential, "remote bridge credential");
   if (endpoint.type === "unix") {
     if (typeof endpoint.path !== "string" || !endpoint.path.startsWith("/") || !endpoint.path.endsWith("/listener.sock")) throw new BridgeHostError("Invalid remote Unix listener.");

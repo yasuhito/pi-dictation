@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -154,6 +154,8 @@ export function readConfigFile(path = getConfigPath()): DictationConfigFile {
   if (!existsSync(path)) return {};
   let parsed: unknown;
   try {
+    const info = statSync(path);
+    if (!info.isFile() || info.size < 2 || info.size > 64 * 1024) throw new Error();
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     throw new Error("invalid JSON");

@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
@@ -8,20 +8,30 @@ const { spawnSync } = require("node:child_process");
 const packageRoot = resolve(__dirname, "..");
 const doctorPath = join(packageRoot, "bin", "pi-dictation-doctor.mjs");
 
-function runDoctor({ config, env = {}, path = "/nonexistent" } = {}) {
+function runDoctor({ config, env = {}, path = "/nonexistent", packageManifest } = {}) {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-doctor-"));
   if (config !== undefined) {
     const configDir = join(home, ".pi", "agent");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "pi-dictation.json"), config);
   }
+  let nodePath;
+  if (packageManifest !== undefined) {
+    nodePath = join(home, "node_modules");
+    const packageDirectory = join(nodePath, "@earendil-works", "pi-coding-agent");
+    mkdirSync(packageDirectory, { recursive: true });
+    writeFileSync(join(packageDirectory, "package.json"), packageManifest);
+  }
 
-  const result = spawnSync(process.execPath, [doctorPath], {
+  const executable = packageManifest === undefined ? doctorPath : join(home, "pi-dictation-doctor.mjs");
+  if (packageManifest !== undefined) copyFileSync(doctorPath, executable);
+  const result = spawnSync(process.execPath, [executable], {
     cwd: packageRoot,
     encoding: "utf8",
     env: {
       HOME: home,
       PATH: path,
+      ...(nodePath === undefined ? {} : { NODE_PATH: nodePath }),
       ...env,
     },
   });
@@ -38,6 +48,19 @@ test("package exposes the doctor executable", async (t) => {
   await t.test("ships the bin directory", () => {
     assert.ok(manifest.files.includes("bin"));
   });
+});
+
+test("doctor bounds dependency manifests before reading", () => {
+  const result = runDoctor({ packageManifest: JSON.stringify({
+    name: "@earendil-works/pi-coding-agent", version: "1.2.3", padding: "x".repeat(70 * 1024),
+  }) });
+  assert.equal(result.stdout.includes("Pi: unavailable") && result.stdout.length < 8192, true);
+});
+
+test("doctor rejects unsafe dependency versions before display", () => {
+  const secret = "PRIVATE VERSION VALUE";
+  const result = runDoctor({ packageManifest: JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: secret }) });
+  assert.equal(result.stdout.includes("Pi: unavailable") && !result.stdout.includes(secret), true);
 });
 
 test("doctor reports a ready custom setup without exposing commands or API keys", async (t) => {

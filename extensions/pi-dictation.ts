@@ -20,7 +20,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { openAsBlob } from "node:fs";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cliSpinners from "cli-spinners";
@@ -31,6 +32,7 @@ import { createRecorder, type LevelEvent, type LevelObservation, type Recording 
 import { shellQuote } from "./shell.js";
 const CONFIG_PATH = getConfigPath();
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
+const MAX_TRANSCRIPTION_RESPONSE_BYTES = 1024 * 1024;
 const WIDGET_KEY = "pi-dictation";
 const FALLBACK_SPINNER = { interval: 140, frames: ["|", "/", "-", "\\"] };
 const LEVEL_REFRESH_MS = 50;
@@ -62,24 +64,33 @@ function errorDetail(value) {
   return `${bytes.subarray(0, MAX_ERROR_DETAIL_BYTES).toString("utf8")}\n[diagnostic truncated]`;
 }
 
-async function boundedResponseText(response) {
-  if (!response.body) return "";
+async function boundedBody(response, maximumBytes) {
+  if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks = [];
   let bytes = 0;
   try {
-    while (bytes <= MAX_ERROR_DETAIL_BYTES) {
+    while (bytes <= maximumBytes) {
       const { done, value } = await reader.read();
       if (done) break;
-      const retained = value.subarray(0, MAX_ERROR_DETAIL_BYTES + 1 - bytes);
+      const retained = value.subarray(0, maximumBytes + 1 - bytes);
       chunks.push(Buffer.from(retained));
       bytes += retained.length;
-      if (bytes > MAX_ERROR_DETAIL_BYTES) break;
+      if (bytes > maximumBytes) throw new Error("Response body exceeds the safe limit.");
     }
   } finally {
     await reader.cancel().catch(() => {});
   }
-  return errorDetail(Buffer.concat(chunks));
+  return Buffer.concat(chunks, bytes);
+}
+
+async function boundedResponseText(response) {
+  try { return errorDetail(await boundedBody(response, MAX_ERROR_DETAIL_BYTES)); }
+  catch { return "[diagnostic truncated]"; }
+}
+
+async function boundedTranscriptionResponse(response) {
+  return (await boundedBody(response, MAX_TRANSCRIPTION_RESPONSE_BYTES)).toString("utf8");
 }
 
 function expandFileTemplate(template, file) {
@@ -269,11 +280,11 @@ async function transcribeWithOpenAI(config, file, signal) {
       );
     }
 
-    const audio = await readFile(file, { signal: controller.signal });
+    const audio = await openAsBlob(file, { type: "audio/wav" });
     const form = new FormData();
     form.append("model", config.openaiModel);
     if (config.language) form.append("language", config.language);
-    form.append("file", new Blob([audio], { type: "audio/wav" }), "recording.wav");
+    form.append("file", audio, "recording.wav");
 
     const endpoint = `${config.openaiBaseUrl.replace(/\/$/, "")}/audio/transcriptions`;
     let response;
@@ -296,7 +307,10 @@ async function transcribeWithOpenAI(config, file, signal) {
       throw new Error(`OpenAI transcription failed: HTTP ${response.status} ${body}`);
     }
 
-    const json = await response.json();
+    const body = await boundedTranscriptionResponse(response);
+    let json;
+    try { json = JSON.parse(body); }
+    catch { throw new Error("OpenAI transcription returned an invalid bounded response."); }
     const text = String(json.text || "").trim();
     if (!text) throw new Error("OpenAI transcription returned empty text.");
     return text;
