@@ -862,3 +862,26 @@ test("owner revocation cleanup survives a crash after WAV deletion", macOnly, as
     await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
   } finally { await instance.cleanup(); }
 });
+
+test("confirmed upgrade cancellation deletes only the affected owner's recordings", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [affected, peer] = instance.owners;
+    const lease = capability();
+    await request(instance.socket, affected.credential, "start", { ...lease, maxDurationMs: 10000 });
+    privateJson(join(instance.home, "state", "root", "upgrade.json"), { product, phase: "quiescing" });
+    const cancelled = await request(instance.socket, affected.credential, "credential-cancel-recordings", {}, randomUUID());
+    const status = await request(instance.socket, affected.credential, "status", lease);
+    const replacement = capability();
+    const blockedReplacement = await request(instance.socket, affected.credential, "start", { ...replacement, maxDurationMs: 10000 });
+    const retainedPeer = await request(instance.socket, peer.credential, "health", {});
+    rmSync(join(instance.home, "state", "root", "upgrade.json"));
+    await instance.restart();
+    const retainedCredential = await request(instance.socket, affected.credential, "health", {});
+    await t.test("confirms the affected active Recording lease", () => assert.equal(cancelled.payload.activeRecordingLease, 1));
+    await t.test("deletes the affected Recording lease", () => assert.equal(status.status, "not-found"));
+    await t.test("blocks a replacement recording before companion replacement", () => assert.equal(blockedReplacement.status, "failed"));
+    await t.test("preserves another host bridge", () => assert.equal(retainedPeer.status, "ok"));
+    await t.test("preserves the affected bridge credential across replacement", () => assert.equal(retainedCredential.status, "ok"));
+  } finally { await instance.cleanup(); }
+});

@@ -42,7 +42,7 @@ private let maximumConnections = 16
 private let maximumConnectionsPerCredential = 4
 private let validRequestOperations: Set<String> = [
     "health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge",
-    "credential-effects", "credential-revoke", "credential-revoke-if-idle",
+    "credential-effects", "credential-cancel-recordings", "credential-quiesce-if-idle", "credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active",
 ]
 private let observationRequestOperations: Set<String> = ["health", "levels", "subscribe-levels", "status"]
 private let maximumObservationRequestReceiptsPerCredential = 16_384
@@ -1011,9 +1011,11 @@ private final class RecordingManager {
     private var connections: [String: Set<Int32>] = [:]
     private var revokedOwners: Set<String> = []
     private var revocations: [String: PersistedCredentialRevocation] = [:]
+    private let upgradeStatePath: String
 
-    init(runtime: String) throws {
+    init(runtime: String, upgradeStatePath: String) throws {
         self.runtime = runtime
+        self.upgradeStatePath = upgradeStatePath
         try restoreRevocations()
         try restore()
         try seedRevocationReceipts()
@@ -1067,6 +1069,9 @@ private final class RecordingManager {
                 }
                 return (status, object)
             }
+        }
+        if operation == "start" && FileManager.default.fileExists(atPath: upgradeStatePath) {
+            throw CompanionFailure.invalidState
         }
         if observationRequestOperations.contains(operation) {
             let observationCount = requests.values.filter {
@@ -1162,15 +1167,31 @@ private final class RecordingManager {
         return effectsLocked(ownerId: ownerId, currentDescriptor: currentDescriptor).2
     }
 
-    func revokeCredential(ownerId: String, requestId: String, clientVersion: Int,
-                          operation: String, payload: Data, currentDescriptor: Int32,
-                          onlyIfIdle: Bool) throws -> [String: Any] {
+    func quiesceCredentialForUpgrade(ownerId: String, currentDescriptor: Int32,
+                                     cancelRecordings: Bool) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
         let (owned, ownedConnections, effects) = effectsLocked(ownerId: ownerId, currentDescriptor: currentDescriptor)
-        if onlyIfIdle && ((effects["activeRecordingLease"] ?? 0) > 0 ||
-                          (effects["incompleteAudio"] ?? 0) > 0 ||
-                          (effects["retainedWav"] ?? 0) > 0) {
+        if !cancelRecordings && ((effects["activeRecordingLease"] ?? 0) > 0 ||
+                                 (effects["incompleteAudio"] ?? 0) > 0) {
+            throw CompanionFailure.invalidState
+        }
+        for descriptor in ownedConnections { shutdown(descriptor, SHUT_RDWR) }
+        if cancelRecordings { for current in owned { try cleanupRevokedRecordingLocked(current) } }
+        return effects
+    }
+
+    func revokeCredential(ownerId: String, requestId: String, clientVersion: Int,
+                          operation: String, payload: Data, currentDescriptor: Int32,
+                          onlyIfIdle: Bool, onlyIfNoActive: Bool = false) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        let (owned, ownedConnections, effects) = effectsLocked(ownerId: ownerId, currentDescriptor: currentDescriptor)
+        if (onlyIfIdle && ((effects["activeRecordingLease"] ?? 0) > 0 ||
+                           (effects["incompleteAudio"] ?? 0) > 0 ||
+                           (effects["retainedWav"] ?? 0) > 0)) ||
+           (onlyIfNoActive && ((effects["activeRecordingLease"] ?? 0) > 0 ||
+                               (effects["incompleteAudio"] ?? 0) > 0)) {
             throw CompanionFailure.invalidState
         }
         let revocation = PersistedCredentialRevocation(
@@ -2024,7 +2045,7 @@ private final class RecordingManager {
             let effectKeys = Set(["connections", "activeRecordingLease", "incompleteAudio", "retainedWav"])
             guard value.schemaVersion == 1, value.ownerId == ownerId, canonicalUUID(ownerId),
                   canonicalUUID(value.requestId), value.clientVersion >= 1,
-                  ["credential-revoke", "credential-revoke-if-idle"].contains(value.operation),
+                  ["credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active"].contains(value.operation),
                   value.contentHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
                   Set(value.effects.keys) == effectKeys,
                   value.effects.values.allSatisfy({ $0 >= 0 && $0 <= 100_000 }),
@@ -2567,13 +2588,20 @@ private func handleRequest(
         case "credential-effects":
             guard request.payload.isEmpty else { throw CompanionFailure.invalidFrame }
             payload = recordings.credentialEffects(ownerId: request.credential.id, currentDescriptor: descriptor)
-        case "credential-revoke", "credential-revoke-if-idle":
+        case "credential-cancel-recordings", "credential-quiesce-if-idle":
+            guard request.payload.isEmpty else { throw CompanionFailure.invalidFrame }
+            payload = try recordings.quiesceCredentialForUpgrade(
+                ownerId: request.credential.id, currentDescriptor: descriptor,
+                cancelRecordings: request.operation == "credential-cancel-recordings"
+            )
+        case "credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active":
             guard request.payload.isEmpty else { throw CompanionFailure.invalidFrame }
             payload = try recordings.revokeCredential(
                 ownerId: request.credential.id, requestId: request.requestId,
                 clientVersion: request.clientVersion, operation: request.operation,
                 payload: request.payloadData, currentDescriptor: descriptor,
-                onlyIfIdle: request.operation == "credential-revoke-if-idle"
+                onlyIfIdle: request.operation == "credential-revoke-if-idle",
+                onlyIfNoActive: request.operation == "credential-revoke-if-no-active"
             )
         case "start":
             guard exactKeys(request.payload, ["recordingId", "leaseSecret", "maxDurationMs"]),
@@ -2835,7 +2863,7 @@ private func serve() throws {
     try verifyDirectory(paths.root)
     try verifyDirectory(paths.runtime)
     try verifyPreflightReceipt(root: paths.root)
-    let recordings = try RecordingManager(runtime: paths.runtime)
+    let recordings = try RecordingManager(runtime: paths.runtime, upgradeStatePath: paths.root + "/upgrade.json")
     let connectionLimiter = ConnectionLimiter()
     let logger = BoundedLog(runtime: paths.runtime)
     logger.event("companion-start")

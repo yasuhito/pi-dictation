@@ -190,6 +190,27 @@ pi-dictation bridge revoke my-pi --confirm
 
 Rotation stages a new owner-only credential on both hosts, verifies authenticated health through it, and only then revokes the old credential. It refuses to disrupt an unfinished Recording lease or retained WAV and preserves staged state for a safe retry. Revocation previews the target credential's live connections, active lease, incomplete audio, and retained WAV deletion counts unless `--confirm` is supplied; confirmation closes and deletes only that credential's bridge state.
 
+Diagnose and maintain the complete bridge stack from the Mac:
+
+```bash
+pi-dictation bridge doctor
+pi-dictation bridge doctor --json
+pi-dictation bridge logs                 # companion log
+pi-dictation bridge logs my-pi           # one tunnel log
+pi-dictation bridge repair my-pi          # preview
+pi-dictation bridge repair my-pi --confirm
+pi-dictation bridge upgrade
+pi-dictation bridge uninstall my-pi       # preview
+pi-dictation bridge uninstall my-pi --confirm
+pi-dictation bridge uninstall --all --delete-retained-wav --delete-credentials --confirm
+```
+
+Doctor and list are the only stable JSON interfaces. Doctor is read-only: it does not open the microphone, reload a LaunchAgent, remove a listener, execute a credential command, or repair anything. Logs are requested separately and expose only bounded structured safe fields from three one-MiB rotating generations. Repair previews the exact owned LaunchAgent/listener reconciliation and never changes credentials, permission, or audio.
+
+Upgrade verifies non-interactive reachability, the package/protocol transition, and authenticated effects for every registered destination before stopping the shared companion. An active recording blocks it unless the named bridges are explicitly cancelled with `--cancel-active --confirm`; successful replacement clears readiness and requires a fresh interactive real-audio preflight followed by doctor confirmation of all-host health.
+
+Scoped uninstall revokes and removes only the selected host's tunnel, listener, credential, and Recorder configuration. The last-host or `--all` path additionally requires separate retained-WAV and credential-deletion flags before the shared companion is removed. Active recording deletion requires `--cancel-active`. Every maintenance command refuses symlinks, unexpected types, unsafe ownership or permissions, and unprovable artifacts. macOS microphone permission history can remain after complete uninstall and may be removed manually in Privacy & Security.
+
 A TCP listener is never selected automatically. If the SSH server cannot forward Unix sockets, explicitly opt in to one exact loopback bind:
 
 ```bash
