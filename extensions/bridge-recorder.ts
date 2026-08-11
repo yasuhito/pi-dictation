@@ -14,6 +14,7 @@ const FINALIZATION_TIMEOUT_MS = 30_000;
 const FETCH_NO_PROGRESS_TIMEOUT_MS = 10_000;
 const RECOVERY_WINDOW_MS = 10 * 60_000;
 const LEVEL_INTERVAL_MS = 50;
+const OWNER_LIVENESS_INTERVAL_MS = 5000;
 const RETRY_ATTEMPTS = 3;
 const FINALIZATION_POLL_MS = 25;
 
@@ -29,7 +30,11 @@ type ResponseFrame = {
 };
 
 class BridgeProtocolError extends Error {}
-class BridgeTransportError extends Error {}
+class BridgeTransportError extends Error {
+  constructor(readonly stage: "authentication" | "operation" = "operation", options?: ErrorOptions) {
+    super(undefined, options);
+  }
+}
 class BridgeOutcomeUnknownError extends Error {}
 class BridgeAudioError extends Error {}
 class BridgeResponseError extends Error {
@@ -263,6 +268,7 @@ async function authenticatedRequest(
   signal?.addEventListener("abort", onAbort, { once: true });
   socket.once("close", cleanup);
   const reader = new SocketReader(socket);
+  let stage: "authentication" | "operation" = "authentication";
   try {
     const challengeMessage = await reader.readFrame();
     if (!exactObject(challengeMessage, ["type", "challenge"]) ||
@@ -278,6 +284,7 @@ async function authenticatedRequest(
       type: "request", version: PROTOCOL_VERSION, credentialId: credential.id, requestId,
       operation, payload: payloadBytes.toString("base64"), hmac: tag.toString("hex"),
     }));
+    stage = "operation";
     const response = await reader.readFrame();
     const statuses: ResponseStatus[] = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed", "version-mismatch"];
     if (!exactObject(response, ["type", "version", "requestId", "status", "payload", "hmac"]) ||
@@ -311,6 +318,9 @@ async function authenticatedRequest(
   } catch (error) {
     cleanup();
     socket.destroy();
+    if (error instanceof BridgeTransportError && stage === "authentication") {
+      throw new BridgeTransportError("authentication", { cause: error });
+    }
     throw error;
   }
 }
@@ -456,6 +466,26 @@ async function streamLevels(
   }
 }
 
+function lifecycleFailure(reason: unknown): RecorderError {
+  const codes = {
+    sleep: "bridge-sleep",
+    logout: "bridge-logout",
+    reboot: "bridge-reboot",
+    "session-lock": "bridge-session-lock",
+    "companion-stop": "bridge-companion-stopped",
+    "companion-restart": "bridge-companion-restarted",
+    "device-loss": "bridge-device-lost",
+  } as const;
+  const code = typeof reason === "string" ? codes[reason as keyof typeof codes] : undefined;
+  return new RecorderError(code ?? "recording-failed");
+}
+
+function connectionUnavailable(error: unknown): boolean {
+  if (error instanceof BridgeTransportError && error.stage === "authentication") return true;
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+  return ["ECONNREFUSED", "ENOENT", "EHOSTUNREACH", "ENETUNREACH"].includes(code);
+}
+
 function safeError(error: unknown): RecorderError {
   if (error instanceof RecorderError) return error;
   if (error instanceof BridgeOutcomeUnknownError) return new RecorderError("outcome-unknown", { cause: error });
@@ -515,6 +545,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
         try { startPayload = await requestJson(config, credential, "status", owned, options.signal); }
         catch (statusError) {
           if (statusError instanceof BridgeResponseError && statusError.status === "not-found") throw safeError(error);
+          if (connectionUnavailable(error) && connectionUnavailable(statusError)) {
+            throw new RecorderError("recorder-unavailable");
+          }
           throw safeError(new BridgeOutcomeUnknownError(undefined, { cause: statusError }));
         }
       }
@@ -526,7 +559,8 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const startIsResultReady = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
         startShape?.state === "result-ready" && Number.isSafeInteger(startShape.length) && Number(startShape.length) >= 44 &&
         Number(startShape.length) <= maximumBytes && typeof startShape.sha256 === "string" &&
-        /^[0-9a-f]{64}$/.test(startShape.sha256) && ["stopped", "duration-limit"].includes(String(startShape.completion));
+        /^[0-9a-f]{64}$/.test(startShape.sha256) &&
+        ["stopped", "duration-limit", "owner-liveness-loss"].includes(String(startShape.completion));
       if (startShape?.recordingId !== recordingId || (!startIsActive && !startIsResultReady)) {
         throw new RecorderError("recording-failed");
       }
@@ -540,7 +574,30 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       let acknowledged = false;
       const stopController = new AbortController();
       const levelController = new AbortController();
+      const livenessController = new AbortController();
       void streamLevels(config, credential, owned, levelController.signal, options.onLevel);
+      void (async () => {
+        let nextProofAt = recordingStartedAt + OWNER_LIVENESS_INTERVAL_MS;
+        while (!livenessController.signal.aborted) {
+          try { await abortableDelay(Math.max(0, nextProofAt - Date.now()), livenessController.signal); }
+          catch { return; }
+          if (livenessController.signal.aborted || state !== "active") return;
+          try {
+            const status = await requestJson(config, credential, "status", owned, livenessController.signal);
+            if (!status || typeof status !== "object" || Array.isArray(status) ||
+                (status as Record<string, unknown>).recordingId !== recordingId) return;
+            if ((status as Record<string, unknown>).state !== "recording") {
+              levelController.abort();
+              return;
+            }
+          } catch {
+            // Missing proofs are intentionally not retried here: the companion's independent
+            // fifteen-second owner-liveness deadline remains the source of truth.
+          }
+          do { nextProofAt += OWNER_LIVENESS_INTERVAL_MS; }
+          while (nextProofAt <= Date.now());
+        }
+      })();
 
       const partial = `${options.destination}.partial-${randomUUID()}`;
       const ensureNotCancelled = () => {
@@ -550,9 +607,10 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
         if (stopPromise) return stopPromise;
         if (Date.now() >= piDurationDeadline) durationReached = true;
         state = "stopping";
+        livenessController.abort();
         levelController.abort();
         stopPromise = (async () => {
-          let resultCompletion: "stopped" | "duration-limit" = "stopped";
+          let resultCompletion: "stopped" | "duration-limit" | "owner-liveness-loss" = "stopped";
           try {
             ensureNotCancelled();
             const finalizationDeadline = Date.now() + FINALIZATION_TIMEOUT_MS;
@@ -585,9 +643,10 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
               }
               const statusShape = status as Record<string, unknown>;
               const validKeys = exactObject(status, ["recordingId", "state"]) ||
+                exactObject(status, ["recordingId", "state", "reason"]) ||
                 exactObject(status, ["recordingId", "state", "length", "sha256", "completion"]);
               if (!validKeys || statusShape.recordingId !== recordingId) throw new BridgeProtocolError();
-              if (statusShape.state === "failed") throw new RecorderError("recording-failed");
+              if (statusShape.state === "failed") throw lifecycleFailure(statusShape.reason);
               if (statusShape.state === "cancelled") throw new RecorderError("cancelled");
               if (statusShape.state === "result-ready") break;
               if (!["recording", "finalizing"].includes(String(statusShape.state))) throw new RecorderError("recording-failed");
@@ -595,7 +654,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
             }
             clearTimeout(finalizationTimer);
             const statusShape = status as Record<string, unknown>;
-            if (statusShape.completion === "duration-limit") resultCompletion = "duration-limit";
+            if (["duration-limit", "owner-liveness-loss"].includes(String(statusShape.completion))) {
+              resultCompletion = statusShape.completion as "duration-limit" | "owner-liveness-loss";
+            }
 
             const fetchRequestId = randomUUID();
             const recoveryDeadline = Date.now() + RECOVERY_WINDOW_MS;
@@ -621,10 +682,12 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                     !exactObject(metadata, ["recordingId", "length", "sha256", "completion"]) || metadata.recordingId !== recordingId ||
                     !Number.isSafeInteger(metadata.length) || Number(metadata.length) < 44 || Number(metadata.length) > maximumBytes ||
                     typeof metadata.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(metadata.sha256) ||
-                    !["stopped", "duration-limit"].includes(String(metadata.completion)) ||
+                    !["stopped", "duration-limit", "owner-liveness-loss"].includes(String(metadata.completion)) ||
                     metadata.length !== statusShape.length || metadata.sha256 !== statusShape.sha256 ||
                     metadata.completion !== statusShape.completion) throw new BridgeAudioError();
-                if (metadata.completion === "duration-limit") resultCompletion = "duration-limit";
+                if (["duration-limit", "owner-liveness-loss"].includes(String(metadata.completion))) {
+                  resultCompletion = metadata.completion as "duration-limit" | "owner-liveness-loss";
+                }
                 handle = await localFileOperation(() => open(partial, "wx", 0o600));
                 const digest = createHash("sha256");
                 let remaining = Number(metadata.length);
@@ -655,10 +718,12 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                   const recoveryStatus = await requestJson(config, credential, "status", owned, recoverySignal);
                   const recoveryShape = recoveryStatus as Record<string, unknown>;
                   const recoveryKeys = exactObject(recoveryStatus, ["recordingId", "state"]) ||
+                    exactObject(recoveryStatus, ["recordingId", "state", "reason"]) ||
                     exactObject(recoveryStatus, ["recordingId", "state", "length", "sha256", "completion"]);
                   if (!recoveryKeys || recoveryShape.recordingId !== recordingId) throw new BridgeProtocolError();
                   if (recoveryShape.state !== "result-ready") {
-                    if (["failed", "expired", "cancelled", "acknowledged"].includes(String(recoveryShape.state))) {
+                    if (recoveryShape.state === "failed") throw lifecycleFailure(recoveryShape.reason);
+                    if (["expired", "cancelled", "acknowledged"].includes(String(recoveryShape.state))) {
                       throw new RecorderError("recording-failed");
                     }
                     throw new BridgeProtocolError();
@@ -691,6 +756,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
             if (durationReached || resultCompletion === "duration-limit") {
               throw new RecorderError("duration-limit-reached");
             }
+            if (resultCompletion === "owner-liveness-loss") {
+              throw new RecorderError("bridge-owner-liveness-lost");
+            }
             await rename(partial, options.destination);
             ensureNotCancelled();
             state = "stopped";
@@ -715,6 +783,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const cancelRemotely = async (): Promise<void> => {
         cancellationRequested = true;
         state = "cancelling";
+        livenessController.abort();
         levelController.abort();
         clearTimeout(durationTimer);
         stopController.abort();

@@ -48,6 +48,14 @@ export type Recorder = {
 };
 
 export type RecorderErrorCode =
+  | "bridge-companion-restarted"
+  | "bridge-companion-stopped"
+  | "bridge-device-lost"
+  | "bridge-logout"
+  | "bridge-owner-liveness-lost"
+  | "bridge-reboot"
+  | "bridge-session-lock"
+  | "bridge-sleep"
   | "cancelled"
   | "cancellation-unconfirmed"
   | "duration-limit-reached"
@@ -58,6 +66,14 @@ export type RecorderErrorCode =
   | "recording-failed";
 
 const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
+  "bridge-companion-restarted": "Recording stopped because the Bridge companion restarted.",
+  "bridge-companion-stopped": "Recording stopped because the Bridge companion terminated.",
+  "bridge-device-lost": "Recording stopped because the default input device was lost.",
+  "bridge-logout": "Recording stopped because the Mac login session ended.",
+  "bridge-owner-liveness-lost": "Recording stopped because owner liveness was lost.",
+  "bridge-reboot": "Recording stopped because the Mac rebooted.",
+  "bridge-session-lock": "Recording stopped because the Mac session locked.",
+  "bridge-sleep": "Recording stopped because the Mac slept.",
   cancelled: "Recording was cancelled.",
   "cancellation-unconfirmed": "Cancellation could not be confirmed within five seconds; the recording owner may remain live on the companion.",
   "duration-limit-reached": "Recording reached the maximum duration.",

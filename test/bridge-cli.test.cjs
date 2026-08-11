@@ -19,6 +19,7 @@ const { test } = require("node:test");
 
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
+const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -112,6 +113,60 @@ test("package exposes the unified Pi Dictation CLI and native companion source",
   await t.test("ships native companion files", () => {
     assert.ok(manifest.files.includes("native"));
   });
+  await t.test("maps the packaged real-device certification command", () => {
+    assert.equal(manifest.bin?.["pi-dictation-bridge-certify"], "bin/pi-dictation-bridge-certify.cjs");
+  });
+});
+
+test("packaged real-device certification lists every required gate scenario without repository fixtures", async (t) => {
+  const result = spawnSync(process.execPath, [certificationPath, "list", "--json"], {
+    cwd: packageRoot, encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  const output = JSON.parse(result.stdout);
+  await t.test("lists every recurring and lifecycle scenario", () => {
+    assert.deepEqual(output.scenarios.map(({ name }) => name), [
+      "bridge-level-transcription", "bridge-cancellation", "bridge-duration-limit", "bridge-tunnel-reconnect",
+      "bridge-single-lease", "local-recording", "clean-user-tarball", "sleep", "logout", "reboot", "session-lock",
+      "companion-stop", "companion-restart", "device-loss",
+    ]);
+  });
+  await t.test("declares the exact production protocol version", () => {
+    assert.equal(output.protocolVersion, 3);
+  });
+  await t.test("automates cancellation, duration, and arbitration without human actions", () => {
+    assert.deepEqual(output.scenarios.filter(({ requiresHumanAction }) => !requiresHumanAction).map(({ name }) => name), [
+      "bridge-cancellation", "bridge-duration-limit", "bridge-single-lease",
+    ]);
+  });
+  await t.test("requires two independently configured hosts for arbitration", () => {
+    assert.equal(output.scenarios.find(({ name }) => name === "bridge-single-lease").requiredHostAliases, 2);
+  });
+  await t.test("enumerates every clean-user actual-tarball certification stage", () => {
+    assert.deepEqual(output.scenarios.find(({ name }) => name === "clean-user-tarball").stages, [
+      "tarball-install", "real-audio-preflight", "idempotent-install", "human-diagnosis", "json-diagnosis",
+      "bridge-recording", "upgrade", "credential-rotation", "uninstall", "external-artifact-preservation",
+    ]);
+  });
+  await t.test("declares tunnel-loss termination at the fifteen-second owner-liveness bound", () => {
+    assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").livenessBoundMilliseconds, 15000);
+  });
+  await t.test("declares authenticated remote health as the reconnect proof", () => {
+    assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").reconnectValidation, "authenticated-remote-health");
+  });
+  await t.test("bounds each certification protocol control connection and destroys it in finally", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("connection.setTimeout(controlDeadlineMilliseconds") && source.includes("finally {\n    connection.destroy();"), true);
+  });
+  await t.test("requires a distinct predecessor before upgrading to the candidate tarball", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('certificationCommand("npm", ["install", "--global", predecessor]') &&
+      source.includes("packagedPiCommand(state.predecessor") &&
+      source.includes("state.predecessorSha256 === state.tarballSha256"), true);
+  });
+  await t.test("does not import a repository test fixture", () => {
+    assert.equal(readFileSync(certificationPath, "utf8").includes("test/fixtures"), false);
+  });
 });
 
 test("bridge build stops before creating output when Swift is unavailable", async (t) => {
@@ -173,8 +228,11 @@ test("bridge build creates a fixed hidden native app bundle", async (t) => {
     await t.test("is hidden from ordinary app UI", () => {
       assert.match(info, /<key>LSUIElement<\/key>\s*<true\/>/);
     });
-    await t.test("contains an executable", () => {
+    await t.test("contains the companion executable", () => {
       assert.equal(lstatSync(join(output, "Contents", "MacOS", "PiDictationBridge")).isFile(), true);
+    });
+    await t.test("contains the independent duration watchdog executable", () => {
+      assert.equal(lstatSync(join(output, "Contents", "MacOS", "PiDictationDurationWatchdog")).isFile(), true);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -568,7 +626,13 @@ test("the npm tarball includes the bridge CLI and companion source", async (t) =
   await t.test("includes the unified CLI", () => {
     assert.ok(files.includes("bin/pi-dictation.mjs"));
   });
-  await t.test("includes the Swift source", () => {
+  await t.test("includes the self-contained real-device certification command", () => {
+    assert.ok(files.includes("bin/pi-dictation-bridge-certify.cjs"));
+  });
+  await t.test("includes the companion Swift source", () => {
     assert.ok(files.includes("native/macos-companion/PiDictationBridge.swift"));
+  });
+  await t.test("includes the least-privilege duration watchdog source", () => {
+    assert.ok(files.includes("native/macos-companion/PiDictationDurationWatchdog.swift"));
   });
 });

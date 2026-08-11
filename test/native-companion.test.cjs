@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
-const { mkdtempSync, rmSync, writeFileSync } = require("node:fs");
+const { once } = require("node:events");
+const { spawn, spawnSync } = require("node:child_process");
+const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
@@ -8,6 +9,108 @@ const { test } = require("node:test");
 const root = resolve(__dirname, "..");
 
 const macOnly = process.platform === "darwin" ? {} : { skip: "requires the macOS Swift toolchain" };
+
+test("production lifecycle wiring distinguishes logout from restart and shutdown", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-lifecycle-wiring-"));
+  const harness = join(directory, "LifecycleWiring.swift");
+  const executable = join(directory, "LifecycleWiring");
+  writeFileSync(harness, `
+import Foundation
+
+@main
+struct LifecycleWiring {
+    static func main() throws {
+        let values = ["logout", "restart", "shutdown"].map { ownerVisibleLifecycleReason(systemEvent: $0)! }
+        print(values.joined(separator: ","))
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(execution.stdout.trim(), "logout,reboot,reboot");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("production input wiring gives capture and device-loss observation the same selected device", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-device-wiring-"));
+  const harness = join(directory, "DeviceWiring.swift");
+  const executable = join(directory, "DeviceWiring");
+  writeFileSync(harness, `
+import Foundation
+
+final class Device {}
+
+@main
+struct DeviceWiring {
+    static func main() throws {
+        let selected = Device()
+        var capture: ObjectIdentifier?
+        var observation: ObjectIdentifier?
+        _ = try withPinnedDefaultInput(
+            select: { selected },
+            identity: { _ in "selected-device" },
+            observe: { observation = ObjectIdentifier($0) },
+            capture: { capture = ObjectIdentifier($0) }
+        )
+        print(capture == observation)
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(execution.stdout.trim(), "true");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("duration watchdog requests only its exact parent then force-terminates it after the grace bound", macOnly, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-watchdog-test-"));
+  const executable = join(directory, "PiDictationDurationWatchdog");
+  const marker = join(directory, "requested");
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "WATCHDOG_TESTING", "-parse-as-library",
+      join(root, "native", "macos-companion", "PiDictationDurationWatchdog.swift"),
+      "-o", executable,
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const token = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const target = spawn("/bin/sh", ["-c", `printf '%s\\n' '${token}' | ${executable} $$ 80 1500 > '${marker}' & while :; do sleep 1; done`], {
+      stdio: "ignore",
+    });
+    const [, signal] = await once(target, "exit");
+    await t.test("delivers the instance-bound termination request to its parent", () => {
+      assert.equal(readFileSync(marker, "utf8").trim(), token);
+    });
+    await t.test("force-terminates that still-running parent after the testing grace bound", () => {
+      assert.equal(signal, "SIGKILL");
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("duration watchdog receives its instance token only through its inherited private pipe", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationDurationWatchdog.swift"), "utf8");
+  assert.equal(source.includes("instanceToken = CommandLine.arguments"), false);
+});
 
 test("failed-state persistence failure keeps audio until durable cleanup can retry", macOnly, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-native-test-"));
@@ -45,7 +148,7 @@ struct FailureInjection {
       "-DPI_DICTATION_TESTING",
       join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
       "-o", executable,
-      "-framework", "AVFoundation", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
       "-framework", "CoreMedia", "-framework", "AudioToolbox",
     ], { encoding: "utf8" });
     if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);

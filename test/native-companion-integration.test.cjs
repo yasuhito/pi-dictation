@@ -8,6 +8,7 @@ const { capability, request, subscribeLevels } = require("./fixtures/bridge-prot
 
 const root = resolve(__dirname, "..");
 const source = join(root, "native", "macos-companion", "PiDictationBridge.swift");
+const watchdogSource = join(root, "native", "macos-companion", "PiDictationDurationWatchdog.swift");
 const product = "com.yasuhito.pi-dictation.bridge";
 const macOnly = { skip: process.platform !== "darwin" };
 
@@ -20,7 +21,7 @@ function privateJson(path, value) {
   chmodSync(path, 0o600);
 }
 
-async function nativeHarness(initialCrashPoint) {
+async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
   const home = mkdtempSync("/tmp/pdn-");
   const state = join(home, "state");
   const support = join(state, "root");
@@ -31,10 +32,13 @@ async function nativeHarness(initialCrashPoint) {
   mkdirSync(runtime, { recursive: true, mode: 0o700 });
   for (const path of [support, runtime, hosts]) chmodSync(path, 0o700);
   const compiled = spawnSync("swiftc", ["-parse-as-library", "-D", "PROTOCOL_TESTING", source, "-o", executable,
-    "-framework", "AVFoundation", "-framework", "CryptoKit", "-framework", "Security",
+    "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
     "-framework", "CoreMedia", "-framework", "AudioToolbox"], { encoding: "utf8" });
   if (compiled.status !== 0) throw new Error(compiled.stderr || compiled.stdout);
   chmodSync(executable, 0o700);
+  const watchdog = spawnSync("swiftc", ["-parse-as-library", watchdogSource, "-o", join(home, "PiDictationDurationWatchdog")], { encoding: "utf8" });
+  if (watchdog.status !== 0) throw new Error(watchdog.stderr || watchdog.stdout);
+  chmodSync(join(home, "PiDictationDurationWatchdog"), 0o700);
   const installId = randomUUID();
   privateJson(join(support, "ownership.json"), { product, installId });
   privateJson(join(support, "preflight.json"), {
@@ -58,6 +62,7 @@ async function nativeHarness(initialCrashPoint) {
       env: {
         ...process.env,
         PI_DICTATION_PROTOCOL_TEST_ROOT: state,
+        ...testEnvironment,
         ...(crashPoint ? { PI_DICTATION_PROTOCOL_TEST_CRASH: crashPoint } : {}),
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -81,9 +86,10 @@ async function nativeHarness(initialCrashPoint) {
     async restart(crashPoint) { await stop(); await launch(crashPoint); },
     stop,
     start: launch,
+    signal(value) { child.kill(value); },
     async startAndWaitForCrash(crashPoint) {
       child = spawn(executable, [], {
-        env: { ...process.env, PI_DICTATION_PROTOCOL_TEST_ROOT: state, PI_DICTATION_PROTOCOL_TEST_CRASH: crashPoint },
+        env: { ...process.env, PI_DICTATION_PROTOCOL_TEST_ROOT: state, ...testEnvironment, PI_DICTATION_PROTOCOL_TEST_CRASH: crashPoint },
         stdio: ["ignore", "ignore", "pipe"],
       });
       await new Promise((resolveWait) => child.once("exit", resolveWait));
@@ -104,6 +110,182 @@ async function nativeHarness(initialCrashPoint) {
 async function disconnects(promise) {
   return promise.then(() => false, () => true);
 }
+
+for (const lifecycle of [
+  { name: "sleep", signal: "SIGTSTP", restarts: false },
+  { name: "logout", signal: "SIGHUP", restarts: true },
+  { name: "reboot", signal: "SIGQUIT", restarts: true },
+  { name: "session-lock", signal: "SIGUSR2", restarts: false },
+  { name: "companion-stop", signal: "SIGTERM", restarts: true },
+  { name: "device-loss", signal: "SIGWINCH", restarts: false },
+]) {
+  test(`native lifecycle fault injection reports ${lifecycle.name} without retained audio`, macOnly, async (t) => {
+    const instance = await nativeHarness();
+    try {
+      const owner = instance.owners[0].credential;
+      const lease = capability();
+      await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+      instance.signal(lifecycle.signal);
+      if (lifecycle.restarts) {
+        await instance.waitForExit();
+        await instance.start();
+      } else {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+      }
+      const result = await request(instance.socket, owner, "status", lease);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      const afterRecoveryEvent = await request(instance.socket, owner, "status", lease);
+      const audioPath = join(instance.runtime, `recording-${lease.recordingId}.wav`);
+      await t.test("returns the distinct owner-visible failure reason", () => {
+        assert.equal(result.payload.reason, lifecycle.name);
+      });
+      await t.test("deletes incomplete captured audio", () => {
+        assert.equal(existsSync(audioPath), false);
+      });
+      await t.test("never resumes the interrupted Recording lease automatically", () => {
+        assert.equal(afterRecoveryEvent.payload.state, "failed");
+      });
+    } finally { await instance.cleanup(); }
+  });
+}
+
+test("capture initialization failure is attributable and leaves no audio", macOnly, async (t) => {
+  const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_FAIL_CAPTURE: "1" });
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    const started = await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    const result = await request(instance.socket, owner, "status", lease);
+    const audioPath = join(instance.runtime, `recording-${lease.recordingId}.wav`);
+    await t.test("rejects the failed start", () => {
+      assert.equal(started.status, "failed");
+    });
+    await t.test("reports capture-failure to the owner", () => {
+      assert.equal(result.payload.reason, "capture-failure");
+    });
+    await t.test("leaves no incomplete audio", () => {
+      assert.equal(existsSync(audioPath), false);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("abrupt companion restart is distinctly attributed and never resumes capture", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    instance.signal("SIGKILL");
+    await instance.waitForExit();
+    await instance.start();
+    const result = await request(instance.socket, owner, "status", lease);
+    const audioPath = join(instance.runtime, `recording-${lease.recordingId}.wav`);
+    await t.test("reports companion-restart distinctly", () => {
+      assert.equal(result.payload.reason, "companion-restart");
+    });
+    await t.test("deletes interrupted audio during restart recovery", () => {
+      assert.equal(existsSync(audioPath), false);
+    });
+    await t.test("keeps the interrupted lease terminal", () => {
+      assert.equal(result.payload.state, "failed");
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("production companion launches its instance-bound watchdog on the capture deadline", macOnly, async (t) => {
+  const instance = await nativeHarness(undefined, {
+    PI_DICTATION_PROTOCOL_TEST_USE_WATCHDOG: "1",
+    PI_DICTATION_PROTOCOL_TEST_POST_CAPTURE_DELAY_MS: "350",
+  });
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    const startedAt = Date.now();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 1000 });
+    let result;
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      result = await request(instance.socket, owner, "status", lease);
+      if (result.payload.state === "result-ready") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const elapsed = Date.now() - startedAt;
+    const health = await request(instance.socket, owner, "health", {});
+    await t.test("enforces duration relative to capture start rather than helper launch", () => {
+      assert.equal(elapsed >= 900 && elapsed < 1250, true);
+    });
+    await t.test("routes the instance-token request through normal duration finalization", () => {
+      assert.equal(result.payload.completion, "duration-limit");
+    });
+    await t.test("terminates the acknowledged helper without killing the companion", () => {
+      assert.equal(health.status, "ok");
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("native companion enforces authenticated owner liveness independently", macOnly, async (t) => {
+  const instance = await nativeHarness(undefined, {
+    PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS: "100",
+    PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "300",
+    PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS: "300",
+  });
+  try {
+    const owner = instance.owners[0].credential;
+    const terminalResultWithoutProof = async (lease) => {
+      let terminalObservedAt;
+      const terminalDeadline = Date.now() + 1500;
+      while (Date.now() < terminalDeadline) {
+        const observation = await request(instance.socket, owner, "levels", { ...lease, afterSequence: -1 });
+        if (observation.status === "invalid-state") {
+          terminalObservedAt = Date.now();
+          break;
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      let result;
+      const resultDeadline = Date.now() + 1500;
+      while (Date.now() < resultDeadline) {
+        result = await request(instance.socket, owner, "status", lease);
+        if (result.payload.state === "result-ready") break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      return { result, terminalObservedAt };
+    };
+
+    const abandoned = capability();
+    await request(instance.socket, owner, "start", { ...abandoned, maxDurationMs: 10000 });
+    const { result: lost } = await terminalResultWithoutProof(abandoned);
+    const retainedPath = join(instance.runtime, `recording-${abandoned.recordingId}.wav`);
+
+    const live = capability();
+    await request(instance.socket, owner, "start", { ...live, maxDurationMs: 10000 });
+    await request(instance.socket, owner, "status", live);
+    const proofAt = Date.now();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 160));
+    const afterOriginalDeadline = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
+    const { result: refreshed, terminalObservedAt } = await terminalResultWithoutProof(live);
+    const elapsedFromProof = terminalObservedAt === undefined ? Number.POSITIVE_INFINITY : terminalObservedAt - proofAt;
+
+    await t.test("ends capture after the owner-proof deadline", () => {
+      assert.equal(lost.payload.state, "result-ready");
+    });
+    await t.test("records owner-liveness loss instead of normal success", () => {
+      assert.equal(lost.payload.completion, "owner-liveness-loss");
+    });
+    await t.test("retains the finalized WAV under normal retention", () => {
+      assert.equal(existsSync(retainedPath), true);
+    });
+    await t.test("reschedules exact expiry from the most recent owner proof", () => {
+      assert.equal(afterOriginalDeadline.status, "ok");
+    });
+    await t.test("records owner-liveness loss after the refreshed proof expires", () => {
+      assert.equal(refreshed?.payload.completion, "owner-liveness-loss");
+    });
+    await t.test("does not overshoot the refreshed owner-liveness bound by a polling interval", () => {
+      assert.equal(elapsedFromProof >= 280 && elapsedFromProof < 390, true);
+    });
+  } finally { await instance.cleanup(); }
+});
 
 test("native companion streams capture-time RMS from recorded PCM", macOnly, async (t) => {
   const instance = await nativeHarness();

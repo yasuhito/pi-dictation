@@ -5,6 +5,7 @@ import Security
 import Darwin
 import CoreMedia
 import AudioToolbox
+import AppKit
 
 private let productIdentifier = "com.yasuhito.pi-dictation.bridge"
 private let protocolVersion = 3
@@ -13,6 +14,13 @@ private let challengeBytes = 32
 private let unknownCredentialSecret = Data(repeating: 0, count: 32).base64EncodedString()
 private let resultRetentionSeconds: TimeInterval = 10 * 60
 private let requestReceiptRetentionSeconds = resultRetentionSeconds
+#if PROTOCOL_TESTING
+private let ownerLivenessSeconds: TimeInterval = max(0.1, (Double(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS"] ?? "") ?? 15_000) / 1000)
+private let initialOwnerLivenessSeconds: TimeInterval = max(0.05, (Double(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS"] ?? "") ?? ownerLivenessSeconds * 1000) / 1000)
+#else
+private let ownerLivenessSeconds: TimeInterval = 15
+private let initialOwnerLivenessSeconds: TimeInterval = ownerLivenessSeconds
+#endif
 private let levelIntervalMilliseconds = 50
 private let levelReplaySlots = 600
 private let levelSubscriberQueueLimit = 64
@@ -586,6 +594,7 @@ private struct PersistedRecording: Codable {
     var length: Int?
     var sha256: String?
     var completion: String?
+    var failureReason: String?
     var terminalAt: TimeInterval?
 }
 
@@ -795,7 +804,9 @@ private final class BridgeRecording {
     var length: Int?
     var sha256: String?
     var completion: String
+    var failureReason: String?
     var terminalAt: TimeInterval?
+    var lastOwnerProofUptimeNanoseconds: UInt64
     var observations: [[String: Any]] = []
     var sequence = 0
     let levelReader: PcmLevelReader
@@ -803,11 +814,17 @@ private final class BridgeRecording {
     var levelSubscriber: LevelSubscriber?
     var levelTimer: DispatchSourceTimer?
     var durationTimer: DispatchWorkItem?
+    var durationWatchdog: Process?
+    var durationWatchdogRequests: Pipe?
+    var durationWatchdogRequestData = Data()
+    var captureStartedAtUptimeNanoseconds: UInt64?
+    var ownerLivenessTimer: DispatchSourceTimer?
     var retentionTimer: DispatchWorkItem?
+    var deviceObserver: NSObjectProtocol?
 
     init(id: String, ownerId: String, leaseHash: Data, url: URL, state: String = "recording",
          length: Int? = nil, sha256: String? = nil, completion: String = "stopped",
-         terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
+         failureReason: String? = nil, terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.leaseHash = leaseHash
@@ -816,7 +833,9 @@ private final class BridgeRecording {
         self.length = length
         self.sha256 = sha256
         self.completion = completion
+        self.failureReason = failureReason
         self.terminalAt = terminalAt
+        self.lastOwnerProofUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         self.recorder = recorder
         self.levelReader = PcmLevelReader(url: url)
     }
@@ -842,6 +861,19 @@ private func protocolTestingWav() -> Data {
     return Data(bytes)
 }
 #endif
+
+func withPinnedDefaultInput<Device: AnyObject>(
+    select: () -> Device?,
+    identity: (Device) -> String,
+    observe: (Device) -> Void,
+    capture: (Device) throws -> Void
+) throws -> String {
+    guard let selected = select() else { throw CompanionFailure.failed }
+    let selectedIdentity = identity(selected)
+    observe(selected)
+    try capture(selected)
+    return selectedIdentity
+}
 
 func initializeCapture(
     attempt: () throws -> Void,
@@ -874,6 +906,7 @@ func commitFailedRecordingState(
 private final class RecordingManager {
     private let runtime: String
     private let lock = NSCondition()
+    private let ownerLivenessQueue = DispatchQueue(label: "com.yasuhito.pi-dictation.bridge.owner-liveness", qos: .userInitiated)
     private var recordings: [String: BridgeRecording] = [:]
     private var activeId: String?
     private var requests: [String: PersistedRequestReceipt] = [:]
@@ -1062,8 +1095,85 @@ private final class RecordingManager {
         return effects
     }
 
+    private func stopDurationWatchdogLocked(_ current: BridgeRecording) {
+        current.durationTimer?.cancel()
+        current.durationTimer = nil
+        current.durationWatchdogRequests?.fileHandleForReading.readabilityHandler = nil
+        try? current.durationWatchdogRequests?.fileHandleForReading.close()
+        current.durationWatchdogRequests = nil
+        if let watchdog = current.durationWatchdog {
+            if watchdog.isRunning { watchdog.terminate() }
+            current.durationWatchdog = nil
+        }
+    }
+
+    private func startDurationWatchdogLocked(_ current: BridgeRecording, deadlineUptimeNanoseconds: UInt64) throws {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remainingMilliseconds = max(1, Int((deadlineUptimeNanoseconds > now ? deadlineUptimeNanoseconds - now : 0) / 1_000_000))
+#if PROTOCOL_TESTING
+        if ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_USE_WATCHDOG"] != "1" {
+            let expiry = DispatchWorkItem { [weak self, weak current] in
+                guard let self, let current else { return }
+                self.finalize(current, completion: "duration-limit")
+            }
+            current.durationTimer = expiry
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(remainingMilliseconds), execute: expiry)
+            return
+        }
+#endif
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+            .appendingPathComponent("PiDictationDurationWatchdog")
+        var info = stat()
+        guard lstat(executable.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), (info.st_mode & 0o777) == 0o700,
+              info.st_nlink == 1 else { throw CompanionFailure.unsafeStorage }
+        let token = UUID().uuidString.lowercased()
+        let parentProof = Pipe()
+        let requests = Pipe()
+        let watchdog = Process()
+        watchdog.executableURL = executable
+        watchdog.arguments = [String(getpid()), String(remainingMilliseconds)]
+        watchdog.environment = [:]
+        watchdog.currentDirectoryURL = URL(fileURLWithPath: "/")
+        watchdog.standardInput = parentProof
+        watchdog.standardOutput = requests
+        watchdog.standardError = nil
+        requests.fileHandleForReading.readabilityHandler = { [weak self, weak current] handle in
+            guard let self, let current else { return }
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            current.durationWatchdogRequestData.append(data)
+            guard current.durationWatchdogRequestData.count <= 64,
+                  current.durationWatchdogRequestData.last == 0x0a else { return }
+            let value = String(decoding: current.durationWatchdogRequestData.dropLast(), as: UTF8.self)
+            guard value == token else { return }
+            handle.readabilityHandler = nil
+            self.finalize(current, completion: "duration-limit")
+        }
+        try watchdog.run()
+        current.durationWatchdogRequests = requests
+        current.durationWatchdog = watchdog
+        do {
+            try parentProof.fileHandleForWriting.write(contentsOf: Data((token + "\n").utf8))
+            try parentProof.fileHandleForWriting.close()
+        } catch {
+            stopDurationWatchdogLocked(current)
+            throw error
+        }
+    }
+
+    private func removeDeviceObserverLocked(_ current: BridgeRecording) {
+        if let observer = current.deviceObserver {
+            NotificationCenter.default.removeObserver(observer)
+            current.deviceObserver = nil
+        }
+    }
+
     private func cleanupRevokedRecordingLocked(_ current: BridgeRecording) throws {
-        current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
+        stopDurationWatchdogLocked(current); current.ownerLivenessTimer?.cancel()
+        removeDeviceObserverLocked(current)
+        current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         current.levelSubscriber?.close(); current.levelSubscriber = nil
         current.recorder?.stop(); current.recorder = nil
         try removeAudioLocked(current)
@@ -1128,8 +1238,7 @@ private final class RecordingManager {
         guard maximumDurationMs >= 1000,
               maximumDurationMs <= 60 * 60 * 1000 else { throw CompanionFailure.failed }
 #if !PROTOCOL_TESTING
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
-              AVCaptureDevice.default(for: .audio) != nil else { throw CompanionFailure.failed }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CompanionFailure.failed }
 #endif
         let maximumBytes = Int64(maximumDurationMs) * 32 + Int64(maximumFrameBytes)
         let capacity = try URL(fileURLWithPath: runtime).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
@@ -1152,23 +1261,65 @@ private final class RecordingManager {
         try initializeCapture(
             attempt: {
 #if PROTOCOL_TESTING
-                guard FileManager.default.createFile(atPath: url.path, contents: protocolTestingWav()),
-                      chmod(url.path, S_IRUSR | S_IWUSR) == 0 else { throw CompanionFailure.failed }
-#else
-                let settings: [String: Any] = [
-                    AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
-                    AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
-                    AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
-                ]
-                let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
-                guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0, audioRecorder.record() else {
+                if ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FAIL_CAPTURE"] == "1" {
                     throw CompanionFailure.failed
                 }
-                current.recorder = audioRecorder
+                guard FileManager.default.createFile(atPath: url.path, contents: protocolTestingWav()),
+                      chmod(url.path, S_IRUSR | S_IWUSR) == 0 else { throw CompanionFailure.failed }
+                current.captureStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+#else
+                _ = try withPinnedDefaultInput(
+                    select: { AVCaptureDevice.default(for: .audio) },
+                    identity: { $0.uniqueID },
+                    observe: { pinnedDevice in
+                        current.deviceObserver = NotificationCenter.default.addObserver(
+                            forName: AVCaptureDevice.wasDisconnectedNotification,
+                            object: pinnedDevice,
+                            queue: nil
+                        ) { [weak self, weak current] _ in
+                            guard let self, let current else { return }
+                            self.failIfActive(current, reason: "device-loss")
+                        }
+                    },
+                    capture: { pinnedDevice in
+                        let settings: [String: Any] = [
+                            AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
+                            AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                            AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+                        ]
+                        guard AVCaptureDevice.default(for: .audio)?.uniqueID == pinnedDevice.uniqueID else {
+                            throw CompanionFailure.failed
+                        }
+                        let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
+                        guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0,
+                              audioRecorder.record(),
+                              AVCaptureDevice.default(for: .audio)?.uniqueID == pinnedDevice.uniqueID else {
+                            throw CompanionFailure.failed
+                        }
+                        current.recorder = audioRecorder
+                        current.captureStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                    }
+                )
 #endif
             },
             onFailure: { self.failLocked(current) }
         )
+        guard let captureStartedAt = current.captureStartedAtUptimeNanoseconds else {
+            failLocked(current)
+            throw CompanionFailure.failed
+        }
+#if PROTOCOL_TESTING
+        if let delayText = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_POST_CAPTURE_DELAY_MS"],
+           let delay = UInt32(delayText), delay > 0 {
+            usleep(delay * 1_000)
+        }
+#endif
+        let durationDeadline = captureStartedAt + UInt64(maximumDurationMs) * 1_000_000
+        do { try startDurationWatchdogLocked(current, deadlineUptimeNanoseconds: durationDeadline) }
+        catch {
+            failLocked(current)
+            throw error
+        }
 
         let levels = DispatchSource.makeTimerSource(queue: .global())
         levels.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
@@ -1178,13 +1329,61 @@ private final class RecordingManager {
         }
         current.levelTimer = levels
         levels.resume()
-        let expiry = DispatchWorkItem { [weak self, weak current] in
+        current.lastOwnerProofUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let liveness = DispatchSource.makeTimerSource(queue: ownerLivenessQueue)
+        liveness.setEventHandler { [weak self, weak current] in
             guard let self, let current else { return }
-            self.finalize(current, completion: "duration-limit")
+            self.enforceOwnerLiveness(current)
         }
-        current.durationTimer = expiry
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(maximumDurationMs), execute: expiry)
+        current.ownerLivenessTimer = liveness
+        scheduleOwnerLivenessExpiryLocked(current, after: initialOwnerLivenessSeconds)
+        liveness.resume()
         return statusPayload(current)
+    }
+
+    func enforceDurationLimit() {
+        lock.lock()
+        let current = activeId.flatMap { recordings[$0] }
+        lock.unlock()
+        if let current { finalize(current, completion: "duration-limit") }
+    }
+
+    func failActive(reason: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let activeId, let current = recordings[activeId], current.state == "recording" else { return }
+        failLocked(current, reason: reason)
+    }
+
+    private func failIfActive(_ current: BridgeRecording, reason: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard current.state == "recording", activeId == current.id else { return }
+        failLocked(current, reason: reason)
+    }
+
+    private func scheduleOwnerLivenessExpiryLocked(_ current: BridgeRecording, after seconds: TimeInterval = ownerLivenessSeconds) {
+        current.ownerLivenessTimer?.schedule(deadline: .now() + seconds)
+    }
+
+    private func enforceOwnerLiveness(_ current: BridgeRecording) {
+        lock.lock()
+        guard current.state == "recording", activeId == current.id else {
+            lock.unlock()
+            return
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsedNanoseconds = now >= current.lastOwnerProofUptimeNanoseconds
+            ? now - current.lastOwnerProofUptimeNanoseconds : UInt64.max
+        let deadlineNanoseconds = UInt64(ownerLivenessSeconds * 1_000_000_000)
+        if elapsedNanoseconds < deadlineNanoseconds {
+            let remaining = Double(deadlineNanoseconds - elapsedNanoseconds) / 1_000_000_000
+            current.ownerLivenessTimer?.schedule(deadline: .now() + remaining)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        finalize(current, completion: "owner-liveness-loss")
     }
 
     private func captureLevel(_ current: BridgeRecording) {
@@ -1257,7 +1456,12 @@ private final class RecordingManager {
     func status(id: String, ownerId: String, leaseSecret: Data) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        return statusPayload(try owned(id: id, ownerId: ownerId, leaseSecret: leaseSecret))
+        let current = try owned(id: id, ownerId: ownerId, leaseSecret: leaseSecret)
+        if current.state == "recording" {
+            current.lastOwnerProofUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+            scheduleOwnerLivenessExpiryLocked(current)
+        }
+        return statusPayload(current)
     }
 
     func stop(id: String, ownerId: String, leaseSecret: Data) throws -> [String: Any] {
@@ -1308,7 +1512,9 @@ private final class RecordingManager {
         guard ["recording", "finalizing", "result-ready"].contains(current.state) else { throw CompanionFailure.invalidState }
         let terminalAt = Date().timeIntervalSince1970
         try persistTransitionLocked(current, state: "cancelled", terminalAt: terminalAt)
-        current.durationTimer?.cancel(); current.retentionTimer?.cancel(); current.levelTimer?.cancel()
+        stopDurationWatchdogLocked(current); current.ownerLivenessTimer?.cancel()
+        current.retentionTimer?.cancel(); current.levelTimer?.cancel()
+        removeDeviceObserverLocked(current)
         current.recorder?.stop()
         current.recorder = nil
         current.levelSubscriber?.enqueue(["type": "terminal", "state": "cancelled"])
@@ -1365,6 +1571,8 @@ private final class RecordingManager {
         var payload: [String: Any] = ["recordingId": current.id, "state": current.state]
         if current.state == "result-ready", let length = current.length, let sha256 = current.sha256 {
             payload["length"] = length; payload["sha256"] = sha256; payload["completion"] = current.completion
+        } else if current.state == "failed", let reason = current.failureReason {
+            payload["reason"] = reason
         }
         return payload
     }
@@ -1384,7 +1592,8 @@ private final class RecordingManager {
 
     private func beginFinalizationLocked(_ current: BridgeRecording, completion: String) throws {
         current.completion = completion
-        current.durationTimer?.cancel(); current.levelTimer?.cancel()
+        stopDurationWatchdogLocked(current); current.ownerLivenessTimer?.cancel(); current.levelTimer?.cancel()
+        removeDeviceObserverLocked(current)
         current.recorder?.stop()
         current.recorder = nil
         current.state = "finalizing"
@@ -1392,6 +1601,12 @@ private final class RecordingManager {
     }
 
     private func completeFinalization(_ current: BridgeRecording) {
+#if PROTOCOL_TESTING
+        if let delayText = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS"],
+           let delay = UInt32(delayText), delay > 0 {
+            usleep(delay * 1_000)
+        }
+#endif
         current.levelReaderLock.lock()
         lock.lock()
         let startingSequence = current.sequence
@@ -1437,13 +1652,15 @@ private final class RecordingManager {
         scheduleRetentionLocked(current)
     }
 
-    private func failLocked(_ current: BridgeRecording) {
-        current.durationTimer?.cancel(); current.levelTimer?.cancel()
+    private func failLocked(_ current: BridgeRecording, reason: String = "capture-failure") {
+        stopDurationWatchdogLocked(current); current.ownerLivenessTimer?.cancel(); current.levelTimer?.cancel()
+        removeDeviceObserverLocked(current)
         current.recorder?.stop()
         current.recorder = nil
         current.levelSubscriber?.enqueue(["type": "terminal", "state": "failed"])
         current.levelSubscriber = nil
         current.state = "failed"; current.length = nil; current.sha256 = nil
+        current.failureReason = reason
         current.terminalAt = Date().timeIntervalSince1970
         if activeId == current.id { activeId = nil }
         let committed = commitFailedRecordingState(
@@ -1603,6 +1820,7 @@ private final class RecordingManager {
             leaseHash: current.leaseHash.base64EncodedString(), state: current.state,
             length: current.length, sha256: current.sha256,
             completion: ["recording", "finalizing", "result-ready"].contains(current.state) ? current.completion : nil,
+            failureReason: current.state == "failed" ? current.failureReason : nil,
             terminalAt: current.terminalAt
         )
     }
@@ -1611,7 +1829,7 @@ private final class RecordingManager {
         let value = PersistedRecording(
             schemaVersion: 1, id: current.id, ownerId: current.ownerId,
             leaseHash: current.leaseHash.base64EncodedString(), state: state,
-            length: nil, sha256: nil, completion: nil, terminalAt: terminalAt
+            length: nil, sha256: nil, completion: nil, failureReason: nil, terminalAt: terminalAt
         )
         try persistLocked(value, id: current.id)
     }
@@ -1733,18 +1951,22 @@ private final class RecordingManager {
             let path = runtime + "/" + name
             let data = try readPrivateData(path, maximumBytes: maximumFrameBytes)
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "state", "length", "sha256", "completion", "terminalAt"]).isSuperset(of: Set(object.keys)),
+                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
                   Set(["schemaVersion", "id", "ownerId", "leaseHash", "state"]).isSubset(of: Set(object.keys)) else {
                 throw CompanionFailure.unsafeStorage
             }
             let persisted = try JSONDecoder().decode(PersistedRecording.self, from: data)
             let terminalStates = ["acknowledged", "cancelled", "expired", "failed"]
+            let validFailureReasons = ["capture-failure", "sleep", "logout", "reboot", "session-lock", "companion-stop", "companion-restart", "device-loss"]
             let validShape = persisted.state == "result-ready"
                 ? (persisted.length ?? 0) >= 44 && persisted.sha256?.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil &&
-                  ["stopped", "duration-limit"].contains(persisted.completion ?? "") && persisted.terminalAt != nil
+                  ["stopped", "duration-limit", "owner-liveness-loss"].contains(persisted.completion ?? "") &&
+                  persisted.failureReason == nil && persisted.terminalAt != nil
                 : terminalStates.contains(persisted.state)
-                    ? persisted.length == nil && persisted.sha256 == nil && persisted.completion == nil && persisted.terminalAt != nil
-                    : persisted.length == nil && persisted.sha256 == nil && persisted.terminalAt == nil
+                    ? persisted.length == nil && persisted.sha256 == nil && persisted.completion == nil &&
+                      (persisted.state == "failed" ? validFailureReasons.contains(persisted.failureReason ?? "") : persisted.failureReason == nil) &&
+                      persisted.terminalAt != nil
+                    : persisted.length == nil && persisted.sha256 == nil && persisted.failureReason == nil && persisted.terminalAt == nil
             guard persisted.schemaVersion == 1,
                   UUID(uuidString: persisted.id) != nil,
                   name == "recording-" + persisted.id + ".json",
@@ -1756,7 +1978,8 @@ private final class RecordingManager {
                 id: persisted.id, ownerId: persisted.ownerId, leaseHash: leaseHash,
                 url: URL(fileURLWithPath: runtime + "/recording-" + persisted.id + ".wav"),
                 state: persisted.state, length: persisted.length, sha256: persisted.sha256,
-                completion: persisted.completion ?? "stopped", terminalAt: persisted.terminalAt
+                completion: persisted.completion ?? "stopped", failureReason: persisted.failureReason,
+                terminalAt: persisted.terminalAt
             )
             recordings[current.id] = current
             if revokedOwners.contains(current.ownerId) {
@@ -1799,7 +2022,7 @@ private final class RecordingManager {
     }
 
     private func recoverAsFailedLocked(_ current: BridgeRecording) {
-        failLocked(current)
+        failLocked(current, reason: "companion-restart")
     }
 
     private func validateResultFile(_ url: URL, length: Int, sha256: String) throws -> Bool {
@@ -2123,6 +2346,27 @@ private func makeUnixListener(path: String) throws -> Int32 {
     return descriptor
 }
 
+func ownerVisibleLifecycleReason(systemEvent: String) -> String? {
+    switch systemEvent {
+    case "logout": return "logout"
+    case "restart", "shutdown": return "reboot"
+    default: return nil
+    }
+}
+
+private final class LifecycleAppleEventRouter: NSObject {
+    let onLogout: () -> Void
+    let onReboot: () -> Void
+
+    init(onLogout: @escaping () -> Void, onReboot: @escaping () -> Void) {
+        self.onLogout = onLogout
+        self.onReboot = onReboot
+    }
+
+    @objc func logout(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) { onLogout() }
+    @objc func reboot(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) { onReboot() }
+}
+
 private final class ConnectionLimiter {
     private let lock = NSLock()
     private var active = 0
@@ -2151,51 +2395,97 @@ private func serve() throws {
     let connectionLimiter = ConnectionLimiter()
     try removeStaleSocketIfSafe(path: paths.socket)
     let listener = try makeUnixListener(path: paths.socket)
-    signal(SIGTERM, SIG_IGN)
-    signal(SIGINT, SIG_IGN)
-    let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-    let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-    let terminate = {
-        Darwin.close(listener)
-        unlink(paths.socket)
-        exit(EXIT_SUCCESS)
-    }
-    termination.setEventHandler(handler: terminate)
-    interruption.setEventHandler(handler: terminate)
-    termination.resume()
-    interruption.resume()
-    defer {
-        termination.cancel()
-        interruption.cancel()
-        Darwin.close(listener)
-        unlink(paths.socket)
-    }
-    while true {
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
-        let client = accept(listener, nil, nil)
-        if client < 0 { continue }
-        guard connectionLimiter.acquire() else {
-            shutdown(client, SHUT_RDWR)
-            Darwin.close(client)
-            continue
-        }
-        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        DispatchQueue.global().async {
-            defer { connectionLimiter.release() }
-            do {
-                let credentials = try readCredentials(primary: paths.credential, hosts: paths.hostCredentials)
-                try handleRequest(client, credentials: credentials, recordings: recordings)
+    func signalSource(_ value: Int32, reason: String, exits: Bool) -> DispatchSourceSignal {
+        signal(value, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: value, queue: .global())
+        source.setEventHandler {
+            recordings.failActive(reason: reason)
+            if exits {
+                Darwin.close(listener)
+                unlink(paths.socket)
+                exit(EXIT_SUCCESS)
             }
-            catch {
+        }
+        source.resume()
+        return source
+    }
+    signal(SIGUSR1, SIG_IGN)
+    let durationRequest = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .global())
+    durationRequest.setEventHandler { recordings.enforceDurationLimit() }
+    durationRequest.resume()
+    var lifecycleSignals = [
+        signalSource(SIGTERM, reason: "companion-stop", exits: true),
+        signalSource(SIGINT, reason: "companion-stop", exits: true),
+        signalSource(SIGHUP, reason: "logout", exits: true),
+        signalSource(SIGQUIT, reason: "reboot", exits: true),
+    ]
 #if PROTOCOL_TESTING
-                fputs("protocol test request failed: \(error)\n", stderr)
+    lifecycleSignals.append(signalSource(SIGTSTP, reason: "sleep", exits: false))
+    lifecycleSignals.append(signalSource(SIGUSR2, reason: "session-lock", exits: false))
+    lifecycleSignals.append(signalSource(SIGWINCH, reason: "device-loss", exits: false))
 #endif
+    let appleEvents = NSAppleEventManager.shared()
+    let lifecycleRouter = LifecycleAppleEventRouter(
+        onLogout: { recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "logout")!) },
+        onReboot: { recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "restart")!) }
+    )
+    let coreEventClass = AEEventClass(0x61657674)
+    let logoutEvent = AEEventID(0x6c6f676f)
+    let restartEvent = AEEventID(0x72657374)
+    let shutdownEvent = AEEventID(0x73687574)
+    appleEvents.setEventHandler(lifecycleRouter, andSelector: #selector(LifecycleAppleEventRouter.logout(_:reply:)),
+                                forEventClass: coreEventClass, andEventID: logoutEvent)
+    appleEvents.setEventHandler(lifecycleRouter, andSelector: #selector(LifecycleAppleEventRouter.reboot(_:reply:)),
+                                forEventClass: coreEventClass, andEventID: restartEvent)
+    appleEvents.setEventHandler(lifecycleRouter, andSelector: #selector(LifecycleAppleEventRouter.reboot(_:reply:)),
+                                forEventClass: coreEventClass, andEventID: shutdownEvent)
+    let workspace = NSWorkspace.shared.notificationCenter
+    let sleepObserver = workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
+        recordings.failActive(reason: "sleep")
+    }
+    let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
+        recordings.failActive(reason: "session-lock")
+    }
+    defer {
+        durationRequest.cancel()
+        for source in lifecycleSignals { source.cancel() }
+        workspace.removeObserver(sleepObserver)
+        workspace.removeObserver(lockObserver)
+        appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: logoutEvent)
+        appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: restartEvent)
+        appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: shutdownEvent)
+        Darwin.close(listener)
+        unlink(paths.socket)
+    }
+    DispatchQueue.global().async {
+        while true {
+            var timeout = timeval(tv_sec: 5, tv_usec: 0)
+            let client = accept(listener, nil, nil)
+            if client < 0 { continue }
+            guard connectionLimiter.acquire() else {
+                shutdown(client, SHUT_RDWR)
+                Darwin.close(client)
+                continue
             }
-            shutdown(client, SHUT_RDWR)
-            Darwin.close(client)
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            DispatchQueue.global().async {
+                defer { connectionLimiter.release() }
+                do {
+                    let credentials = try readCredentials(primary: paths.credential, hosts: paths.hostCredentials)
+                    try handleRequest(client, credentials: credentials, recordings: recordings)
+                }
+                catch {
+#if PROTOCOL_TESTING
+                    fputs("protocol test request failed: \(error)\n", stderr)
+#endif
+                }
+                shutdown(client, SHUT_RDWR)
+                Darwin.close(client)
+            }
         }
     }
+    RunLoop.current.run()
 }
 
 private extension Data {

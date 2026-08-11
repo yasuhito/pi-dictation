@@ -23,7 +23,7 @@ node bin/pi-dictation.mjs bridge build --output "$temporary/production.app" >/de
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 xcrun swiftc -O -whole-module-optimization -parse-as-library -D PROTOCOL_TESTING \
   -sdk "$sdk" -target arm64-apple-macosx14.0 \
-  -framework AVFoundation -framework AudioToolbox -framework CoreMedia \
+  -framework AVFoundation -framework AppKit -framework AudioToolbox -framework CoreMedia \
   -framework CryptoKit -framework Security \
   native/macos-companion/PiDictationBridge.swift \
   -o "$temporary/PiDictationBridge"

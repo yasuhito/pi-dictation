@@ -22,6 +22,7 @@ if (configuration.product !== "com.yasuhito.pi-dictation.bridge" || !Array.isArr
 
 let child;
 let stopping = false;
+let terminationEscalation;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function writeStatus(patch) {
@@ -37,7 +38,13 @@ function writeStatus(patch) {
 function stop() {
   stopping = true;
   const ownedChild = child;
-  if (ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null) ownedChild.kill("SIGTERM");
+  if (!ownedChild || ownedChild.exitCode !== null || ownedChild.signalCode !== null) return;
+  ownedChild.kill("SIGTERM");
+  terminationEscalation = setTimeout(() => {
+    if (child === ownedChild && ownedChild.exitCode === null && ownedChild.signalCode === null) {
+      ownedChild.kill("SIGKILL");
+    }
+  }, 5000);
 }
 
 async function probeTunnel(tunnel) {
@@ -73,6 +80,8 @@ while (!stopping) {
     tunnel.once("exit", resolve);
   });
   const lifetime = Date.now() - startedAt;
+  clearTimeout(terminationEscalation);
+  terminationEscalation = undefined;
   child = undefined;
   if (stopping) break;
   writeStatus({ tunnelProcess: "stopped", listener: "pending", authenticatedHealth: "pending" });

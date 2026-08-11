@@ -205,6 +205,31 @@ Wildcard and non-loopback binds are refused. The installer does not install or u
 2. In an interactive Pi session on `my-pi`, run `/dictate`, speak a recognizable phrase into the Mac microphone, then run `/dictate` again.
 3. Confirm the phrase is inserted into Pi. A successful stop means Pi authenticated the companion, bounded and verified the complete WAV, transcribed it on the Pi host, acknowledged Mac cleanup, and removed its own temporary audio.
 
+### Real-device certification
+
+The npm package includes a self-contained certification command; it does not depend on repository test fixtures. List the deterministic guided and lifecycle scenarios from the exact packed candidate:
+
+```bash
+pi-dictation-bridge-certify list
+```
+
+Run a guided recurring-gate scenario with its configured SSH alias, follow only the displayed microphone or Pi UI actions, and confirm the result:
+
+```bash
+pi-dictation-bridge-certify prepare bridge-level-transcription my-pi
+pi-dictation-bridge-certify verify --confirm
+```
+
+The gate covers Bridge levels and recognizable transcription, automated cancellation cleanup, an automated native duration limit that has no transcription interface, automated cross-host single-lease exclusion, staged tunnel-loss termination and authenticated reconnect, and the local Recorder contract. Tunnel fault injection owns its Recording lease, measures the fifteen-second bound from the fault, and runs authenticated remote health after restarting the exact tunnel LaunchAgent. Only microphone speech and observations in Pi's UI are manual; the command performs protocol, cleanup, duration, arbitration, and owned LaunchAgent fault steps itself. Lifecycle preparations cover sleep, logout, reboot, session lock, companion stop or restart, and default-input loss. Preparations that survive logout or reboot keep a private recovery capability only until `verify`; every control connection has a five-second deadline, and successful verification checks owner-scoped retained-audio counts, removes recovery state, and prints bounded JSON evidence containing neither credentials, capabilities, audio, transcripts, private paths, nor recording identities.
+
+From a disposable clean macOS user, the staged actual-tarball gate automates package and companion installation, host installation and its idempotent rerun, human and JSON diagnosis, upgrade reconciliation, credential rotation, credential cleanup, package uninstall, and a digest check for a pre-existing external artifact. It pauses only for real-audio preflight and Pi's real recording/UI observation:
+
+```bash
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify prepare clean-user-tarball /absolute/path/pi-dictation-CANDIDATE.tgz /absolute/path/pi-dictation-PREDECESSOR.tgz my-pi /absolute/path/external-artifact
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after preflight
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after Bridge recording
+```
+
 ## Safety
 
 Pi Dictation:
