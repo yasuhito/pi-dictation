@@ -9,6 +9,7 @@ import { createBridgeRecorder } from "./bridge-recorder.js";
 
 const execFileAsync = promisify(execFile);
 const LEVEL_INTERVAL_MS = 50;
+const MAXIMUM_WAV_NON_PCM_BYTES = 64 * 1024;
 
 export type LevelObservation = {
   type: "observation";
@@ -290,6 +291,7 @@ export async function validatePcm16MonoWav(
       chunkOffset = next;
     }
     if (chunkOffset !== riffEnd || !formatValid || !formatSeen || !dataSeen || !dataOffset || dataSize < 2 || dataSize % 2 !== 0 ||
+        size - dataSize > MAXIMUM_WAV_NON_PCM_BYTES ||
         (maximumPcmBytes !== undefined && (!Number.isSafeInteger(maximumPcmBytes) || maximumPcmBytes < 2 || dataSize > maximumPcmBytes))) {
       throw new RecorderError("invalid-audio");
     }

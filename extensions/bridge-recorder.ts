@@ -155,27 +155,47 @@ function frame(value: unknown): Buffer {
 }
 
 class SocketReader {
-  private readonly iterator;
-  private buffered = Buffer.alloc(0);
-  private ended = false;
+  constructor(private readonly socket: Socket) {}
 
-  constructor(socket: Socket) { this.iterator = socket[Symbol.asyncIterator](); }
+  private waitForReadable(): Promise<void> {
+    return new Promise((resolveWait, reject) => {
+      const cleanup = () => {
+        this.socket.removeListener("readable", onReadable);
+        this.socket.removeListener("end", onEnd);
+        this.socket.removeListener("close", onEnd);
+        this.socket.removeListener("error", onError);
+      };
+      const onReadable = () => { cleanup(); resolveWait(); };
+      const onEnd = () => { cleanup(); resolveWait(); };
+      const onError = (error: Error) => { cleanup(); reject(new BridgeTransportError(undefined, { cause: error })); };
+      this.socket.once("readable", onReadable);
+      this.socket.once("end", onEnd);
+      this.socket.once("close", onEnd);
+      this.socket.once("error", onError);
+      if (this.socket.readableLength > 0) onReadable();
+      else if (this.socket.readableEnded || this.socket.destroyed) onEnd();
+    });
+  }
 
   async readExactly(length: number): Promise<Buffer> {
-    while (this.buffered.length < length && !this.ended) {
-      try {
-        const next = await this.iterator.next();
-        if (next.done) this.ended = true;
-        else {
-          this.buffered = Buffer.concat([this.buffered, Buffer.from(next.value)]);
-          recordTestResourceMetric("socket", this.buffered.length);
-        }
-      } catch (error) { throw new BridgeTransportError(undefined, { cause: error }); }
+    const pieces: Buffer[] = [];
+    let remaining = length;
+    while (remaining > 0) {
+      const available = this.socket.readableLength;
+      recordTestResourceMetric("socket", available);
+      const chunk = available > 0
+        ? this.socket.read(Math.min(remaining, available)) as Buffer | null
+        : null;
+      if (chunk) {
+        pieces.push(chunk);
+        remaining -= chunk.length;
+        recordTestResourceMetric("socket", chunk.length);
+      } else {
+        if (this.socket.readableEnded || this.socket.destroyed) throw new BridgeTransportError();
+        await this.waitForReadable();
+      }
     }
-    if (this.buffered.length < length) throw new BridgeTransportError();
-    const result = this.buffered.subarray(0, length);
-    this.buffered = this.buffered.subarray(length);
-    return result;
+    return pieces.length === 1 ? pieces[0] : Buffer.concat(pieces, length);
   }
 
   async readFrame(): Promise<unknown> {
@@ -190,11 +210,12 @@ class SocketReader {
   }
 
   async requireEnd(): Promise<void> {
-    if (this.buffered.length) throw new BridgeAudioError();
-    let next;
-    try { next = await this.iterator.next(); }
-    catch (error) { throw new BridgeTransportError(undefined, { cause: error }); }
-    if (!next.done) throw new BridgeAudioError();
+    while (!this.socket.readableEnded) {
+      if (this.socket.readableLength > 0) throw new BridgeAudioError();
+      if (this.socket.destroyed) throw new BridgeTransportError();
+      await this.waitForReadable();
+    }
+    if (this.socket.readableLength > 0) throw new BridgeAudioError();
   }
 }
 

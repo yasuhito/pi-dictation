@@ -176,6 +176,14 @@ function wav() {
     ambiguous.writeUInt32LE(ambiguous.length - 8, 4);
     return ambiguous;
   }
+  if (mode === "header-over-allowance") {
+    const junk = Buffer.alloc(100_008);
+    junk.write("JUNK", 0);
+    junk.writeUInt32LE(100_000, 4);
+    const oversizedHeader = Buffer.concat([result, junk]);
+    oversizedHeader.writeUInt32LE(oversizedHeader.length - 8, 4);
+    return oversizedHeader;
+  }
   if (mode === "trailing-data") return Buffer.concat([result, Buffer.from([1])]);
   return result;
 }
@@ -563,7 +571,9 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         delayed.unref();
         return;
       }
-      socket.end(audio ? Buffer.concat([response, audio]) : response);
+      if (request.operation === "fetch" && mode === "extra-fetch-byte" && audio) {
+        socket.end(Buffer.concat([response, audio, Buffer.from([1])]));
+      } else socket.end(audio ? Buffer.concat([response, audio]) : response);
     } catch { socket.destroy(); }
   });
 });

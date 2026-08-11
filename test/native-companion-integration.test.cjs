@@ -699,6 +699,21 @@ test("native byte reservations reject before capture", macOnly, async (t) => {
   } finally { await instance.cleanup(); }
 });
 
+test("native finalization deletes non-PCM bytes exceeding the header allowance", macOnly, async (t) => {
+  const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_WAV_JUNK_BYTES: "100000" });
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    const stopped = await request(instance.socket, owner, "stop", lease);
+    const status = await request(instance.socket, owner, "status", lease);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    await t.test("rejects the oversized finalized header", () => assert.equal(stopped.status, "invalid-state"));
+    await t.test("attributes the terminal state as failed", () => assert.equal(status.payload.state, "failed"));
+    await t.test("deletes the oversized audio", () => assert.equal(existsSync(join(instance.runtime, `recording-${lease.recordingId}.wav`)), false));
+  } finally { await instance.cleanup(); }
+});
+
 test("native finalization deletes PCM exceeding duration within the header allowance", macOnly, async (t) => {
   const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_WAV_DATA_BYTES: "40000" });
   try {

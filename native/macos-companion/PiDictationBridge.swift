@@ -899,8 +899,11 @@ private final class BridgeRecording {
 #if PROTOCOL_TESTING
 private func writeProtocolTestingWav(to url: URL) throws {
     let requested = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_WAV_DATA_BYTES"] ?? "") ?? 3200
+    let requestedJunk = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_WAV_JUNK_BYTES"] ?? "") ?? 0
     let evenBytes = requested - requested % 2
-    guard evenBytes >= 2, evenBytes <= Int(UInt32.max - 36) else { throw CompanionFailure.failed }
+    let evenJunkBytes = requestedJunk - requestedJunk % 2
+    let totalPayloadBytes = Int64(36) + Int64(evenBytes) + (evenJunkBytes > 0 ? Int64(8 + evenJunkBytes) : 0)
+    guard evenBytes >= 2, evenJunkBytes >= 0, totalPayloadBytes <= Int64(UInt32.max) else { throw CompanionFailure.failed }
     let dataBytes = UInt32(evenBytes)
     var header: [UInt8] = []
     func appendASCII(_ value: String) { header.append(contentsOf: value.utf8) }
@@ -911,7 +914,7 @@ private func writeProtocolTestingWav(to url: URL) throws {
         header.append(UInt8(value & 0xff)); header.append(UInt8((value >> 8) & 0xff))
         header.append(UInt8((value >> 16) & 0xff)); header.append(UInt8((value >> 24) & 0xff))
     }
-    appendASCII("RIFF"); appendLE32(36 + dataBytes); appendASCII("WAVE")
+    appendASCII("RIFF"); appendLE32(UInt32(totalPayloadBytes)); appendASCII("WAVE")
     appendASCII("fmt "); appendLE32(16); appendLE16(1); appendLE16(1)
     appendLE32(16000); appendLE32(32000); appendLE16(2); appendLE16(16)
     appendASCII("data"); appendLE32(dataBytes)
@@ -935,6 +938,22 @@ private func writeProtocolTestingWav(to url: URL) throws {
         recordResourceMetric("capture", bytes: count)
         try writeAll(descriptor, data: count == chunk.count ? chunk : Data(chunk.prefix(count)))
         remaining -= count
+    }
+    if evenJunkBytes > 0 {
+        var junkHeader: [UInt8] = []
+        junkHeader.append(contentsOf: "JUNK".utf8)
+        let junkSize = UInt32(evenJunkBytes)
+        junkHeader.append(UInt8(junkSize & 0xff)); junkHeader.append(UInt8((junkSize >> 8) & 0xff))
+        junkHeader.append(UInt8((junkSize >> 16) & 0xff)); junkHeader.append(UInt8((junkSize >> 24) & 0xff))
+        try writeAll(descriptor, data: Data(junkHeader))
+        let zeros = Data(count: streamingBufferBytes)
+        var junkRemaining = evenJunkBytes
+        while junkRemaining > 0 {
+            let count = min(junkRemaining, zeros.count)
+            recordResourceMetric("capture", bytes: count)
+            try writeAll(descriptor, data: count == zeros.count ? zeros : Data(zeros.prefix(count)))
+            junkRemaining -= count
+        }
     }
     guard fsync(descriptor) == 0 else { throw CompanionFailure.failed }
     complete = true
@@ -2327,6 +2346,7 @@ private func validateFinalizedWav(_ url: URL, maximumResultBytes: Int64) throws 
     var offset = 12
     var formatSeen = false
     var dataSeen = false
+    var pcmBytes = 0
     while offset + 8 <= fileSize {
         guard offset + 8 <= maximumWavHeaderBytes else { throw CompanionFailure.failed }
         let chunk = try readAt(offset, 8)
@@ -2352,10 +2372,12 @@ private func validateFinalizedWav(_ url: URL, maximumResultBytes: Int64) throws 
                   body <= maximumWavHeaderBytes, maximumPcmBytes >= 2,
                   Int64(size) <= maximumPcmBytes else { throw CompanionFailure.failed }
             dataSeen = true
+            pcmBytes = size
         }
         offset = end
     }
-    guard offset == fileSize, formatSeen, dataSeen else { throw CompanionFailure.failed }
+    guard offset == fileSize, formatSeen, dataSeen,
+          fileSize - pcmBytes <= maximumWavHeaderBytes else { throw CompanionFailure.failed }
     return fileSize
 }
 
