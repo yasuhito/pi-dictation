@@ -336,6 +336,29 @@ test("remote prepare installs private Recorder endpoint state without a package 
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("remote prepare rejects an oversized endpoint before Base64 decoding", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-endpoint-limit-"));
+  try {
+    const encoded = Buffer.alloc(13 * 1024, 65).toString("base64");
+    const result = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", "0123456789abcdef", encoded], {
+      cwd: root, encoding: "utf8", input: "{}", env: { ...process.env, HOME: home },
+    });
+    assert.match(result.stderr, /Invalid remote endpoint configuration/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote prepare bounds credential stdin before parsing", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-stdin-limit-"));
+  const endpoint = { type: "unix", path: join(home, ".local", "share", "pi-dictation", "bridge", "hosts", "0123456789abcdef", "listener.sock") };
+  try {
+    const result = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", "0123456789abcdef",
+      Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: "x".repeat(64 * 1024 + 1), env: { ...process.env, HOME: home },
+    });
+    assert.match(result.stderr, /Remote request body exceeds the safe limit/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("remote prepare reconciles an owned Unix endpoint to explicit TCP fallback", () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-fallback-"));
   const id = "abcdef0123456789";
@@ -424,7 +447,7 @@ test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", { ski
   }
 });
 
-test("tunnel supervisor establishes listener and authenticated health through probes", async () => {
+test("tunnel supervisor establishes listener, health, and bounded safe logging", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-supervisor-"));
   const tools = join(home, "tools");
   const statusPath = join(home, "setup.json");
@@ -435,6 +458,7 @@ test("tunnel supervisor establishes listener and authenticated health through pr
   writeFileSync(configurationPath, JSON.stringify({
     product: "com.yasuhito.pi-dictation.bridge",
     statusFile: statusPath,
+    logFile: join(home, "tunnel.log"),
     stableAfterMs: 1000,
     sshArguments: ["tunnel"],
     listenerProbeArguments: ["listener"],
@@ -451,10 +475,48 @@ test("tunnel supervisor establishes listener and authenticated health through pr
       if (state.stages.authenticatedHealth === "ready") break;
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
-    assert.deepEqual(state.stages, { tunnelProcess: "running", listener: "established", authenticatedHealth: "ready" });
+    const log = readFileSync(join(home, "tunnel.log"), "utf8");
+    await t.test("establishes listener and authenticated health", () => {
+      assert.deepEqual(state.stages, { tunnelProcess: "running", listener: "established", authenticatedHealth: "ready" });
+    });
+    await t.test("writes only bounded structured tunnel events", () => {
+      assert.equal(Buffer.byteLength(log) <= 1024 * 1024 && !/credential|secret|sshArguments|\/Users\//i.test(log), true);
+    });
   } finally {
     supervisor.kill("SIGTERM");
     await once(supervisor, "exit");
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("tunnel supervisor aggregates repeated connection failures", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-supervisor-repeat-"));
+  const tools = join(home, "tools");
+  const statusPath = join(home, "setup.json");
+  const configurationPath = join(home, "tunnel.json");
+  mkdirSync(tools, { mode: 0o700 });
+  executable(join(tools, "ssh"), "#!/bin/sh\nexit 1\n");
+  writeFileSync(statusPath, JSON.stringify({ stages: { tunnelProcess: "pending", listener: "pending", authenticatedHealth: "pending" } }), { mode: 0o600 });
+  writeFileSync(configurationPath, JSON.stringify({
+    product: "com.yasuhito.pi-dictation.bridge",
+    statusFile: statusPath,
+    logFile: join(home, "tunnel.log"),
+    stableAfterMs: 300000,
+    sshArguments: ["tunnel"],
+    listenerProbeArguments: ["listener"],
+    healthProbeArguments: ["health"],
+  }), { mode: 0o600 });
+  const supervisor = spawn(process.execPath, [join(root, "bin", "pi-dictation-tunnel.mjs"), configurationPath], {
+    cwd: root, env: { ...process.env, HOME: home, PATH: `${tools}:/usr/bin:/bin` }, stdio: "ignore",
+  });
+  try {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 8500));
+    supervisor.kill("SIGTERM");
+    await once(supervisor, "exit");
+    const records = readFileSync(join(home, "tunnel.log"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(records.some((record) => record.code === "repeated" && record.count >= 1) && !/credential|secret|sshArguments|\/Users\//i.test(JSON.stringify(records)), true);
+  } finally {
+    if (supervisor.exitCode === null) supervisor.kill("SIGTERM");
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -471,6 +533,7 @@ test("tunnel supervisor escalates from TERM to KILL only for its owned SSH child
   writeFileSync(configurationPath, JSON.stringify({
     product: "com.yasuhito.pi-dictation.bridge",
     statusFile: statusPath,
+    logFile: join(home, "tunnel.log"),
     stableAfterMs: 1000,
     sshArguments: ["tunnel"],
     listenerProbeArguments: ["listener"],

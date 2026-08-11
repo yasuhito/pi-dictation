@@ -54,6 +54,24 @@ async function request(endpoint, credential, operation, payload, requestId = ran
   return { status: response.status, payload: JSON.parse(responseBytes), body: Buffer.concat(chunks), requestId };
 }
 
+async function openSlowLevelSubscription(endpoint, credential, lease, requestId = randomUUID()) {
+  const socket = net.createConnection({ path: endpoint, allowHalfOpen: true, readableHighWaterMark: 1024 });
+  await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  const iterator = socket[Symbol.asyncIterator]();
+  const buffered = { value: Buffer.alloc(0) };
+  const challengeFrame = await readFrame(iterator, buffered);
+  const challenge = Buffer.from(challengeFrame.challenge, "base64");
+  const operation = "subscribe-levels";
+  const payloadBytes = Buffer.from(JSON.stringify({ ...lease, afterSequence: -1 }));
+  const hmac = tag(credential.secret, ["request", version, challenge, credential.id, requestId, operation, payloadBytes]);
+  socket.end(frame({
+    type: "request", version, credentialId: credential.id, requestId, operation,
+    payload: payloadBytes.toString("base64"), hmac: hmac.toString("hex"),
+  }));
+  socket.pause();
+  return socket;
+}
+
 async function subscribeLevels(endpoint, credential, lease, count = 1, requestId = randomUUID()) {
   const socket = net.createConnection({ path: endpoint, allowHalfOpen: true });
   await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
@@ -102,4 +120,4 @@ function capability() {
   return { recordingId: randomUUID(), leaseSecret: randomBytes(32).toString("base64") };
 }
 
-module.exports = { capability, request, subscribeLevels };
+module.exports = { capability, openSlowLevelSubscription, request, subscribeLevels };

@@ -38,7 +38,7 @@ class BridgeTransportError extends Error {
 class BridgeOutcomeUnknownError extends Error {}
 class BridgeAudioError extends Error {}
 class BridgeResponseError extends Error {
-  constructor(readonly status: ResponseStatus) { super(status); }
+  constructor(readonly status: ResponseStatus, readonly payload: unknown) { super(status); }
 }
 
 function abortError(signal?: AbortSignal): Error {
@@ -138,6 +138,14 @@ function authenticationTag(secret: Buffer, fields: Array<string | number | Buffe
   return createHmac("sha256", secret).update(encodeAuthFields(fields)).digest();
 }
 
+const resourceMetricsKey = "__piDictationBridgeResourceMetrics";
+function recordTestResourceMetric(name: string, bytes: number): void {
+  if (process.env.PI_DICTATION_TEST_RESOURCE_METRICS !== "1") return;
+  const target = globalThis as typeof globalThis & { __piDictationBridgeResourceMetrics?: Record<string, number> };
+  const metrics = target[resourceMetricsKey] ??= {};
+  metrics[name] = Math.max(metrics[name] ?? 0, bytes);
+}
+
 function frame(value: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify(value));
   if (payload.length < 2 || payload.length > MAX_FRAME_BYTES) throw new BridgeProtocolError();
@@ -147,24 +155,47 @@ function frame(value: unknown): Buffer {
 }
 
 class SocketReader {
-  private readonly iterator;
-  private buffered = Buffer.alloc(0);
-  private ended = false;
+  constructor(private readonly socket: Socket) {}
 
-  constructor(socket: Socket) { this.iterator = socket[Symbol.asyncIterator](); }
+  private waitForReadable(): Promise<void> {
+    return new Promise((resolveWait, reject) => {
+      const cleanup = () => {
+        this.socket.removeListener("readable", onReadable);
+        this.socket.removeListener("end", onEnd);
+        this.socket.removeListener("close", onEnd);
+        this.socket.removeListener("error", onError);
+      };
+      const onReadable = () => { cleanup(); resolveWait(); };
+      const onEnd = () => { cleanup(); resolveWait(); };
+      const onError = (error: Error) => { cleanup(); reject(new BridgeTransportError(undefined, { cause: error })); };
+      this.socket.once("readable", onReadable);
+      this.socket.once("end", onEnd);
+      this.socket.once("close", onEnd);
+      this.socket.once("error", onError);
+      if (this.socket.readableLength > 0) onReadable();
+      else if (this.socket.readableEnded || this.socket.destroyed) onEnd();
+    });
+  }
 
   async readExactly(length: number): Promise<Buffer> {
-    while (this.buffered.length < length && !this.ended) {
-      try {
-        const next = await this.iterator.next();
-        if (next.done) this.ended = true;
-        else this.buffered = Buffer.concat([this.buffered, Buffer.from(next.value)]);
-      } catch (error) { throw new BridgeTransportError(undefined, { cause: error }); }
+    const pieces: Buffer[] = [];
+    let remaining = length;
+    while (remaining > 0) {
+      const available = this.socket.readableLength;
+      recordTestResourceMetric("socket", available);
+      const chunk = available > 0
+        ? this.socket.read(Math.min(remaining, available)) as Buffer | null
+        : null;
+      if (chunk) {
+        pieces.push(chunk);
+        remaining -= chunk.length;
+        recordTestResourceMetric("socket", chunk.length);
+      } else {
+        if (this.socket.readableEnded || this.socket.destroyed) throw new BridgeTransportError();
+        await this.waitForReadable();
+      }
     }
-    if (this.buffered.length < length) throw new BridgeTransportError();
-    const result = this.buffered.subarray(0, length);
-    this.buffered = this.buffered.subarray(length);
-    return result;
+    return pieces.length === 1 ? pieces[0] : Buffer.concat(pieces, length);
   }
 
   async readFrame(): Promise<unknown> {
@@ -179,11 +210,12 @@ class SocketReader {
   }
 
   async requireEnd(): Promise<void> {
-    if (this.buffered.length) throw new BridgeAudioError();
-    let next;
-    try { next = await this.iterator.next(); }
-    catch (error) { throw new BridgeTransportError(undefined, { cause: error }); }
-    if (!next.done) throw new BridgeAudioError();
+    while (!this.socket.readableEnded) {
+      if (this.socket.readableLength > 0) throw new BridgeAudioError();
+      if (this.socket.destroyed) throw new BridgeTransportError();
+      await this.waitForReadable();
+    }
+    if (this.socket.readableLength > 0) throw new BridgeAudioError();
   }
 }
 
@@ -358,7 +390,7 @@ async function requestJson(
       const response = await authenticatedRequest(config, credential, requestId, operation, payload, requestSignal, remaining);
       try {
         await response.reader.requireEnd();
-        if (response.status !== "ok") throw new BridgeResponseError(response.status);
+        if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
         return response.payload;
       } finally { response.socket.destroy(); }
     });
@@ -409,7 +441,7 @@ async function streamLevels(
         config, credential, requestId, "subscribe-levels", { ...owned, afterSequence }, signal
       );
       if (response.status === "invalid-state" || response.status === "not-found") return;
-      if (response.status !== "ok") throw new BridgeResponseError(response.status);
+      if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
       const bounds = response.payload;
       if (!exactObject(bounds, ["recordingId", "intervalMs", "oldestSequence", "nextSequence"]) ||
           bounds.recordingId !== owned.recordingId || bounds.intervalMs !== LEVEL_INTERVAL_MS ||
@@ -490,6 +522,10 @@ function safeError(error: unknown): RecorderError {
   if (error instanceof RecorderError) return error;
   if (error instanceof BridgeOutcomeUnknownError) return new RecorderError("outcome-unknown", { cause: error });
   if (error instanceof BridgeResponseError && error.status === "busy") return new RecorderError("recorder-busy");
+  if (error instanceof BridgeResponseError && error.status === "failed" &&
+      exactObject(error.payload, ["reason"]) && error.payload.reason === "storage-full") {
+    return new RecorderError("recorder-storage-full");
+  }
   return new RecorderError(error instanceof BridgeAudioError ? "invalid-audio" : "recording-failed", { cause: error });
 }
 
@@ -675,7 +711,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                 response = await authenticatedRequest(
                   config, credential, fetchRequestId, "fetch", owned, recoverySignal, FETCH_NO_PROGRESS_TIMEOUT_MS
                 );
-                if (response.status !== "ok") throw new BridgeResponseError(response.status);
+                if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
                 const metadata = response.payload;
                 const maximumBytes = options.maxDurationMs * 32 + MAX_FRAME_BYTES;
                 if (!Number.isSafeInteger(maximumBytes) ||
@@ -694,8 +730,10 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
                 while (remaining > 0) {
                   ensureNotCancelled();
                   const chunk = await response.reader.readExactly(Math.min(64 * 1024, remaining));
+                  recordTestResourceMetric("fetch", chunk.length);
                   await localFileOperation(() => handle!.write(chunk));
                   digest.update(chunk);
+                  recordTestResourceMetric("sha256", chunk.length);
                   remaining -= chunk.length;
                 }
                 await response.reader.requireEnd();
@@ -737,7 +775,9 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
             }
             clearTimeout(recoveryTimer);
             if (!fetched) throw new BridgeOutcomeUnknownError(undefined, { cause: lastFetchError });
-            await validatePcm16MonoWav(partial, stopController.signal);
+            await validatePcm16MonoWav(
+              partial, stopController.signal, 16_000, options.maxDurationMs * 32
+            );
             ensureNotCancelled();
             acknowledgementStarted = true;
             let acknowledgement: unknown;

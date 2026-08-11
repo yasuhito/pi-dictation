@@ -692,6 +692,29 @@ test("OpenAI transcription pastes the returned text", async (t) => {
   }
 });
 
+test("OpenAI transcription accepts a bounded response above the diagnostic limit", async () => {
+  const paths = testPaths("openai-large-response");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  process.env.PI_DICTATION_OPENAI_API_KEY = "test-key";
+  const originalFetch = global.fetch;
+  const transcript = "voice ".repeat(3000).trim();
+  global.fetch = async () => new Response(JSON.stringify({ text: transcript }), {
+    status: 200, headers: { "content-type": "application/json" },
+  });
+  const runtime = await createRuntime({ transcribeCommand: null });
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    await runtime.shortcut(runtime.ctx);
+    assert.equal(runtime.pasted(), transcript);
+  } finally {
+    await runtime.shutdown();
+    global.fetch = originalFetch;
+    delete process.env.PI_DICTATION_OPENAI_API_KEY;
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
 test("an unexpected recorder exit is reported and cleaned up", async (t) => {
   const paths = testPaths("recorder-exit");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;

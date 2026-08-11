@@ -134,7 +134,7 @@ function frame(value) {
 }
 
 function wav() {
-  const dataBytes = mode === "validation-large" ? 30 * 1024 * 1024 : 3200;
+  const dataBytes = mode === "validation-large" ? 30 * 1024 * 1024 : mode === "pcm-over-duration" ? 330_000 : 3200;
   const result = Buffer.alloc(44 + dataBytes);
   result.write("RIFF", 0);
   result.writeUInt32LE(36 + dataBytes, 4);
@@ -142,8 +142,9 @@ function wav() {
   result.writeUInt32LE(16, 16);
   result.writeUInt16LE(1, 20);
   result.writeUInt16LE(1, 22);
-  result.writeUInt32LE(16000, 24);
-  result.writeUInt32LE(32000, 28);
+  const sampleRate = mode === "wrong-sample-rate" ? 48000 : 16000;
+  result.writeUInt32LE(sampleRate, 24);
+  result.writeUInt32LE(sampleRate * 2, 28);
   result.writeUInt16LE(2, 32);
   result.writeUInt16LE(16, 34);
   result.write("data", 36);
@@ -174,6 +175,14 @@ function wav() {
     const ambiguous = Buffer.concat([result.subarray(0, 36), duplicateData, result.subarray(36)]);
     ambiguous.writeUInt32LE(ambiguous.length - 8, 4);
     return ambiguous;
+  }
+  if (mode === "header-over-allowance") {
+    const junk = Buffer.alloc(100_008);
+    junk.write("JUNK", 0);
+    junk.writeUInt32LE(100_000, 4);
+    const oversizedHeader = Buffer.concat([result, junk]);
+    oversizedHeader.writeUInt32LE(oversizedHeader.length - 8, 4);
+    return oversizedHeader;
   }
   if (mode === "trailing-data") return Buffer.concat([result, Buffer.from([1])]);
   return result;
@@ -316,6 +325,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
             status = "busy";
           } else if (mode === "storage-full") {
             status = "failed";
+            responsePayload = { reason: "storage-full" };
           } else if (leaseHash.length !== 32) {
             status = "failed";
           } else {
@@ -561,7 +571,9 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         delayed.unref();
         return;
       }
-      socket.end(audio ? Buffer.concat([response, audio]) : response);
+      if (request.operation === "fetch" && mode === "extra-fetch-byte" && audio) {
+        socket.end(Buffer.concat([response, audio, Buffer.from([1])]));
+      } else socket.end(audio ? Buffer.concat([response, audio]) : response);
     } catch { socket.destroy(); }
   });
 });

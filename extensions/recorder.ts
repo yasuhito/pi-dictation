@@ -9,6 +9,7 @@ import { createBridgeRecorder } from "./bridge-recorder.js";
 
 const execFileAsync = promisify(execFile);
 const LEVEL_INTERVAL_MS = 50;
+const MAXIMUM_WAV_NON_PCM_BYTES = 64 * 1024;
 
 export type LevelObservation = {
   type: "observation";
@@ -62,6 +63,7 @@ export type RecorderErrorCode =
   | "invalid-audio"
   | "outcome-unknown"
   | "recorder-busy"
+  | "recorder-storage-full"
   | "recorder-unavailable"
   | "recording-failed";
 
@@ -80,6 +82,7 @@ const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
   "outcome-unknown": "The Bridge recording outcome could not be determined within the recovery window.",
   "recorder-busy": "Another Bridge recording is already in progress.",
+  "recorder-storage-full": "The Bridge companion cannot safely reserve storage for this recording.",
   "recorder-unavailable": "No supported local recorder is available.",
   "recording-failed": "Voice recording stopped unexpectedly.",
 };
@@ -225,7 +228,12 @@ function rmsDbfs(samples: Int16Array): number | "silence" {
   return 20 * Math.log10(Math.sqrt(sum / samples.length));
 }
 
-export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): Promise<void> {
+export async function validatePcm16MonoWav(
+  path: string,
+  signal?: AbortSignal,
+  expectedSampleRate?: number,
+  maximumPcmBytes?: number
+): Promise<void> {
   const checkCancellation = () => {
     if (signal?.aborted) throw new RecorderError("cancelled");
   };
@@ -270,8 +278,7 @@ export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): 
         formatValid =
           format.readUInt16LE(0) === 1 &&
           format.readUInt16LE(2) === 1 &&
-          sampleRate >= 8_000 &&
-          sampleRate <= 192_000 &&
+          (expectedSampleRate === undefined ? sampleRate >= 8_000 && sampleRate <= 192_000 : sampleRate === expectedSampleRate) &&
           format.readUInt32LE(8) === sampleRate * 2 &&
           format.readUInt16LE(14) === 16 &&
           format.readUInt16LE(12) === 2;
@@ -283,7 +290,9 @@ export async function validatePcm16MonoWav(path: string, signal?: AbortSignal): 
       }
       chunkOffset = next;
     }
-    if (chunkOffset !== riffEnd || !formatValid || !formatSeen || !dataSeen || !dataOffset || dataSize < 2 || dataSize % 2 !== 0) {
+    if (chunkOffset !== riffEnd || !formatValid || !formatSeen || !dataSeen || !dataOffset || dataSize < 2 || dataSize % 2 !== 0 ||
+        size - dataSize > MAXIMUM_WAV_NON_PCM_BYTES ||
+        (maximumPcmBytes !== undefined && (!Number.isSafeInteger(maximumPcmBytes) || maximumPcmBytes < 2 || dataSize > maximumPcmBytes))) {
       throw new RecorderError("invalid-audio");
     }
 

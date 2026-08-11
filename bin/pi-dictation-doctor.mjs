@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -8,6 +8,8 @@ import { createRequire } from "node:module";
 const MIN_NODE_VERSION = [22, 19, 0];
 const MIN_DURATION_MS = 1000;
 const MAX_DURATION_MS = 60 * 60 * 1000;
+const MAX_PACKAGE_MANIFEST_BYTES = 64 * 1024;
+const SAFE_PACKAGE_VERSION = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
 const CONFIG_DISPLAY_PATH = "~/.pi/agent/pi-dictation.json";
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-dictation.json");
 const STRING_FIELDS = [
@@ -32,8 +34,9 @@ function validateConfig(config) {
     throw new Error("unknown configuration field");
   }
   for (const field of STRING_FIELDS) {
-    if (config[field] !== undefined && typeof config[field] !== "string") {
-      throw new Error(`${field} must be a string`);
+    if (config[field] !== undefined &&
+        (typeof config[field] !== "string" || Buffer.byteLength(config[field]) > 8 * 1024)) {
+      throw new Error(`${field} must be a bounded string`);
     }
   }
   for (const field of NUMBER_FIELDS) {
@@ -100,6 +103,8 @@ function readConfig() {
   if (!existsSync(CONFIG_PATH)) return { value: {}, status: "not found; defaults and environment used" };
   let parsed;
   try {
+    const info = statSync(CONFIG_PATH);
+    if (!info.isFile() || info.size < 2 || info.size > 64 * 1024) throw new Error();
     parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
   } catch {
     return { value: {}, error: `${CONFIG_DISPLAY_PATH}: invalid JSON` };
@@ -135,8 +140,12 @@ function findPackageVersion(packageName) {
   const require = createRequire(import.meta.url);
   for (const modulesDirectory of require.resolve.paths(packageName) || []) {
     try {
-      const parsed = JSON.parse(readFileSync(join(modulesDirectory, packageName, "package.json"), "utf8"));
-      if (parsed.name === packageName && typeof parsed.version === "string") return parsed.version;
+      const manifest = join(modulesDirectory, packageName, "package.json");
+      const info = statSync(manifest);
+      if (!info.isFile() || info.size < 2 || info.size > MAX_PACKAGE_MANIFEST_BYTES) continue;
+      const parsed = JSON.parse(readFileSync(manifest, "utf8"));
+      if (parsed.name === packageName && typeof parsed.version === "string" &&
+          SAFE_PACKAGE_VERSION.test(parsed.version)) return parsed.version;
     } catch {}
   }
   return "";

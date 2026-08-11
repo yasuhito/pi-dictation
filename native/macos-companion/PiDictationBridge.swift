@@ -10,6 +10,19 @@ import AppKit
 private let productIdentifier = "com.yasuhito.pi-dictation.bridge"
 private let protocolVersion = 3
 private let maximumFrameBytes = 64 * 1024
+private let maximumWavHeaderBytes = 64 * 1024
+private let streamingBufferBytes = 64 * 1024
+#if PROTOCOL_TESTING
+private let fixedSocketSendBufferBytes = Int32(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_SEND_BUFFER_BYTES"] ?? "") ?? 64 * 1024
+private let maximumRetainedWavFiles = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_RETAINED_FILES"] ?? "") ?? 2
+private let maximumRetainedWavBytes = Int64(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_RETAINED_BYTES"] ?? "") ?? 256 * 1024 * 1024
+private let authenticationDeadlineSeconds = max(0.05, (Double(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_AUTH_DEADLINE_MS"] ?? "") ?? 5_000) / 1000)
+#else
+private let fixedSocketSendBufferBytes: Int32 = 64 * 1024
+private let maximumRetainedWavFiles = 2
+private let maximumRetainedWavBytes: Int64 = 256 * 1024 * 1024
+private let authenticationDeadlineSeconds: TimeInterval = 5
+#endif
 private let challengeBytes = 32
 private let unknownCredentialSecret = Data(repeating: 0, count: 32).base64EncodedString()
 private let resultRetentionSeconds: TimeInterval = 10 * 60
@@ -24,6 +37,7 @@ private let initialOwnerLivenessSeconds: TimeInterval = ownerLivenessSeconds
 private let levelIntervalMilliseconds = 50
 private let levelReplaySlots = 600
 private let levelSubscriberQueueLimit = 64
+private let maximumDiagnosticLevelObservations = 64
 private let maximumConnections = 16
 private let maximumConnectionsPerCredential = 4
 private let validRequestOperations: Set<String> = [
@@ -67,6 +81,7 @@ private enum CompanionFailure: Error {
     case invalidFrame
     case authentication
     case busy
+    case storageFull
     case notFound
     case requestConflict
     case invalidState
@@ -232,6 +247,33 @@ private func fixedPaths() -> (root: String, runtime: String, socket: String, cre
     return (root, runtime, runtime + "/companion.sock", root + "/credential.json", root + "/hosts")
 }
 
+#if PROTOCOL_TESTING
+private final class ProtocolResourceMetrics {
+    static let shared = ProtocolResourceMetrics()
+    private let lock = NSLock()
+    private var maxima: [String: Int] = [:]
+
+    func record(_ name: String, bytes: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard bytes > (maxima[name] ?? 0) else { return }
+        maxima[name] = bytes
+        guard let data = try? JSONSerialization.data(withJSONObject: maxima, options: [.sortedKeys]) else { return }
+        let path = fixedPaths().runtime + "/resource-metrics.json"
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return }
+        defer { Darwin.close(descriptor) }
+        try? writeAll(descriptor, data: data)
+    }
+}
+
+private func recordResourceMetric(_ name: String, bytes: Int) {
+    ProtocolResourceMetrics.shared.record(name, bytes: bytes)
+}
+#else
+private func recordResourceMetric(_ name: String, bytes: Int) {}
+#endif
+
 private func writeExclusive(_ data: Data, to path: String) throws {
     let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
     guard descriptor >= 0 else { throw CompanionFailure.unsafeStorage }
@@ -337,7 +379,7 @@ private func executableDigest() throws -> String {
           (info.st_mode & 0o777) == 0o700,
           info.st_nlink == 1 else { throw CompanionFailure.unsafeStorage }
     var digest = SHA256()
-    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    var buffer = [UInt8](repeating: 0, count: streamingBufferBytes)
     while true {
         let count = buffer.withUnsafeMutableBytes { bytes in
             Darwin.read(descriptor, bytes.baseAddress!, bytes.count)
@@ -590,6 +632,7 @@ private struct PersistedRecording: Codable {
     let id: String
     let ownerId: String
     let leaseHash: String
+    let maximumResultBytes: Int64?
     var state: String
     var length: Int?
     var sha256: String?
@@ -638,6 +681,7 @@ private final class PcmLevelReader {
         defer { try? handle.close() }
         if cursor == nil {
             let header = try handle.read(upToCount: maximumFrameBytes) ?? Data()
+            recordResourceMetric("capture", bytes: header.count)
             if header.count < 44 { return [] }
             guard String(data: header[0..<4], encoding: .ascii) == "RIFF",
                   String(data: header[8..<12], encoding: .ascii) == "WAVE" else {
@@ -689,6 +733,7 @@ private final class PcmLevelReader {
               let chunk = try handle.read(upToCount: bytesPerInterval), !chunk.isEmpty {
             chunksRead += 1
             pending.append(chunk)
+            recordResourceMetric("capture", bytes: pending.count)
             cursor! += UInt64(chunk.count)
             drainPendingIntervals()
         }
@@ -735,6 +780,7 @@ private final class LevelSubscriber {
             return
         }
         pending.append(event)
+        recordResourceMetric("levelQueue", bytes: pending.count)
         scheduleDrainLocked()
         lock.unlock()
     }
@@ -752,6 +798,7 @@ private final class LevelSubscriber {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         closed = true
+        recordResourceMetric("levelDisconnect", bytes: 1)
         replay.removeAll()
         pending.removeAll()
         lock.unlock()
@@ -778,6 +825,10 @@ private final class LevelSubscriber {
             streamSequence += 1
             lock.unlock()
             do {
+#if PROTOCOL_TESTING
+                if let delayText = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LEVEL_WRITE_DELAY_MS"],
+                   let delay = UInt32(delayText), delay > 0 { usleep(delay * 1_000) }
+#endif
                 let payload = try jsonData(event)
                 let eventTag = authenticationTag(secret: request.secret, fields: [
                     utf8("stream"), utf8(String(request.clientVersion)), utf8(String(protocolVersion)),
@@ -821,14 +872,18 @@ private final class BridgeRecording {
     var ownerLivenessTimer: DispatchSourceTimer?
     var retentionTimer: DispatchWorkItem?
     var deviceObserver: NSObjectProtocol?
+    let maximumResultBytes: Int64
+    var activeFetchDescriptor: Int32?
 
-    init(id: String, ownerId: String, leaseHash: Data, url: URL, state: String = "recording",
-         length: Int? = nil, sha256: String? = nil, completion: String = "stopped",
-         failureReason: String? = nil, terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
+    init(id: String, ownerId: String, leaseHash: Data, url: URL, maximumResultBytes: Int64,
+         state: String = "recording", length: Int? = nil, sha256: String? = nil,
+         completion: String = "stopped", failureReason: String? = nil,
+         terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.leaseHash = leaseHash
         self.url = url
+        self.maximumResultBytes = maximumResultBytes
         self.state = state
         self.length = length
         self.sha256 = sha256
@@ -842,23 +897,66 @@ private final class BridgeRecording {
 }
 
 #if PROTOCOL_TESTING
-private func protocolTestingWav() -> Data {
-    var bytes: [UInt8] = []
-    func appendASCII(_ value: String) { bytes.append(contentsOf: value.utf8) }
+private func writeProtocolTestingWav(to url: URL) throws {
+    let requested = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_WAV_DATA_BYTES"] ?? "") ?? 3200
+    let requestedJunk = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_WAV_JUNK_BYTES"] ?? "") ?? 0
+    let evenBytes = requested - requested % 2
+    let evenJunkBytes = requestedJunk - requestedJunk % 2
+    let totalPayloadBytes = Int64(36) + Int64(evenBytes) + (evenJunkBytes > 0 ? Int64(8 + evenJunkBytes) : 0)
+    guard evenBytes >= 2, evenJunkBytes >= 0, totalPayloadBytes <= Int64(UInt32.max) else { throw CompanionFailure.failed }
+    let dataBytes = UInt32(evenBytes)
+    var header: [UInt8] = []
+    func appendASCII(_ value: String) { header.append(contentsOf: value.utf8) }
     func appendLE16(_ value: UInt16) {
-        bytes.append(UInt8(value & 0xff)); bytes.append(UInt8((value >> 8) & 0xff))
+        header.append(UInt8(value & 0xff)); header.append(UInt8((value >> 8) & 0xff))
     }
     func appendLE32(_ value: UInt32) {
-        bytes.append(UInt8(value & 0xff)); bytes.append(UInt8((value >> 8) & 0xff))
-        bytes.append(UInt8((value >> 16) & 0xff)); bytes.append(UInt8((value >> 24) & 0xff))
+        header.append(UInt8(value & 0xff)); header.append(UInt8((value >> 8) & 0xff))
+        header.append(UInt8((value >> 16) & 0xff)); header.append(UInt8((value >> 24) & 0xff))
     }
-    let dataBytes: UInt32 = 3200
-    appendASCII("RIFF"); appendLE32(36 + dataBytes); appendASCII("WAVE")
+    appendASCII("RIFF"); appendLE32(UInt32(totalPayloadBytes)); appendASCII("WAVE")
     appendASCII("fmt "); appendLE32(16); appendLE16(1); appendLE16(1)
     appendLE32(16000); appendLE32(32000); appendLE16(2); appendLE16(16)
     appendASCII("data"); appendLE32(dataBytes)
-    for _ in 0..<1600 { appendLE16(UInt16(bitPattern: Int16(1200))) }
-    return Data(bytes)
+
+    let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard descriptor >= 0 else { throw CompanionFailure.failed }
+    var complete = false
+    defer {
+        Darwin.close(descriptor)
+        if !complete { unlink(url.path) }
+    }
+    let headerData = Data(header)
+    recordResourceMetric("capture", bytes: headerData.count)
+    try writeAll(descriptor, data: headerData)
+    let chunkSamples = streamingBufferBytes / 2
+    var chunk = Data(capacity: streamingBufferBytes)
+    for _ in 0..<chunkSamples { chunk.append(contentsOf: [0xb0, 0x04]) }
+    var remaining = Int(dataBytes)
+    while remaining > 0 {
+        let count = min(remaining, chunk.count)
+        recordResourceMetric("capture", bytes: count)
+        try writeAll(descriptor, data: count == chunk.count ? chunk : Data(chunk.prefix(count)))
+        remaining -= count
+    }
+    if evenJunkBytes > 0 {
+        var junkHeader: [UInt8] = []
+        junkHeader.append(contentsOf: "JUNK".utf8)
+        let junkSize = UInt32(evenJunkBytes)
+        junkHeader.append(UInt8(junkSize & 0xff)); junkHeader.append(UInt8((junkSize >> 8) & 0xff))
+        junkHeader.append(UInt8((junkSize >> 16) & 0xff)); junkHeader.append(UInt8((junkSize >> 24) & 0xff))
+        try writeAll(descriptor, data: Data(junkHeader))
+        let zeros = Data(count: streamingBufferBytes)
+        var junkRemaining = evenJunkBytes
+        while junkRemaining > 0 {
+            let count = min(junkRemaining, zeros.count)
+            recordResourceMetric("capture", bytes: count)
+            try writeAll(descriptor, data: count == zeros.count ? zeros : Data(zeros.prefix(count)))
+            junkRemaining -= count
+        }
+    }
+    guard fsync(descriptor) == 0 else { throw CompanionFailure.failed }
+    complete = true
 }
 #endif
 
@@ -1175,6 +1273,7 @@ private final class RecordingManager {
         removeDeviceObserverLocked(current)
         current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         current.levelSubscriber?.close(); current.levelSubscriber = nil
+        closeFetchLocked(current)
         current.recorder?.stop(); current.recorder = nil
         try removeAudioLocked(current)
         testCrash("revoke-after-audio-delete")
@@ -1240,19 +1339,36 @@ private final class RecordingManager {
 #if !PROTOCOL_TESTING
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CompanionFailure.failed }
 #endif
-        let maximumBytes = Int64(maximumDurationMs) * 32 + Int64(maximumFrameBytes)
+        let (pcmBytes, pcmOverflow) = Int64(maximumDurationMs).multipliedReportingOverflow(by: 32)
+        let (maximumBytes, headerOverflow) = pcmBytes.addingReportingOverflow(Int64(maximumWavHeaderBytes))
+        guard !pcmOverflow, !headerOverflow, maximumBytes > Int64(maximumWavHeaderBytes) else {
+            throw CompanionFailure.failed
+        }
+        let storageUsage = try storageUsageLocked()
+        guard storageUsage.files < maximumRetainedWavFiles,
+              maximumBytes <= maximumRetainedWavBytes,
+              storageUsage.bytes <= maximumRetainedWavBytes - maximumBytes else {
+            throw CompanionFailure.storageFull
+        }
+        let (admissionCapacity, admissionOverflow) = maximumBytes.multipliedReportingOverflow(by: 2)
+        guard !admissionOverflow else { throw CompanionFailure.storageFull }
         let capacity = try URL(fileURLWithPath: runtime).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
-        guard capacity >= maximumBytes else { throw CompanionFailure.failed }
+        guard capacity >= admissionCapacity else { throw CompanionFailure.storageFull }
         let url = URL(fileURLWithPath: runtime + "/recording-" + id + ".wav")
         var existing = stat()
         guard lstat(url.path, &existing) != 0, errno == ENOENT else { throw CompanionFailure.unsafeStorage }
 
-        let current = BridgeRecording(id: id, ownerId: ownerId, leaseHash: leaseHash, url: url)
+        let current = BridgeRecording(
+            id: id, ownerId: ownerId, leaseHash: leaseHash, url: url,
+            maximumResultBytes: maximumBytes
+        )
         recordings[id] = current
         activeId = id
         do {
+            try createReservationLocked(current)
             try persistLocked(current)
         } catch {
+            try? releaseReservationLocked(current)
             recordings.removeValue(forKey: id)
             activeId = nil
             throw error
@@ -1264,8 +1380,7 @@ private final class RecordingManager {
                 if ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FAIL_CAPTURE"] == "1" {
                     throw CompanionFailure.failed
                 }
-                guard FileManager.default.createFile(atPath: url.path, contents: protocolTestingWav()),
-                      chmod(url.path, S_IRUSR | S_IWUSR) == 0 else { throw CompanionFailure.failed }
+                try writeProtocolTestingWav(to: url)
                 current.captureStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 #else
                 _ = try withPinnedDefaultInput(
@@ -1322,7 +1437,12 @@ private final class RecordingManager {
         }
 
         let levels = DispatchSource.makeTimerSource(queue: .global())
-        levels.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
+#if PROTOCOL_TESTING
+        let levelStartDelay = Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LEVEL_START_DELAY_MS"] ?? "") ?? 50
+#else
+        let levelStartDelay = 50
+#endif
+        levels.schedule(deadline: .now() + .milliseconds(levelStartDelay), repeating: .milliseconds(50))
         levels.setEventHandler { [weak self, weak current] in
             guard let self, let current else { return }
             self.captureLevel(current)
@@ -1433,7 +1553,9 @@ private final class RecordingManager {
         defer { lock.unlock() }
         let current = try owned(id: id, ownerId: ownerId, leaseSecret: leaseSecret)
         guard current.state == "recording" else { throw CompanionFailure.invalidState }
-        return current.observations.filter { ($0["sequence"] as? Int ?? -1) > after }
+        return Array(current.observations.filter {
+            ($0["sequence"] as? Int ?? -1) > after
+        }.prefix(maximumDiagnosticLevelObservations))
     }
 
     func subscribe(id: String, ownerId: String, leaseSecret: Data, after: Int,
@@ -1492,12 +1614,30 @@ private final class RecordingManager {
         return statusPayload(current)
     }
 
-    func fetch(id: String, ownerId: String, leaseSecret: Data) throws -> (payload: [String: Any], url: URL) {
+    func beginFetch(id: String, ownerId: String, leaseSecret: Data, descriptor: Int32) throws -> (payload: [String: Any], url: URL) {
         lock.lock()
         defer { lock.unlock() }
         let current = try owned(id: id, ownerId: ownerId, leaseSecret: leaseSecret)
-        guard current.state == "result-ready" else { throw CompanionFailure.invalidState }
+        guard current.state == "result-ready", current.activeFetchDescriptor == nil else {
+            throw CompanionFailure.invalidState
+        }
+        current.activeFetchDescriptor = descriptor
         return (statusPayload(current).filter { $0.key != "state" }, current.url)
+    }
+
+    func endFetch(id: String, descriptor: Int32) {
+        lock.lock()
+        if recordings[id]?.activeFetchDescriptor == descriptor {
+            recordings[id]?.activeFetchDescriptor = nil
+        }
+        lock.unlock()
+    }
+
+    private func closeFetchLocked(_ current: BridgeRecording) {
+        if let descriptor = current.activeFetchDescriptor {
+            current.activeFetchDescriptor = nil
+            shutdown(descriptor, SHUT_RDWR)
+        }
     }
 
     func cancel(id: String, ownerId: String, leaseSecret: Data) throws -> [String: Any] {
@@ -1515,6 +1655,7 @@ private final class RecordingManager {
         stopDurationWatchdogLocked(current); current.ownerLivenessTimer?.cancel()
         current.retentionTimer?.cancel(); current.levelTimer?.cancel()
         removeDeviceObserverLocked(current)
+        closeFetchLocked(current)
         current.recorder?.stop()
         current.recorder = nil
         current.levelSubscriber?.enqueue(["type": "terminal", "state": "cancelled"])
@@ -1541,7 +1682,9 @@ private final class RecordingManager {
             catch { scheduleCleanupRetryLocked(current); throw error }
             return statusPayload(current)
         }
-        guard current.state == "result-ready" else { throw CompanionFailure.invalidState }
+        guard current.state == "result-ready", current.activeFetchDescriptor == nil else {
+            throw CompanionFailure.invalidState
+        }
         let terminalAt = Date().timeIntervalSince1970
         try persistTransitionLocked(current, state: "acknowledged", terminalAt: terminalAt)
         current.retentionTimer?.cancel()
@@ -1631,15 +1774,16 @@ private final class RecordingManager {
 
         var result: (Int, String)?
         do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: current.url.path)
-            guard let size = attributes[.size] as? NSNumber, size.intValue >= 44 else { throw CompanionFailure.failed }
+            let size = try validateFinalizedWav(current.url, maximumResultBytes: current.maximumResultBytes)
             try syncResultFile(current.url)
-            result = (size.intValue, try fileDigest(current.url))
+            result = (size, try fileDigest(current.url))
         } catch {}
         lock.lock()
         defer { lock.unlock() }
         guard current.state == "finalizing" else { return }
         if let result {
+            do { try releaseReservationLocked(current) }
+            catch { failLocked(current); return }
             current.length = result.0; current.sha256 = result.1; current.state = "result-ready"
             current.terminalAt = Date().timeIntervalSince1970
             do { try persistLocked(current) }
@@ -1671,9 +1815,98 @@ private final class RecordingManager {
         if committed { scheduleRetentionLocked(current) }
     }
 
+    private func reservationPath(_ id: String) -> String { runtime + "/recording-" + id + ".reserve" }
+
+    private func managedArtifactSize(_ path: String) throws -> Int64? {
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
+            return nil
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(),
+              (info.st_mode & 0o777) == 0o600, info.st_nlink == 1,
+              info.st_size >= 0 else { throw CompanionFailure.unsafeStorage }
+        return Int64(info.st_size)
+    }
+
+    private func storageUsageLocked() throws -> (files: Int, bytes: Int64) {
+        var files = 0
+        var bytes: Int64 = 0
+        for current in recordings.values {
+            let wavBytes = try managedArtifactSize(current.url.path)
+            let reservationBytes = try managedArtifactSize(reservationPath(current.id))
+            guard wavBytes != nil || reservationBytes != nil else { continue }
+            files += 1
+            let chargedBytes = reservationBytes.map { max($0, current.maximumResultBytes) } ?? wavBytes!
+            let (total, overflow) = bytes.addingReportingOverflow(chargedBytes)
+            guard !overflow else { throw CompanionFailure.storageFull }
+            bytes = total
+        }
+        return (files, bytes)
+    }
+
+    private func createReservationLocked(_ current: BridgeRecording) throws {
+#if PROTOCOL_TESTING
+        if ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FAIL_RESERVATION"] == "1" {
+            throw CompanionFailure.storageFull
+        }
+#endif
+        let path = reservationPath(current.id)
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            if errno == ENOSPC || errno == EDQUOT { throw CompanionFailure.storageFull }
+            throw CompanionFailure.unsafeStorage
+        }
+        var complete = false
+        defer {
+            Darwin.close(descriptor)
+            if !complete { unlink(path) }
+        }
+        var store = fstore_t(
+            fst_flags: UInt32(F_ALLOCATECONTIG), fst_posmode: Int32(F_PEOFPOSMODE),
+            fst_offset: 0, fst_length: off_t(current.maximumResultBytes), fst_bytesalloc: 0
+        )
+        recordResourceMetric("reservationRequested", bytes: Int(current.maximumResultBytes))
+        let contiguousResult = fcntl(descriptor, F_PREALLOCATE, &store)
+        if contiguousResult != 0 || store.fst_bytesalloc < off_t(current.maximumResultBytes) {
+            store.fst_flags = UInt32(F_ALLOCATEALL)
+            store.fst_bytesalloc = 0
+            guard fcntl(descriptor, F_PREALLOCATE, &store) == 0 else {
+                recordResourceMetric("reservationErrno", bytes: Int(errno))
+                throw CompanionFailure.storageFull
+            }
+        }
+        recordResourceMetric("reservationAllocated", bytes: Int(store.fst_bytesalloc))
+        guard store.fst_bytesalloc >= off_t(current.maximumResultBytes),
+              ftruncate(descriptor, off_t(current.maximumResultBytes)) == 0,
+              fsync(descriptor) == 0 else {
+            recordResourceMetric("reservationFinalizeErrno", bytes: Int(errno))
+            throw CompanionFailure.storageFull
+        }
+        complete = true
+        try syncRuntimeDirectory()
+    }
+
+    private func releaseReservationLocked(_ current: BridgeRecording) throws {
+        let path = reservationPath(current.id)
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
+            return
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(),
+              (info.st_mode & 0o777) == 0o600, info.st_nlink == 1,
+              unlink(path) == 0 else { throw CompanionFailure.unsafeStorage }
+        try syncRuntimeDirectory()
+    }
+
     private func removeAudioLocked(_ current: BridgeRecording) throws {
 #if PROTOCOL_TESTING
         let failureMarker = runtime + "/test-fail-audio-cleanup"
+        let persistentFailureMarker = runtime + "/test-always-fail-audio-cleanup"
+        if FileManager.default.fileExists(atPath: persistentFailureMarker) {
+            throw CompanionFailure.failed
+        }
         if FileManager.default.fileExists(atPath: failureMarker) {
             try? FileManager.default.removeItem(atPath: failureMarker)
             throw CompanionFailure.failed
@@ -1683,11 +1916,16 @@ private final class RecordingManager {
             try FileManager.default.removeItem(at: current.url)
             try syncRuntimeDirectory()
         }
-        guard !FileManager.default.fileExists(atPath: current.url.path) else { throw CompanionFailure.unsafeStorage }
+        try releaseReservationLocked(current)
+        guard !FileManager.default.fileExists(atPath: current.url.path),
+              !FileManager.default.fileExists(atPath: reservationPath(current.id)) else {
+            throw CompanionFailure.unsafeStorage
+        }
     }
 
     private func expireLocked(_ current: BridgeRecording) {
         guard current.state == "result-ready" else { return }
+        closeFetchLocked(current)
         let completedAt = current.terminalAt ?? Date().timeIntervalSince1970
         current.state = "expired"; current.length = nil; current.sha256 = nil
         current.terminalAt = completedAt + resultRetentionSeconds
@@ -1816,8 +2054,9 @@ private final class RecordingManager {
 
     private func persistedValue(_ current: BridgeRecording) -> PersistedRecording {
         PersistedRecording(
-            schemaVersion: 1, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(), state: current.state,
+            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
+            leaseHash: current.leaseHash.base64EncodedString(),
+            maximumResultBytes: current.maximumResultBytes, state: current.state,
             length: current.length, sha256: current.sha256,
             completion: ["recording", "finalizing", "result-ready"].contains(current.state) ? current.completion : nil,
             failureReason: current.state == "failed" ? current.failureReason : nil,
@@ -1827,8 +2066,9 @@ private final class RecordingManager {
 
     private func persistTransitionLocked(_ current: BridgeRecording, state: String, terminalAt: TimeInterval) throws {
         let value = PersistedRecording(
-            schemaVersion: 1, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(), state: state,
+            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
+            leaseHash: current.leaseHash.base64EncodedString(),
+            maximumResultBytes: current.maximumResultBytes, state: state,
             length: nil, sha256: nil, completion: nil, failureReason: nil, terminalAt: terminalAt
         )
         try persistLocked(value, id: current.id)
@@ -1951,7 +2191,7 @@ private final class RecordingManager {
             let path = runtime + "/" + name
             let data = try readPrivateData(path, maximumBytes: maximumFrameBytes)
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
+                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "maximumResultBytes", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
                   Set(["schemaVersion", "id", "ownerId", "leaseHash", "state"]).isSubset(of: Set(object.keys)) else {
                 throw CompanionFailure.unsafeStorage
             }
@@ -1967,7 +2207,13 @@ private final class RecordingManager {
                       (persisted.state == "failed" ? validFailureReasons.contains(persisted.failureReason ?? "") : persisted.failureReason == nil) &&
                       persisted.terminalAt != nil
                     : persisted.length == nil && persisted.sha256 == nil && persisted.failureReason == nil && persisted.terminalAt == nil
-            guard persisted.schemaVersion == 1,
+            let legacyLength = Int64(persisted.length ?? 0)
+            let legacyMaximum = legacyLength <= maximumRetainedWavBytes - Int64(maximumWavHeaderBytes)
+                ? legacyLength + Int64(maximumWavHeaderBytes) : maximumRetainedWavBytes
+            let restoredMaximum = persisted.maximumResultBytes ?? legacyMaximum
+            guard [1, 2].contains(persisted.schemaVersion),
+                  restoredMaximum >= Int64(persisted.length ?? 0),
+                  restoredMaximum <= maximumRetainedWavBytes,
                   UUID(uuidString: persisted.id) != nil,
                   name == "recording-" + persisted.id + ".json",
                   UUID(uuidString: persisted.ownerId) != nil,
@@ -1977,7 +2223,8 @@ private final class RecordingManager {
             let current = BridgeRecording(
                 id: persisted.id, ownerId: persisted.ownerId, leaseHash: leaseHash,
                 url: URL(fileURLWithPath: runtime + "/recording-" + persisted.id + ".wav"),
-                state: persisted.state, length: persisted.length, sha256: persisted.sha256,
+                maximumResultBytes: restoredMaximum, state: persisted.state,
+                length: persisted.length, sha256: persisted.sha256,
                 completion: persisted.completion ?? "stopped", failureReason: persisted.failureReason,
                 terminalAt: persisted.terminalAt
             )
@@ -1991,7 +2238,9 @@ private final class RecordingManager {
                 recoverAsFailedLocked(current)
             } else if current.state == "result-ready" {
                 guard let length = current.length, let sha256 = current.sha256,
-                      (try? validateResultFile(current.url, length: length, sha256: sha256)) == true,
+                      (try? validateResultFile(
+                        current.url, length: length, maximumResultBytes: current.maximumResultBytes, sha256: sha256
+                      )) == true,
                       current.terminalAt != nil else {
                     recoverAsFailedLocked(current)
                     continue
@@ -2009,6 +2258,16 @@ private final class RecordingManager {
                 if recordings[current.id] != nil { scheduleRetentionLocked(current) }
             }
         }
+        let restoredReservations = recordings.values.filter {
+            ["recording", "finalizing", "result-ready"].contains($0.state)
+        }
+        let restoredReservedBytes = restoredReservations.reduce(Int64(0)) { partial, recording in
+            partial + (recording.state == "result-ready" ? Int64(recording.length ?? 0) : recording.maximumResultBytes)
+        }
+        guard restoredReservations.count <= maximumRetainedWavFiles,
+              restoredReservedBytes <= maximumRetainedWavBytes else {
+            throw CompanionFailure.unsafeStorage
+        }
         let known = Set(recordings.keys.map { "recording-" + $0 + ".wav" })
         var removedOrphan = false
         for name in names where name.range(of: "^recording-[0-9A-Fa-f-]{36}\\.wav$", options: .regularExpression) != nil && !known.contains(name) {
@@ -2018,6 +2277,18 @@ private final class RecordingManager {
                 removedOrphan = true
             }
         }
+        for name in names where name.range(of: "^recording-[0-9A-Fa-f-]{36}\\.reserve$", options: .regularExpression) != nil {
+            let path = runtime + "/" + name
+            var info = stat()
+            if lstat(path, &info) != 0 {
+                guard errno == ENOENT else { throw CompanionFailure.unsafeStorage }
+                continue
+            }
+            guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(),
+                  (info.st_mode & 0o777) == 0o600, info.st_nlink == 1,
+                  unlink(path) == 0 else { throw CompanionFailure.unsafeStorage }
+            removedOrphan = true
+        }
         if removedOrphan { try syncRuntimeDirectory() }
     }
 
@@ -2025,14 +2296,89 @@ private final class RecordingManager {
         failLocked(current, reason: "companion-restart")
     }
 
-    private func validateResultFile(_ url: URL, length: Int, sha256: String) throws -> Bool {
+    private func validateResultFile(
+        _ url: URL, length: Int, maximumResultBytes: Int64, sha256: String
+    ) throws -> Bool {
         var info = stat()
         guard lstat(url.path, &info) == 0,
               (info.st_mode & S_IFMT) == S_IFREG,
               info.st_uid == getuid(), (info.st_mode & 0o777) == 0o600,
-              info.st_nlink == 1, info.st_size == length else { return false }
+              info.st_nlink == 1, info.st_size == length,
+              (try? validateFinalizedWav(url, maximumResultBytes: maximumResultBytes)) == length else { return false }
         return try fileDigest(url) == sha256
     }
+}
+
+private func littleEndianUInt16(_ data: Data, _ offset: Int) -> UInt16 {
+    UInt16(data[offset]) | UInt16(data[offset + 1]) << 8
+}
+
+private func littleEndianUInt32(_ data: Data, _ offset: Int) -> UInt32 {
+    UInt32(data[offset]) | UInt32(data[offset + 1]) << 8 |
+        UInt32(data[offset + 2]) << 16 | UInt32(data[offset + 3]) << 24
+}
+
+private func validateFinalizedWav(_ url: URL, maximumResultBytes: Int64) throws -> Int {
+    let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw CompanionFailure.failed }
+    defer { Darwin.close(descriptor) }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0,
+          (info.st_mode & S_IFMT) == S_IFREG,
+          info.st_uid == getuid(), (info.st_mode & 0o777) == 0o600,
+          info.st_nlink == 1, info.st_size >= 44,
+          info.st_size <= maximumResultBytes,
+          info.st_size <= maximumRetainedWavBytes,
+          info.st_size <= off_t(Int.max) else { throw CompanionFailure.failed }
+    func readAt(_ offset: Int, _ count: Int) throws -> Data {
+        var data = Data(count: count)
+        let amount = data.withUnsafeMutableBytes { bytes in
+            pread(descriptor, bytes.baseAddress!, count, off_t(offset))
+        }
+        guard amount == count else { throw CompanionFailure.failed }
+        return data
+    }
+    let riff = try readAt(0, 12)
+    let fileSize = Int(info.st_size)
+    guard String(data: riff[0..<4], encoding: .ascii) == "RIFF",
+          String(data: riff[8..<12], encoding: .ascii) == "WAVE",
+          Int(littleEndianUInt32(riff, 4)) + 8 == fileSize else { throw CompanionFailure.failed }
+    var offset = 12
+    var formatSeen = false
+    var dataSeen = false
+    var pcmBytes = 0
+    while offset + 8 <= fileSize {
+        guard offset + 8 <= maximumWavHeaderBytes else { throw CompanionFailure.failed }
+        let chunk = try readAt(offset, 8)
+        let identifier = String(data: chunk[0..<4], encoding: .ascii)
+        let size = Int(littleEndianUInt32(chunk, 4))
+        let body = offset + 8
+        let (unpaddedEnd, overflow) = body.addingReportingOverflow(size)
+        let end = unpaddedEnd + (size % 2)
+        guard !overflow, end > offset, end <= fileSize else { throw CompanionFailure.failed }
+        if identifier == "fmt " {
+            guard !formatSeen, !dataSeen, size >= 16 else { throw CompanionFailure.failed }
+            let format = try readAt(body, 16)
+            guard littleEndianUInt16(format, 0) == 1,
+                  littleEndianUInt16(format, 2) == 1,
+                  littleEndianUInt32(format, 4) == 16_000,
+                  littleEndianUInt32(format, 8) == 32_000,
+                  littleEndianUInt16(format, 12) == 2,
+                  littleEndianUInt16(format, 14) == 16 else { throw CompanionFailure.failed }
+            formatSeen = true
+        } else if identifier == "data" {
+            let maximumPcmBytes = maximumResultBytes - Int64(maximumWavHeaderBytes)
+            guard formatSeen, !dataSeen, size >= 2, size % 2 == 0,
+                  body <= maximumWavHeaderBytes, maximumPcmBytes >= 2,
+                  Int64(size) <= maximumPcmBytes else { throw CompanionFailure.failed }
+            dataSeen = true
+            pcmBytes = size
+        }
+        offset = end
+    }
+    guard offset == fileSize, formatSeen, dataSeen,
+          fileSize - pcmBytes <= maximumWavHeaderBytes else { throw CompanionFailure.failed }
+    return fileSize
 }
 
 private func syncResultFile(_ url: URL) throws {
@@ -2047,8 +2393,9 @@ private func fileDigest(_ url: URL) throws -> String {
     defer { try? handle.close() }
     var digest = SHA256()
     while true {
-        let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
+        let chunk = try handle.read(upToCount: streamingBufferBytes) ?? Data()
         if chunk.isEmpty { break }
+        recordResourceMetric("sha256", bytes: chunk.count)
         digest.update(data: chunk)
     }
     return Data(digest.finalize()).hex
@@ -2119,18 +2466,26 @@ private func requestLease(_ payload: [String: Any]) throws -> (id: String, lease
 
 private func setSendTimeout(_ descriptor: Int32, seconds: Int) throws {
     var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+    var sendBuffer = fixedSocketSendBufferBytes
     guard setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout,
-                     socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+                     socklen_t(MemoryLayout<timeval>.size)) == 0,
+          setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &sendBuffer,
+                     socklen_t(MemoryLayout<Int32>.size)) == 0 else {
         throw CompanionFailure.invalidSocket
     }
 }
 
 private func streamFile(_ descriptor: Int32, url: URL) throws {
+#if PROTOCOL_TESTING
+    if let delayText = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_FETCH_DELAY_MS"],
+       let delay = UInt32(delayText), delay > 0 { usleep(delay * 1_000) }
+#endif
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     while true {
-        let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
+        let chunk = try handle.read(upToCount: streamingBufferBytes) ?? Data()
         if chunk.isEmpty { break }
+        recordResourceMetric("fetch", bytes: chunk.count)
         try writeAll(descriptor, data: chunk)
     }
 }
@@ -2138,11 +2493,17 @@ private func streamFile(_ descriptor: Int32, url: URL) throws {
 private func handleRequest(
     _ descriptor: Int32,
     credentials: [String: Credential],
-    recordings: RecordingManager
+    recordings: RecordingManager,
+    authenticationCompleted: () -> Void
 ) throws {
     let request = try readAuthenticatedRequest(descriptor, credentials: credentials)
+    authenticationCompleted()
     try recordings.openConnection(ownerId: request.credential.id, descriptor: descriptor)
-    defer { recordings.closeConnection(ownerId: request.credential.id, descriptor: descriptor) }
+    var fetchRecordingId: String?
+    defer {
+        if let fetchRecordingId { recordings.endFetch(id: fetchRecordingId, descriptor: descriptor) }
+        recordings.closeConnection(ownerId: request.credential.id, descriptor: descriptor)
+    }
     let replay: (String, [String: Any])?
     do {
         replay = try recordings.register(ownerId: request.credential.id, requestId: request.requestId,
@@ -2164,8 +2525,11 @@ private func handleRequest(
         if request.operation == "fetch", replay.0 == "ok" {
             guard exactKeys(request.payload, ["recordingId", "leaseSecret"]) else { throw CompanionFailure.invalidFrame }
             let owned = try requestLease(request.payload)
-            replayURL = try recordings.fetch(id: owned.id, ownerId: request.credential.id,
-                                             leaseSecret: owned.leaseSecret).url
+            replayURL = try recordings.beginFetch(
+                id: owned.id, ownerId: request.credential.id,
+                leaseSecret: owned.leaseSecret, descriptor: descriptor
+            ).url
+            fetchRecordingId = owned.id
             try setSendTimeout(descriptor, seconds: 10)
         }
         try writeAuthenticatedResponse(descriptor, request: request, status: replay.0, payloadObject: replay.1)
@@ -2247,7 +2611,11 @@ private func handleRequest(
         case "fetch":
             guard exactKeys(request.payload, ["recordingId", "leaseSecret"]) else { throw CompanionFailure.invalidFrame }
             let owned = try requestLease(request.payload)
-            let result = try recordings.fetch(id: owned.id, ownerId: request.credential.id, leaseSecret: owned.leaseSecret)
+            let result = try recordings.beginFetch(
+                id: owned.id, ownerId: request.credential.id,
+                leaseSecret: owned.leaseSecret, descriptor: descriptor
+            )
+            fetchRecordingId = owned.id
             payload = result.payload
             streamURL = result.url
         case "cancel":
@@ -2267,6 +2635,9 @@ private func handleRequest(
         status = "not-found"
     } catch CompanionFailure.invalidState {
         status = "invalid-state"
+    } catch CompanionFailure.storageFull {
+        status = "failed"
+        payload = ["reason": "storage-full"]
     } catch {
         status = "failed"
     }
@@ -2367,6 +2738,79 @@ private final class LifecycleAppleEventRouter: NSObject {
     @objc func reboot(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) { onReboot() }
 }
 
+private final class BoundedLog {
+    private let path: String
+    private let lock = NSLock()
+    private var previous = ""
+    private var repeats = 0
+    private var closed = false
+    private let maximumBytes: off_t
+
+    init(runtime: String) {
+        path = runtime + "/companion.log"
+#if PROTOCOL_TESTING
+        maximumBytes = off_t(Int(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LOG_BYTES"] ?? "") ?? 1024 * 1024)
+#else
+        maximumBytes = 1024 * 1024
+#endif
+    }
+
+    func event(_ code: String) {
+        let safeCode = code.range(of: "^[a-z0-9-]{1,64}$", options: .regularExpression) == nil ? "unknown" : code
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return }
+        if safeCode == previous {
+            repeats = min(1_000_000, repeats + 1)
+            return
+        }
+        flushRepeatsLocked()
+        appendLocked("{\"component\":\"companion\",\"code\":\"\(safeCode)\"}\n")
+        previous = safeCode
+    }
+
+    func close() {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        flushRepeatsLocked()
+        closed = true
+        lock.unlock()
+    }
+
+    private func flushRepeatsLocked() {
+        guard repeats > 0 else { return }
+        appendLocked("{\"component\":\"companion\",\"code\":\"repeated\",\"count\":\(repeats)}\n")
+        repeats = 0
+    }
+
+    private func safeFileSize(_ candidate: String) -> off_t? {
+        var info = stat()
+        if lstat(candidate, &info) != 0 { return errno == ENOENT ? 0 : nil }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(),
+              (info.st_mode & 0o777) == 0o600, info.st_nlink == 1 else { return nil }
+        return info.st_size
+    }
+
+    private func appendLocked(_ line: String) {
+        let data = Data(line.utf8)
+        guard data.count <= 1024, let size = safeFileSize(path) else { return }
+        if size + off_t(data.count) > maximumBytes {
+            guard safeFileSize(path + ".1") != nil, safeFileSize(path + ".2") != nil else { return }
+            unlink(path + ".2")
+            if rename(path + ".1", path + ".2") != 0, errno != ENOENT { return }
+            guard rename(path, path + ".1") == 0 else { return }
+        }
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return }
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_nlink == 1,
+              info.st_size + off_t(data.count) <= maximumBytes else { return }
+        try? writeAll(descriptor, data: data)
+    }
+}
+
 private final class ConnectionLimiter {
     private let lock = NSLock()
     private var active = 0
@@ -2393,6 +2837,8 @@ private func serve() throws {
     try verifyPreflightReceipt(root: paths.root)
     let recordings = try RecordingManager(runtime: paths.runtime)
     let connectionLimiter = ConnectionLimiter()
+    let logger = BoundedLog(runtime: paths.runtime)
+    logger.event("companion-start")
     try removeStaleSocketIfSafe(path: paths.socket)
     let listener = try makeUnixListener(path: paths.socket)
     func signalSource(_ value: Int32, reason: String, exits: Bool) -> DispatchSourceSignal {
@@ -2401,6 +2847,8 @@ private func serve() throws {
         source.setEventHandler {
             recordings.failActive(reason: reason)
             if exits {
+                logger.event("companion-stop")
+                logger.close()
                 Darwin.close(listener)
                 unlink(paths.socket)
                 exit(EXIT_SUCCESS)
@@ -2447,6 +2895,8 @@ private func serve() throws {
         recordings.failActive(reason: "session-lock")
     }
     defer {
+        logger.event("companion-stop")
+        logger.close()
         durationRequest.cancel()
         for source in lifecycleSignals { source.cancel() }
         workspace.removeObserver(sleepObserver)
@@ -2460,6 +2910,7 @@ private func serve() throws {
     DispatchQueue.global().async {
         while true {
             var timeout = timeval(tv_sec: 5, tv_usec: 0)
+            var sendBuffer = fixedSocketSendBufferBytes
             let client = accept(listener, nil, nil)
             if client < 0 { continue }
             guard connectionLimiter.acquire() else {
@@ -2467,18 +2918,36 @@ private func serve() throws {
                 Darwin.close(client)
                 continue
             }
-            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            guard setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                             socklen_t(MemoryLayout<timeval>.size)) == 0,
+                  setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                             socklen_t(MemoryLayout<timeval>.size)) == 0,
+                  setsockopt(client, SOL_SOCKET, SO_SNDBUF, &sendBuffer,
+                             socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                connectionLimiter.release()
+                shutdown(client, SHUT_RDWR)
+                Darwin.close(client)
+                continue
+            }
+            let authenticationDeadline = DispatchWorkItem { shutdown(client, SHUT_RDWR) }
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + authenticationDeadlineSeconds,
+                execute: authenticationDeadline
+            )
             DispatchQueue.global().async {
-                defer { connectionLimiter.release() }
+                defer {
+                    authenticationDeadline.cancel()
+                    connectionLimiter.release()
+                }
                 do {
                     let credentials = try readCredentials(primary: paths.credential, hosts: paths.hostCredentials)
-                    try handleRequest(client, credentials: credentials, recordings: recordings)
+                    try handleRequest(
+                        client, credentials: credentials, recordings: recordings,
+                        authenticationCompleted: { authenticationDeadline.cancel() }
+                    )
                 }
                 catch {
-#if PROTOCOL_TESTING
-                    fputs("protocol test request failed: \(error)\n", stderr)
-#endif
+                    logger.event("request-failed")
                 }
                 shutdown(client, SHUT_RDWR)
                 Darwin.close(client)

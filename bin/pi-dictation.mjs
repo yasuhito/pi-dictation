@@ -285,8 +285,11 @@ function buildBundle(output, installId = "standalone-build") {
   }
 }
 
-function readJsonOwned(path, description) {
-  inspectPath(path, "file", 0o600, description);
+function readJsonOwned(path, description, maximumBytes = 64 * 1024) {
+  const info = inspectPath(path, "file", 0o600, description);
+  if (!info || info.size < 2 || info.size > maximumBytes) {
+    throw new CliError(`Refusing oversized ${description}.`);
+  }
   let value;
   try {
     value = JSON.parse(readFileSync(path, "utf8"));

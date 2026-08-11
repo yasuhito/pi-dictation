@@ -55,12 +55,47 @@ async function harness(mode = "valid", credentialMetadata = {}) {
 
 runRecorderContract("bridge recording", () => harness());
 
+test("Bridge fetch and SHA-256 buffers remain fixed as WAV length grows", async (t) => {
+  const measure = async (mode) => {
+    const instance = await harness(mode);
+    process.env.PI_DICTATION_TEST_RESOURCE_METRICS = "1";
+    delete globalThis.__piDictationBridgeResourceMetrics;
+    try {
+      const recording = await instance.recorder.start({ ...instance.startOptions, maxDurationMs: 60 * 60 * 1000 });
+      await recording.stop();
+      return { ...globalThis.__piDictationBridgeResourceMetrics };
+    } finally {
+      delete process.env.PI_DICTATION_TEST_RESOURCE_METRICS;
+      delete globalThis.__piDictationBridgeResourceMetrics;
+      await instance.cleanup();
+    }
+  };
+  const short = await measure("valid");
+  const long = await measure("validation-large");
+  await t.test("bounds socket buffering independently of WAV length", () => assert.equal(
+    Math.max(short.socket, long.socket) <= 128 * 1024 + 4, true,
+  ));
+  await t.test("bounds fetch chunks independently of WAV length", () => assert.equal(
+    Math.max(short.fetch, long.fetch) <= 64 * 1024, true,
+  ));
+  await t.test("bounds SHA-256 chunks independently of WAV length", () => assert.equal(
+    Math.max(short.sha256, long.sha256) <= 64 * 1024, true,
+  ));
+});
+
 test("the Recorder starts with an install or rotation credential containing creation metadata", async () => {
   const instance = await harness("valid", { createdAt: new Date().toISOString() });
   try {
     const recording = await instance.recorder.start(instance.startOptions);
     await recording.cancel();
     assert.equal(instance.events().includes("start"), true);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Recorder exposes storage reservation exhaustion safely", async () => {
+  const instance = await harness("storage-full");
+  try {
+    await assert.rejects(instance.recorder.start(instance.startOptions), { code: "recorder-storage-full" });
   } finally { await instance.cleanup(); }
 });
 
@@ -216,9 +251,13 @@ test("measurement unavailability remains explicit on the Recorder boundary", asy
 for (const [mode, code] of [
   ["oversized", "invalid-audio"],
   ["invalid-wav", "invalid-audio"],
+  ["wrong-sample-rate", "invalid-audio"],
+  ["pcm-over-duration", "invalid-audio"],
+  ["header-over-allowance", "invalid-audio"],
   ["duplicate-fmt-wav", "invalid-audio"],
   ["duplicate-data-wav", "invalid-audio"],
   ["trailing-data", "invalid-audio"],
+  ["extra-fetch-byte", "invalid-audio"],
   ["hash-mismatch", "invalid-audio"],
   ["metadata-conflict", "invalid-audio"],
   ["noncanonical-base64", "recording-failed"],
