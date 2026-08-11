@@ -324,9 +324,7 @@ function hasLocallyOwnedTunnelConfiguration(paths, alias) {
   try {
     if (readFileSync(paths.plist, "utf8") !== plist(paths, alias)) return false;
     const tunnel = readOwnedJson(paths.tunnel, "host tunnel configuration");
-    return tunnel.product === PRODUCT && tunnel.hostId === paths.id && tunnel.sshAlias === alias &&
-      tunnel.statusFile === paths.state && tunnel.logFile === paths.tunnelLog && tunnel.stableAfterMs === 30000 &&
-      Array.isArray(tunnel.sshArguments) && Array.isArray(tunnel.listenerProbeArguments) && Array.isArray(tunnel.healthProbeArguments);
+    return JSON.stringify(tunnel) === JSON.stringify(expectedTunnel(paths, alias));
   } catch { return false; }
 }
 
@@ -680,20 +678,44 @@ export function hostLogs(alias, json = false) {
   for (const record of output) console.log(JSON.stringify(record));
 }
 
-export function repairHost(alias, confirmed, force = false) {
-  const [{ host, paths }] = operationalRecords(alias);
+export async function repairHost(alias, confirmed, force = false, companionRequestAt) {
+  const [{ host, paths, credential }] = operationalRecords(alias);
   if (host.status.lifecycle !== "active") throw new BridgeHostError("Credential revocation is pending; finish uninstall before repair.");
   proveOwnedHostTreeForDeletion(paths, alias);
   proveExactTunnelConfiguration(paths, alias);
   const tunnelRunning = requireLaunchAgentObservation(`${PRODUCT}.tunnel.${paths.id}`);
   const listenerReady = tunnelRunning && parseRemoteListener(alias, paths.id);
-  const needsReload = force || !tunnelRunning || !listenerReady;
-  const changes = needsReload ? ["reload owned tunnel LaunchAgent", "recreate the proven-owned forwarded listener"] : [];
+  let healthReady = false;
+  let healthError;
+  if (listenerReady) {
+    try { waitForRemoteHealth(alias, paths.id); healthReady = true; }
+    catch (error) { healthError = error; }
+  }
+  const needsReload = force || !tunnelRunning || !listenerReady || !healthReady;
+  const changes = needsReload ? ["reload owned tunnel LaunchAgent", "recreate the proven-owned forwarded listener", "reconcile authenticated health"] : [];
   console.log(`SSH alias: ${alias}`);
-  if (changes.length === 0) return console.log("Repair plan: no changes required.");
+  if (changes.length === 0) {
+    if (confirmed) {
+      const stages = { ...readStages(paths, alias), tunnelProcess: "running", listener: "established", authenticatedHealth: "ready" };
+      state(paths, alias, stages);
+    }
+    return console.log("Repair plan: no changes required; authenticated health reconciled.");
+  }
   for (const change of changes) console.log(`Repair plan: ${change}`);
   console.log("Credentials, microphone permission, retained WAVs, and incomplete audio: unchanged");
   if (!confirmed) return console.log(`Preview only. Rerun with: pi-dictation bridge repair ${alias} --confirm`);
+  if (tunnelRunning && !force) {
+    if (typeof companionRequestAt !== "function") throw new BridgeHostError("Repair cannot prove Recording lease safety.");
+    const effects = validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), credential, "credential-effects"));
+    if (effects.activeRecordingLease > 0) {
+      throw new BridgeHostError("Active Recording lease blocks tunnel reload; retry repair after the recording finishes.");
+    }
+    if (listenerReady && healthError) {
+      state(paths, alias, { ...readStages(paths, alias), tunnelProcess: "running", listener: "established", authenticatedHealth: "pending" }, healthError.message);
+      throw healthError;
+    }
+    throw new BridgeHostError("Refusing to reload a running tunnel because a new Recording lease could race the reload; wait for supervisor recovery or stop the owned tunnel first.");
+  }
   const domain = `gui/${ownerUid()}`;
   if (tunnelRunning) {
     const stopped = spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
@@ -706,6 +728,7 @@ export function repairHost(alias, confirmed, force = false) {
   const stages = { ...readStages(paths, alias), tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" };
   state(paths, alias, stages);
   waitForRemoteListener(alias, paths.id);
+  state(paths, alias, { ...stages, listener: "established" });
   waitForRemoteHealth(alias, paths.id);
   state(paths, alias, { ...stages, listener: "established", authenticatedHealth: "ready" });
   console.log("Repair complete.");
@@ -719,12 +742,25 @@ export async function inspectHostEffects(alias, companionRequestAt) {
   return validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), credential, "credential-effects"));
 }
 
+export function preflightHostRemovals(aliases = configuredAliases()) {
+  const selected = operationalRecords().filter(({ host }) => aliases.includes(host.sshAlias));
+  if (selected.length !== aliases.length) throw new BridgeHostError("A selected host removal candidate is not configured.");
+  for (const { host, paths } of selected) {
+    proveOwnedHostTreeForDeletion(paths, host.sshAlias);
+    proveExactTunnelConfiguration(paths, host.sshAlias);
+    ssh(host.sshAlias, ["pi-dictation", "bridge", "remote-removal-preflight", paths.id], {
+      failure: `Remote removal preflight failed for SSH alias '${host.sshAlias}'`,
+    });
+  }
+}
+
 export async function precheckUpgrade(companionRequestAt) {
   const records = operationalRecords();
   if (records.some(({ host }) => host.status.lifecycle !== "active")) {
     throw new BridgeHostError("Credential revocation is pending; finish uninstall before upgrade.");
   }
   for (const { host } of records) safePackageInfo(host.sshAlias);
+  preflightHostRemovals(records.map(({ host }) => host.sshAlias));
   const checked = [];
   for (const { host, paths, credential } of records) {
     const effects = validateCredentialEffects(await companionRequestAt(localCompanionEndpoint(paths), credential, "credential-effects"));
@@ -1193,6 +1229,22 @@ export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
   console.log(JSON.stringify({ committed: true }));
 }
 
+function proveRemoteConfigurationForRemoval(id) {
+  const paths = remoteConfigPaths(id);
+  const staged = join(paths.configDirectory, "pi-dictation.bridge-next.json");
+  if (existsSync(staged)) throw new BridgeHostError("Refusing an unfinished remote Pi Dictation configuration transaction.");
+  const config = readOwnedJson(paths.config, "remote Pi Dictation configuration");
+  const receipt = readOwnedJson(paths.receipt, "remote Pi Dictation configuration ownership receipt");
+  if (receipt.product !== PRODUCT || receipt.hostId !== id || receipt.phase !== "ready" || receipt.sha256 !== configDigest(config)) {
+    throw new BridgeHostError("Refusing a remote Pi Dictation configuration changed outside bridge setup.");
+  }
+  const root = remoteRoot(id);
+  const endpoint = readOwnedJson(join(root, "endpoint.json"), "remote Recorder endpoint configuration");
+  if (JSON.stringify(config.recorder) !== JSON.stringify(endpoint)) {
+    throw new BridgeHostError("Refusing an unproven remote Recorder configuration.");
+  }
+}
+
 function proveRemoteHostTreeForDeletion(id) {
   const root = remoteRoot(id);
   inspect(root, "directory", 0o700, "remote host bridge directory");
@@ -1226,6 +1278,21 @@ function proveRemoteHostTreeForDeletion(id) {
       }
     } else throw new BridgeHostError("Refusing an unprovable remote Recorder endpoint configuration.");
   }
+}
+
+export function remoteRemovalPreflight(id) {
+  if (!existsSync(remoteRoot(id))) {
+    const paths = remoteConfigPaths(id);
+    const staged = join(paths.configDirectory, "pi-dictation.bridge-next.json");
+    if (existsSync(paths.config) || existsSync(paths.receipt) || existsSync(staged)) {
+      throw new BridgeHostError("Refusing remote cleanup with host state absent but configuration artifacts retained.");
+    }
+    console.log(JSON.stringify({ proven: true }));
+    return;
+  }
+  proveRemoteHostTreeForDeletion(id);
+  proveRemoteConfigurationForRemoval(id);
+  console.log(JSON.stringify({ proven: true }));
 }
 
 export function remoteCredentialRevoke(id) {

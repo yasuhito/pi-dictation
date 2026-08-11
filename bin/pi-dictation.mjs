@@ -34,6 +34,7 @@ import {
   installHost,
   listHosts,
   precheckUpgrade,
+  preflightHostRemovals,
   repairHost,
   remoteCredentialCommit,
   remoteCredentialRevoke,
@@ -41,6 +42,7 @@ import {
   remoteInfo,
   remoteListener,
   remotePrepare,
+  remoteRemovalPreflight,
   revokeHost,
   rotateHost,
 } from "./bridge-host.mjs";
@@ -775,19 +777,27 @@ function inspectSharedArtifacts() {
     throw new CliError("Refusing bridge artifacts whose ownership cannot be proven.");
   }
   let installation = "incomplete";
-  if (pathExists(p.app)) { proveApp(p.app, receipt.installId); installation = "installed"; }
-  if (pathExists(p.credential)) validateCredential(p.credential);
+  const appPresent = pathExists(p.app);
+  const credentialPresent = pathExists(p.credential);
+  const runtimePresent = pathExists(p.runtime);
+  const plistPresent = pathExists(p.plist);
+  if (appPresent) proveApp(p.app, receipt.installId);
+  if (credentialPresent) validateCredential(p.credential);
+  if (runtimePresent) inspectPath(p.runtime, "directory", 0o700, "bridge runtime directory");
   let companionLaunchAgent = "not-configured";
   let launchAgentLoaded = false;
-  if (pathExists(p.plist)) {
+  if (plistPresent) {
     inspectPath(p.plist, "file", 0o600, "bridge LaunchAgent");
     if (!readFileSync(p.plist, "utf8").includes(`pi-dictation-install-id:${receipt.installId}`)) {
       throw new CliError("Refusing a LaunchAgent whose ownership cannot be proven.");
     }
+    const expected = launchAgentPlist(p, receipt.installId, pathExists(p.preflight));
+    const exact = readFileSync(p.plist, "utf8") === expected;
     const observation = sharedLaunchAgentObservation();
     launchAgentLoaded = observation === "loaded";
-    companionLaunchAgent = observation === "unavailable" ? "process-state-unavailable" : launchAgentLoaded ? "loaded" : "configured-not-loaded";
+    companionLaunchAgent = !exact ? "configuration-unverified" : observation === "unavailable" ? "process-state-unavailable" : launchAgentLoaded ? "loaded" : "configured-not-loaded";
   }
+  if (appPresent && credentialPresent && runtimePresent && plistPresent && companionLaunchAgent !== "configuration-unverified") installation = "installed";
   const socketPresent = pathExists(p.socket);
   if (socketPresent) inspectSocket(p.socket);
   const companionProcess = launchAgentLoaded
@@ -1035,6 +1045,8 @@ async function bridgeUpgrade(args) {
         ? "Upgrade installation is pending; rerun upgrade --confirm to reconcile it."
         : "Upgrade is awaiting real-audio preflight; run `pi-dictation bridge preflight`, then rerun upgrade --confirm.");
     if (["gating", "quiescing"].includes(pending.phase)) {
+      proveExactSharedLaunchAgent(inspected);
+      preflightHostRemovals(pending.hosts);
       await continueQuiescedUpgrade(inspected, pending);
       return;
     }
@@ -1053,7 +1065,7 @@ async function bridgeUpgrade(args) {
     if (ready.product !== LABEL || ready.installId !== receipt.installId || ready.executableSha256 !== executableDigest(p)) {
       throw new CliError("The upgraded companion requires real-audio preflight before host reconciliation.");
     }
-    for (const alias of pending.hosts) repairHost(alias, true, true);
+    for (const alias of pending.hosts) await repairHost(alias, true, true, companionRequestAt);
     const diagnosis = diagnoseHosts();
     if (diagnosis.some((host) => host.stages.authenticatedHealth !== "last-observed-ready" || !host.stages.protocolCompatibility.startsWith("configured-exact-v"))) {
       throw new CliError("All-host authenticated health has not reconciled; rerun upgrade --confirm.");
@@ -1062,6 +1074,7 @@ async function bridgeUpgrade(args) {
     console.log("Bridge upgrade reconciled after real-audio preflight and all-host health checks.");
     return;
   }
+  proveExactSharedLaunchAgent(inspected);
   const checked = await precheckUpgrade(companionRequestAt);
   const sharedEffects = await primaryEffects(inspected.paths);
   console.log(`Upgrade candidate: package ${packageVersion()}, protocol ${BRIDGE_PROTOCOL_VERSION}`);
@@ -1193,6 +1206,8 @@ async function bridgeUninstall(args) {
   const removesShared = aliases.length === registered.length;
   if (removesShared) validateSharedRemovalCandidate();
   const sharedState = removesShared ? readSharedRevocation(paths()) : undefined;
+  if (removesShared) proveExactSharedLaunchAgent(validateSharedRemovalCandidate());
+  preflightHostRemovals(aliases);
   const sharedEffects = removesShared ? (sharedState?.effects || await primaryEffects(paths())) : undefined;
   const previews = [];
   for (const alias of aliases) previews.push({ alias, effects: await inspectHostEffects(alias, companionRequestAt) });
@@ -1212,7 +1227,9 @@ async function bridgeUninstall(args) {
     throw new CliError(`Active recording blocks uninstall for: ${activeNames.join(", ")}. Rerun with --confirm --cancel-active.`);
   }
   if (!confirmed) {
-    console.log(`Preview only. Rerun with: pi-dictation bridge uninstall ${all ? "--all" : aliases[0]} --confirm${activeNames.length ? " --cancel-active" : ""}`);
+    const ownedAudio = previews.some(({ effects }) => effects.activeRecordingLease || effects.incompleteAudio || effects.retainedWav) ||
+      Boolean(sharedEffects && (sharedEffects.activeRecordingLease || sharedEffects.incompleteAudio || sharedEffects.retainedWav));
+    console.log(`Preview only. Rerun with: pi-dictation bridge uninstall ${all ? "--all" : aliases[0]} --confirm${ownedAudio ? " --cancel-active" : ""}`);
     return;
   }
   if (removesShared) {
@@ -1253,7 +1270,7 @@ async function main() {
   if (command === "logs" && (args.length === 1 || args.length === 2 && args[1] === "--json")) return hostLogs(args[0], args[1] === "--json");
   if (command === "status" && args.length === 1) return hostStatus(args[0]);
   if (command === "list" && (args.length === 0 || args.length === 1 && args[0] === "--json")) return listHosts(args[0] === "--json");
-  if (command === "repair" && (args.length === 1 || args.length === 2 && args[1] === "--confirm")) return repairHost(args[0], args[1] === "--confirm");
+  if (command === "repair" && (args.length === 1 || args.length === 2 && args[1] === "--confirm")) return repairHost(args[0], args[1] === "--confirm", false, companionRequestAt);
   if (command === "upgrade") return bridgeUpgrade(args);
   if (command === "rotate" && args.length === 1) return rotateHost(args[0], companionRequestAt);
   if (command === "revoke" && args.length >= 1 && args.length <= 3 && args.slice(1).every((argument) => ["--confirm", "--cancel-active"].includes(argument)) && new Set(args.slice(1)).size === args.slice(1).length) {
@@ -1266,6 +1283,7 @@ async function main() {
   if (command === "remote-prepare" && args.length === 2) return remotePrepare(args[0], args[1]);
   if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
   if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
+  if (command === "remote-removal-preflight" && args.length === 1) return remoteRemovalPreflight(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
   if (command === "remote-health" && (args.length === 1 || args.length === 2 && args[1] === "staged")) return remoteHealth(args[0], healthAt, args[1] === "staged");
   usage();

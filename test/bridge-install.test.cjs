@@ -35,9 +35,10 @@ case "$*" in
   *" true") if [ "$SSH_AUTH_FAIL" = 1 ]; then echo denied >&2; exit 255; fi; exit 0 ;;
   *" remote-info") if [ "$SSH_WRONG_VERSION" = 1 ]; then version=9.9.9; else version=0.6.0; fi; printf '{"packageVersion":"%s","protocolVersion":3,"home":"/srv/pi"}\\n' "$version"; exit 0 ;;
   *" remote-prepare "*) cat >/dev/null; printf '{"configured":true}\\n'; exit 0 ;;
-  *" remote-listener "*) printf '{"listener":"established"}\\n'; exit 0 ;;
-  *" remote-health "*) printf '{"protocolVersion":3,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
+  *" remote-listener "*) if [ "$SSH_LISTENER_FAIL" = 1 ]; then exit 1; fi; printf '{"listener":"established"}\\n'; exit 0 ;;
+  *" remote-health "*) if [ "$SSH_HEALTH_FAIL" = 1 ]; then exit 1; fi; printf '{"protocolVersion":3,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
   *" remote-credential-commit "*) printf '{"committed":true}\\n'; exit 0 ;;
+  *" remote-removal-preflight "*) if [ -n "$REMOTE_PREFLIGHT_FAIL_ALIAS" ]; then case "$*" in *"$REMOTE_PREFLIGHT_FAIL_ALIAS"*) exit 1;; esac; fi; printf '{"proven":true}\\n'; exit 0 ;;
   *" remote-credential-revoke "*) printf '{"revoked":true}\\n'; exit 0 ;;
 esac
 exit 2
@@ -110,7 +111,7 @@ function encode(fields) { const pieces=[Buffer.from("pi-dictation-bridge-auth-v1
 function tag(secret, fields) { return createHmac("sha256", Buffer.from(secret,"base64")).update(encode(fields)).digest(); }
 function frame(value) { const body=Buffer.from(JSON.stringify(value)); const header=Buffer.alloc(4); header.writeUInt32BE(body.length); return Buffer.concat([header,body]); }
 function credentials() { const result=new Map(); for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,name))); result.set(value.id,value); } catch {} } for (const id of readdirSync(join(bridge,"hosts"))) for (const name of ["credential.json","credential.next.json"]) { try { const value=JSON.parse(readFileSync(join(bridge,"hosts",id,name))); result.set(value.id,value); } catch {} } return result; }
-const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const rejected=request.operation==="credential-revoke-if-idle"&&existsSync(busyFile); const race=existsSync(raceFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:race?0:(existsSync(busyFile)?1:0),incompleteAudio:0,retainedWav:0}}; if(request.operation==="credential-effects"&&race)writeFileSync(busyFile,"raced\n"); outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.operation+" "+request.requestId+"\n"); } if(request.operation.startsWith("credential-revoke")&&existsSync(dropFile)){rmSync(dropFile);return client.destroy();} const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
+const server=net.createServer({allowHalfOpen:true}, client => { const challenge=randomBytes(32); client.write(frame({type:"challenge",challenge:challenge.toString("base64")})); let buffered=Buffer.alloc(0); client.on("data", chunk => { buffered=Buffer.concat([buffered,chunk]); if(buffered.length<4)return; const length=buffered.readUInt32BE(0); if(buffered.length!==length+4)return; const request=JSON.parse(buffered.subarray(4)); const credential=credentials().get(request.credentialId); if(!credential)return client.destroy(); const payload=Buffer.from(request.payload,"base64"); const expected=tag(credential.secret,["request",3,challenge,credential.id,request.requestId,request.operation,payload]); if(Buffer.from(request.hmac,"hex").compare(expected)!==0)return client.destroy(); const key=credential.id+":"+request.requestId; let outcome=outcomes.get(key); if(!outcome) { const effect=existsSync(busyFile)?readFileSync(busyFile,"utf8").trim():""; const rejected=request.operation==="credential-revoke-if-idle"&&Boolean(effect); const race=existsSync(raceFile); outcome={status:rejected?"invalid-state":"ok",payload:rejected?{}:{connections:0,activeRecordingLease:race?0:(effect==="retained"||effect==="incomplete"?0:(effect?1:0)),incompleteAudio:effect==="incomplete"?1:0,retainedWav:effect==="retained"?1:0}}; if(request.operation==="credential-effects"&&race)writeFileSync(busyFile,"raced\n"); outcomes.set(key,outcome); appendFileSync(busyFile+".requests",request.operation+" "+request.requestId+"\n"); } if(request.operation.startsWith("credential-revoke")&&existsSync(dropFile)){rmSync(dropFile);return client.destroy();} const output=Buffer.from(JSON.stringify(outcome.payload)); const responseTag=tag(credential.secret,["response",3,3,challenge,credential.id,request.requestId,request.operation+":"+outcome.status,output]); client.end(frame({type:"response",version:3,requestId:request.requestId,status:outcome.status,payload:output.toString("base64"),hmac:responseTag.toString("hex")})); }); });
 rmSync(socket,{force:true}); server.listen(socket,()=>{chmodSync(socket,0o600);if(process.send)process.send("ready");});
 `);
   const child = spawn(process.execPath, [script, f.bridge, socket, busyFile, dropFile || `${busyFile}.never-drop`, raceFile || `${busyFile}.never-race`], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
@@ -374,7 +375,10 @@ test("bridge doctor emits bounded privacy-safe JSON without changing managed sta
     ]));
     await t.test("does not expose credentials or private paths", () => assert.equal(/credential|secret|\/Library\//i.test(result.stdout), false));
     await t.test("does not mutate managed bridge state", () => assert.equal(after, before));
-    await t.test("does not issue SSH probes", () => assert.equal(sshAfter, sshBefore));
+    await t.test("issues only a local exact SSH configuration expansion", () => assert.equal(
+      sshAfter.split("\n").filter((line) => line && !line.includes(" -G ")).join("\n"),
+      sshBefore.split("\n").filter((line) => line && !line.includes(" -G ")).join("\n"),
+    ));
     await t.test("does not persist authenticated companion receipts", () => assert.equal(existsSync(`${requestBase}.requests`), false));
     await t.test("types permission as unobserved", () => assert.equal(report.shared.permission, "not-observed-read-only"));
     await t.test("does not claim Level availability", () => assert.equal(report.shared.levelAvailability, "supported-not-observed"));
@@ -426,6 +430,50 @@ test("bridge repair previews before reloading only the owned tunnel", async (t) 
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
+test("bridge repair refuses to reload an active Recording lease", async (t) => {
+  const f = fixture();
+  const busy = join(f.home, "repair-active");
+  const launchctlLog = join(f.home, "repair-active-launchctl.log");
+  let server;
+  try {
+    const installed = run(f, ["install", "active-repair-pi"], { LAUNCHCTL_LOG: launchctlLog });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    writeFileSync(busy, "active\n");
+    server = await startCredentialServer(f, busy);
+    const before = readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line.startsWith("bootout ")).length;
+    const result = run(f, ["repair", "active-repair-pi", "--confirm"], { LAUNCHCTL_LOG: launchctlLog, SSH_LISTENER_FAIL: "1" });
+    const after = readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line.startsWith("bootout ")).length;
+    await t.test("refuses the active Recording lease", () => assert.match(result.stderr, /Active Recording lease blocks tunnel reload/));
+    await t.test("does not stop the tunnel", () => assert.equal(after, before));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("bridge repair reconciles authenticated health after a partial failure", async (t) => {
+  const f = fixture();
+  const launchctlLog = join(f.home, "repair-health-launchctl.log");
+  let server;
+  try {
+    const installed = run(f, ["install", "health-repair-pi"], { LAUNCHCTL_LOG: launchctlLog });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    server = await startCredentialServer(f, join(f.home, "repair-idle"));
+    const failed = run(f, ["repair", "health-repair-pi", "--confirm"], { LAUNCHCTL_LOG: launchctlLog, SSH_HEALTH_FAIL: "1" });
+    const retried = run(f, ["repair", "health-repair-pi", "--confirm"], { LAUNCHCTL_LOG: launchctlLog });
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const stages = JSON.parse(readFileSync(join(host, "setup.json"), "utf8")).stages;
+    await t.test("records the authenticated health failure", () => assert.notEqual(failed.status, 0));
+    await t.test("retry succeeds", () => assert.equal(retried.status, 0, retried.stderr));
+    await t.test("retry reconciles authenticated health", () => assert.equal(stages.authenticatedHealth, "ready"));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
 test("bridge repair refuses a tunnel configuration that is not exact", async (t) => {
   const f = fixture();
   const launchctlLog = join(f.home, "launchctl.log");
@@ -442,6 +490,33 @@ test("bridge repair refuses a tunnel configuration that is not exact", async (t)
     const after = readFileSync(launchctlLog, "utf8").split("\n").filter((line) => line && !line.startsWith("print "));
     await t.test("refuses the inexact tunnel", () => assert.match(result.stderr, /not the exact owned configuration/));
     await t.test("does not mutate LaunchAgents", () => assert.deepEqual(after, before));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("bridge doctor reports tampered tunnel commands as unverified", () => {
+  const f = fixture();
+  try {
+    const installed = run(f, ["install", "doctor-tampered-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const tunnelPath = join(host, "tunnel.json");
+    const tunnel = JSON.parse(readFileSync(tunnelPath, "utf8"));
+    tunnel.sshArguments.push("-A");
+    writeFileSync(tunnelPath, JSON.stringify(tunnel), { mode: 0o600 });
+    const result = run(f, ["doctor", "--json"]);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.hosts[0].stages.tunnelProcess.endsWith("configuration-unverified"), true);
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("bridge doctor reports a missing shared credential as incomplete", () => {
+  const f = fixture();
+  try {
+    completeCompanion(f);
+    rmSync(join(f.bridge, "credential.json"));
+    const result = run(f, ["doctor", "--json"]);
+    assert.equal(JSON.parse(result.stdout).shared.installation, "incomplete");
   } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
 
@@ -506,10 +581,79 @@ test("scoped uninstall refuses unexpected host entries before deletion", async (
     const requestBase = join(f.home, "foreign-delete");
     server = await startCredentialServer(f, requestBase);
     const result = run(f, ["uninstall", "foreign-pi", "--confirm"]);
-    const requests = readFileSync(`${requestBase}.requests`, "utf8");
+    const requests = existsSync(`${requestBase}.requests`) ? readFileSync(`${requestBase}.requests`, "utf8") : "";
     await t.test("refuses the unexpected host entry", () => assert.match(result.stderr, /unexpected or unprovable entry/));
     await t.test("does not revoke the credential", () => assert.equal(/credential-revoke/.test(requests), false));
     await t.test("preserves the unexpected entry", () => assert.equal(readFileSync(join(foreignHost, "foreign"), "utf8"), "preserve\n"));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall proves every local host before credential revocation", async (t) => {
+  const f = fixture();
+  const requestBase = join(f.home, "later-host-preflight");
+  let server;
+  try {
+    for (const alias of ["first-proof-pi", "later-proof-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    completeCompanion(f);
+    const later = join(f.bridge, "hosts", hostDirectories(f.bridge).find((id) =>
+      JSON.parse(readFileSync(join(f.bridge, "hosts", id, "ownership.json"), "utf8")).sshAlias === "later-proof-pi"));
+    writeFileSync(join(later, "foreign"), "preserve\n", { mode: 0o600 });
+    server = await startCredentialServer(f, requestBase);
+    const result = run(f, ["uninstall", "--all", "--confirm"]);
+    const requests = existsSync(`${requestBase}.requests`) ? readFileSync(`${requestBase}.requests`, "utf8") : "";
+    await t.test("refuses the later host candidate", () => assert.match(result.stderr, /unexpected or unprovable entry/));
+    await t.test("issues no destructive credential request", () => assert.equal(/credential-revoke/.test(requests), false));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall proves the shared LaunchAgent before credential revocation", async (t) => {
+  const f = fixture();
+  const requestBase = join(f.home, "shared-plist-preflight");
+  let server;
+  try {
+    const installed = run(f, ["install", "shared-proof-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    completeCompanion(f);
+    const plist = join(f.home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist");
+    writeFileSync(plist, readFileSync(plist, "utf8").replace("<key>ProcessType</key>", "<key>Disabled</key><true/><key>ProcessType</key>"), { mode: 0o600 });
+    server = await startCredentialServer(f, requestBase);
+    const result = run(f, ["uninstall", "--all", "--confirm"]);
+    const requests = existsSync(`${requestBase}.requests`) ? readFileSync(`${requestBase}.requests`, "utf8") : "";
+    await t.test("refuses the modified marker-bearing LaunchAgent", () => assert.match(result.stderr, /not the exact owned configuration/));
+    await t.test("issues no destructive credential request", () => assert.equal(/credential-revoke/.test(requests), false));
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});
+
+test("complete uninstall proves every remote host before credential revocation", async (t) => {
+  const f = fixture();
+  const requestBase = join(f.home, "remote-preflight");
+  let server;
+  try {
+    for (const alias of ["remote-good-pi", "remote-bad-pi"]) {
+      const installed = run(f, ["install", alias]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+    }
+    completeCompanion(f);
+    server = await startCredentialServer(f, requestBase);
+    const result = run(f, ["uninstall", "--all", "--confirm"], { REMOTE_PREFLIGHT_FAIL_ALIAS: "remote-bad-pi" });
+    const requests = existsSync(`${requestBase}.requests`) ? readFileSync(`${requestBase}.requests`, "utf8") : "";
+    await t.test("refuses the remote candidate", () => assert.match(result.stderr, /Remote removal preflight failed/));
+    await t.test("issues no destructive credential request", () => assert.equal(/credential-revoke/.test(requests), false));
   } finally {
     server?.kill("SIGTERM");
     if (server) await once(server, "exit").catch(() => {});
@@ -597,6 +741,27 @@ test("complete uninstall refuses an unprovable artifact before deleting a host",
     rmSync(f.home, { recursive: true, force: true });
   }
 });
+
+for (const effect of ["retained", "incomplete"]) {
+  test(`uninstall preview requires cancellation for ${effect}-only audio`, async () => {
+    const f = fixture();
+    const busy = join(f.home, `${effect}-preview`);
+    let server;
+    try {
+      const installed = run(f, ["install", `${effect}-preview-pi`]);
+      if (installed.status !== 0) throw new Error(installed.stderr);
+      completeCompanion(f);
+      writeFileSync(busy, `${effect}\n`);
+      server = await startCredentialServer(f, busy);
+      const result = run(f, ["uninstall", `${effect}-preview-pi`]);
+      assert.match(result.stdout, /--confirm --cancel-active/);
+    } finally {
+      server?.kill("SIGTERM");
+      if (server) await once(server, "exit").catch(() => {});
+      rmSync(f.home, { recursive: true, force: true });
+    }
+  });
+}
 
 test("active recording blocks uninstall without explicit cancellation", async (t) => {
   const f = fixture();
