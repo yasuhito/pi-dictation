@@ -225,41 +225,45 @@ test("production companion launches its instance-bound watchdog on the capture d
 
 test("native companion enforces authenticated owner liveness independently", macOnly, async (t) => {
   const instance = await nativeHarness(undefined, {
+    PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS: "100",
     PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "300",
-    PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS: "120",
+    PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS: "300",
   });
   try {
     const owner = instance.owners[0].credential;
+    const terminalResultWithoutProof = async (lease) => {
+      let terminalObservedAt;
+      const terminalDeadline = Date.now() + 1500;
+      while (Date.now() < terminalDeadline) {
+        const observation = await request(instance.socket, owner, "levels", { ...lease, afterSequence: -1 });
+        if (observation.status === "invalid-state") {
+          terminalObservedAt = Date.now();
+          break;
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      let result;
+      const resultDeadline = Date.now() + 1500;
+      while (Date.now() < resultDeadline) {
+        result = await request(instance.socket, owner, "status", lease);
+        if (result.payload.state === "result-ready") break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+      }
+      return { result, terminalObservedAt };
+    };
+
     const abandoned = capability();
     await request(instance.socket, owner, "start", { ...abandoned, maxDurationMs: 10000 });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 450));
-    const lost = await request(instance.socket, owner, "status", abandoned);
+    const { result: lost } = await terminalResultWithoutProof(abandoned);
     const retainedPath = join(instance.runtime, `recording-${abandoned.recordingId}.wav`);
 
     const live = capability();
     await request(instance.socket, owner, "start", { ...live, maxDurationMs: 10000 });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 240));
     await request(instance.socket, owner, "status", live);
     const proofAt = Date.now();
-    await new Promise((resolveWait) => setTimeout(resolveWait, 90));
+    await new Promise((resolveWait) => setTimeout(resolveWait, 160));
     const afterOriginalDeadline = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
-    let terminalObservedAt;
-    const terminalDeadline = Date.now() + 1000;
-    while (Date.now() < terminalDeadline) {
-      const observation = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
-      if (observation.status === "invalid-state") {
-        terminalObservedAt = Date.now();
-        break;
-      }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-    }
-    let refreshed;
-    const resultDeadline = Date.now() + 1000;
-    while (Date.now() < resultDeadline) {
-      refreshed = await request(instance.socket, owner, "status", live);
-      if (refreshed.payload.state === "result-ready") break;
-      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-    }
+    const { result: refreshed, terminalObservedAt } = await terminalResultWithoutProof(live);
     const elapsedFromProof = terminalObservedAt === undefined ? Number.POSITIVE_INFINITY : terminalObservedAt - proofAt;
 
     await t.test("ends capture after the owner-proof deadline", () => {

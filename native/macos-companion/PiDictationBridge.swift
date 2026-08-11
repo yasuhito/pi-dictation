@@ -16,8 +16,10 @@ private let resultRetentionSeconds: TimeInterval = 10 * 60
 private let requestReceiptRetentionSeconds = resultRetentionSeconds
 #if PROTOCOL_TESTING
 private let ownerLivenessSeconds: TimeInterval = max(0.1, (Double(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS"] ?? "") ?? 15_000) / 1000)
+private let initialOwnerLivenessSeconds: TimeInterval = max(0.05, (Double(ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS"] ?? "") ?? ownerLivenessSeconds * 1000) / 1000)
 #else
 private let ownerLivenessSeconds: TimeInterval = 15
+private let initialOwnerLivenessSeconds: TimeInterval = ownerLivenessSeconds
 #endif
 private let levelIntervalMilliseconds = 50
 private let levelReplaySlots = 600
@@ -1334,7 +1336,7 @@ private final class RecordingManager {
             self.enforceOwnerLiveness(current)
         }
         current.ownerLivenessTimer = liveness
-        scheduleOwnerLivenessExpiryLocked(current)
+        scheduleOwnerLivenessExpiryLocked(current, after: initialOwnerLivenessSeconds)
         liveness.resume()
         return statusPayload(current)
     }
@@ -1360,8 +1362,8 @@ private final class RecordingManager {
         failLocked(current, reason: reason)
     }
 
-    private func scheduleOwnerLivenessExpiryLocked(_ current: BridgeRecording) {
-        current.ownerLivenessTimer?.schedule(deadline: .now() + ownerLivenessSeconds)
+    private func scheduleOwnerLivenessExpiryLocked(_ current: BridgeRecording, after seconds: TimeInterval = ownerLivenessSeconds) {
+        current.ownerLivenessTimer?.schedule(deadline: .now() + seconds)
     }
 
     private func enforceOwnerLiveness(_ current: BridgeRecording) {
