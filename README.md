@@ -169,7 +169,14 @@ Environment variables take precedence over the configuration file. The package-s
 
 ## Install an SSH bridge
 
-After installing and preflighting the native Mac companion, install a bridge by using the SSH alias you already use for the Pi host:
+> **Support status:** Bridge recording is not yet certified for a supported release. No macOS version or Mac model should be described as supported until one unchanged npm tarball has a passing [Bridge certification record](./docs/bridge-recording-support.md); source and synthetic test success alone are insufficient. Intel Macs, native Windows, non-loopback listeners, automatic TCP fallback, package/protocol mismatches, and macOS versions absent from a passing record are unsupported.
+
+Run setup on the Mac that owns the microphone. Install and preflight the native companion interactively before installing a host Bridge with the SSH alias already used for the Pi host:
+
+```bash
+pi-dictation bridge install
+pi-dictation bridge preflight
+```
 
 ```bash
 pi-dictation bridge install my-pi
@@ -219,6 +226,8 @@ pi-dictation bridge install my-pi --transport tcp --allow-loopback --bind 127.0.
 ```
 
 Wildcard and non-loopback binds are refused. The installer does not install or update packages remotely; an incompatible remote package produces the exact `npm install` command needed before rerunning the same install.
+
+See [Bridge recording support and certification](./docs/bridge-recording-support.md) for the exact support boundary, typed-error recovery, credential and log handling, retention/deletion rules, complete certification matrix, and redacted evidence policy.
 
 ### Bridge smoke test
 
