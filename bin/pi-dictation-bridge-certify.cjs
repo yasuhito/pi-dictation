@@ -2,6 +2,7 @@
 const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
+const { recoverLifecycleOrRethrow } = require("./certification-recovery.cjs");
 const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -277,8 +278,8 @@ async function cleanupLifecycle(state, credential) {
     status = await request(credential, "status", state.lease);
   }
   await assertNoOwnedAudio(credential);
-  clearState();
   if (observedReason !== expected.reason) fail(`Expected ${expected.reason}, observed ${observedReason || status.payload.state}.`);
+  clearState();
   safeEvidence(state.scenario, true);
 }
 async function prepareLifecycle(name, scenario) {
@@ -305,9 +306,12 @@ async function prepareLifecycle(name, scenario) {
     }
     await cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential);
   } catch (error) {
-    try { await cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential); } catch {}
-    if (existsSync(statePath)) console.error("Private certification recovery state remains; run `pi-dictation-bridge-certify verify` to prove cleanup and remove it.");
-    throw error;
+    try {
+      return await recoverLifecycleOrRethrow(error, () =>
+        cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential));
+    } finally {
+      if (existsSync(statePath)) console.error("Private certification recovery state remains; run `pi-dictation-bridge-certify verify` to prove cleanup and remove it.");
+    }
   }
 }
 function prepareCleanUser(arguments_) {

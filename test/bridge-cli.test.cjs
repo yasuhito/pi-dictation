@@ -20,6 +20,7 @@ const { test } = require("node:test");
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
+const { recoverLifecycleOrRethrow } = require("../bin/certification-recovery.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -118,6 +119,16 @@ test("package exposes the unified Pi Dictation CLI and native companion source",
   });
 });
 
+test("lifecycle recovery owns the verdict after an interrupted request", async (t) => {
+  const original = new Error("transport-eof");
+  await t.test("returns successfully when recovery proves the scenario", async () => {
+    assert.equal(await recoverLifecycleOrRethrow(original, async () => "passed"), "passed");
+  });
+  await t.test("preserves the original error when recovery cannot prove the scenario", async () => {
+    await assert.rejects(recoverLifecycleOrRethrow(original, async () => { throw new Error("unavailable"); }), original);
+  });
+});
+
 test("packaged real-device certification lists every required gate scenario without repository fixtures", async (t) => {
   const result = spawnSync(process.execPath, [certificationPath, "list", "--json"], {
     cwd: packageRoot, encoding: "utf8",
@@ -163,6 +174,10 @@ test("packaged real-device certification lists every required gate scenario with
   });
   await t.test("actively restores the owned companion before lifecycle verification", () => {
     assert.equal(readFileSync(certificationPath, "utf8").includes("restartCompanionForLifecycleVerification"), true);
+  });
+  await t.test("retains recovery state until the expected lifecycle reason is proven", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.indexOf("observedReason !== expected.reason") < source.indexOf("clearState();", source.indexOf("async function cleanupLifecycle")), true);
   });
   await t.test("requires authenticated readiness rather than only a successful launchctl submission", () => {
     const source = readFileSync(certificationPath, "utf8");
