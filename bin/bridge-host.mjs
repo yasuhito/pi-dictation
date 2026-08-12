@@ -287,6 +287,16 @@ function plist(paths, alias) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<!-- pi-dictation-host:${paths.id}:${escape(alias)} -->\n<plist version="1.0"><dict>\n<key>Label</key><string>${PRODUCT}.tunnel.${paths.id}</string>\n<key>ProgramArguments</key><array><string>${escape(process.execPath)}</string><string>${escape(supervisorPath)}</string><string>${escape(paths.tunnel)}</string></array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n`;
 }
 
+function bootstrapLaunchAgent(domain, path) {
+  let result;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    result = spawnSync("launchctl", ["bootstrap", domain, path], { encoding: "utf8" });
+    if (!result.error && result.status === 0) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  throw new BridgeHostError("The host tunnel LaunchAgent could not be loaded.");
+}
+
 function assertOwnedHost(paths, alias) {
   if (!existsSync(paths.root)) return;
   inspect(paths.root, "directory", 0o700, "host bridge directory");
@@ -417,8 +427,7 @@ export function installHost(alias, args = []) {
     const companionStart = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}`], { encoding: "utf8" });
     if (companionStart.error || companionStart.status !== 0) throw new BridgeHostError("The Mac companion could not be started with the host credential.");
     spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
-    const loaded = spawnSync("launchctl", ["bootstrap", domain, paths.plist], { encoding: "utf8" });
-    if (loaded.error || loaded.status !== 0) throw new BridgeHostError("The host tunnel LaunchAgent could not be loaded.");
+    bootstrapLaunchAgent(domain, paths.plist);
     const kicked = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
     if (kicked.error || kicked.status !== 0) throw new BridgeHostError("The host tunnel supervisor could not be started.");
     stages = { ...stages, tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" }; state(paths, alias, stages);
@@ -469,8 +478,7 @@ export function refreshHostSupervisors(aliases) {
     }, null, 2)}\n`);
     atomicWrite(paths.plist, plist(paths, alias));
     spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
-    const loaded = spawnSync("launchctl", ["bootstrap", domain, paths.plist], { encoding: "utf8" });
-    if (loaded.error || loaded.status !== 0) throw new BridgeHostError("The refreshed host tunnel LaunchAgent could not be loaded.");
+    bootstrapLaunchAgent(domain, paths.plist);
     const kicked = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
     if (kicked.error || kicked.status !== 0) throw new BridgeHostError("The refreshed host tunnel supervisor could not be started.");
     state(paths, alias, { ...readStages(paths, alias), tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" });
