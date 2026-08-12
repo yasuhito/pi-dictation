@@ -6,4 +6,11 @@ async function recoverLifecycleOrRethrow(originalError, recover) {
   }
 }
 
-module.exports = { recoverLifecycleOrRethrow };
+function commitProvenLifecycle(observedReason, expectedReason, observedState, commit) {
+  if (observedReason !== expectedReason) {
+    throw new Error(`Expected ${expectedReason}, observed ${observedReason || observedState}.`);
+  }
+  commit();
+}
+
+module.exports = { commitProvenLifecycle, recoverLifecycleOrRethrow };

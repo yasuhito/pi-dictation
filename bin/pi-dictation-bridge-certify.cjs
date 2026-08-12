@@ -2,7 +2,7 @@
 const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
-const { recoverLifecycleOrRethrow } = require("./certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow } = require("./certification-recovery.cjs");
 const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -278,8 +278,7 @@ async function cleanupLifecycle(state, credential) {
     status = await request(credential, "status", state.lease);
   }
   await assertNoOwnedAudio(credential);
-  if (observedReason !== expected.reason) fail(`Expected ${expected.reason}, observed ${observedReason || status.payload.state}.`);
-  clearState();
+  commitProvenLifecycle(observedReason, expected.reason, status.payload.state, clearState);
   safeEvidence(state.scenario, true);
 }
 async function prepareLifecycle(name, scenario) {

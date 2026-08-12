@@ -20,7 +20,7 @@ const { test } = require("node:test");
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
-const { recoverLifecycleOrRethrow } = require("../bin/certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow } = require("../bin/certification-recovery.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -129,6 +129,19 @@ test("lifecycle recovery owns the verdict after an interrupted request", async (
   });
 });
 
+test("lifecycle evidence commits recovery cleanup only after proving its reason", async (t) => {
+  await t.test("commits when the observed reason matches", () => {
+    let committed = false;
+    commitProvenLifecycle("companion-restart", "companion-restart", "failed", () => { committed = true; });
+    assert.equal(committed, true);
+  });
+  await t.test("retains recovery state when the observed reason differs", () => {
+    let committed = false;
+    try { commitProvenLifecycle(undefined, "companion-restart", "recording", () => { committed = true; }); } catch {}
+    assert.equal(committed, false);
+  });
+});
+
 test("packaged real-device certification lists every required gate scenario without repository fixtures", async (t) => {
   const result = spawnSync(process.execPath, [certificationPath, "list", "--json"], {
     cwd: packageRoot, encoding: "utf8",
@@ -176,8 +189,7 @@ test("packaged real-device certification lists every required gate scenario with
     assert.equal(readFileSync(certificationPath, "utf8").includes("restartCompanionForLifecycleVerification"), true);
   });
   await t.test("retains recovery state until the expected lifecycle reason is proven", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.indexOf("observedReason !== expected.reason") < source.indexOf("clearState();", source.indexOf("async function cleanupLifecycle")), true);
+    assert.equal(readFileSync(certificationPath, "utf8").includes("commitProvenLifecycle(observedReason, expected.reason, status.payload.state, clearState)"), true);
   });
   await t.test("requires authenticated readiness rather than only a successful launchctl submission", () => {
     const source = readFileSync(certificationPath, "utf8");
