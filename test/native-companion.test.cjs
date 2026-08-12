@@ -80,6 +80,35 @@ struct DeviceWiring {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("production capture closes before the exact duration watchdog deadline", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-capture-duration-"));
+  const harness = join(directory, "CaptureDuration.swift");
+  const executable = join(directory, "CaptureDuration");
+  writeFileSync(harness, `
+import Foundation
+
+@main
+struct CaptureDuration {
+    static func main() {
+        print(captureDurationSeconds(maximumDurationMs: 1000))
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(Number(execution.stdout.trim()) > 0 && Number(execution.stdout.trim()) < 1, true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("duration watchdog requests only its exact parent then force-terminates it after the grace bound", macOnly, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-watchdog-test-"));
   const executable = join(directory, "PiDictationDurationWatchdog");

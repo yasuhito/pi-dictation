@@ -35,7 +35,12 @@ private let ownerLivenessSeconds: TimeInterval = 15
 private let initialOwnerLivenessSeconds: TimeInterval = ownerLivenessSeconds
 #endif
 private let levelIntervalMilliseconds = 50
+private let captureFinalizationLeadMilliseconds = 250
 private let levelReplaySlots = 600
+
+func captureDurationSeconds(maximumDurationMs: Int) -> TimeInterval {
+    TimeInterval(max(1, maximumDurationMs - captureFinalizationLeadMilliseconds)) / 1000.0
+}
 private let levelSubscriberQueueLimit = 64
 private let maximumDiagnosticLevelObservations = 64
 private let maximumConnections = 16
@@ -1428,7 +1433,7 @@ private final class RecordingManager {
                         }
                         let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
                         guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0,
-                              audioRecorder.record(),
+                              audioRecorder.record(forDuration: captureDurationSeconds(maximumDurationMs: maximumDurationMs)),
                               AVCaptureDevice.default(for: .audio)?.uniqueID == pinnedDevice.uniqueID else {
                             throw CompanionFailure.failed
                         }
