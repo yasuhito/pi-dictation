@@ -40,7 +40,7 @@ struct LifecycleWiring {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("production console-lock state maps the IOKit root property", macOnly, () => {
+test("production console-lock state maps IOKit Booleans and rejects absence", macOnly, () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-console-lock-"));
   const harness = join(directory, "ConsoleLock.swift");
   const executable = join(directory, "ConsoleLock");
@@ -50,7 +50,7 @@ import Foundation
 @main
 struct ConsoleLock {
     static func main() {
-        print(consoleLockState(kCFBooleanTrue))
+        print([consoleLockState(kCFBooleanTrue), consoleLockState(kCFBooleanFalse), consoleLockState(nil)])
     }
 }
 `);
@@ -65,7 +65,7 @@ struct ConsoleLock {
     if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
     const execution = spawnSync(executable, [], { encoding: "utf8" });
     if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
-    assert.equal(execution.stdout.trim(), "true");
+    assert.equal(execution.stdout.trim(), "[true, false, false]");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
