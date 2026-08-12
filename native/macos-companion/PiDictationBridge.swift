@@ -2958,7 +2958,7 @@ private func serve() throws {
         recordings.failActive(reason: "sleep")
     }
     let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
-        recordings.failActive(reason: "session-lock")
+        recordings.failActiveAfterLockAttributionGrace()
     }
     let consoleLockMonitor = DispatchSource.makeTimerSource(queue: .global())
     consoleLockMonitor.schedule(deadline: .now(), repeating: .milliseconds(250))
