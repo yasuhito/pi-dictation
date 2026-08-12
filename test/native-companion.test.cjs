@@ -40,6 +40,35 @@ struct LifecycleWiring {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("production console-lock state maps the IOKit root property", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-console-lock-"));
+  const harness = join(directory, "ConsoleLock.swift");
+  const executable = join(directory, "ConsoleLock");
+  writeFileSync(harness, `
+import Foundation
+
+@main
+struct ConsoleLock {
+    static func main() {
+        print(consoleLockState(kCFBooleanTrue))
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox", "-framework", "IOKit",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(execution.stdout.trim(), "true");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("production input wiring gives capture and device-loss observation the same selected device", macOnly, () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-device-wiring-"));
   const harness = join(directory, "DeviceWiring.swift");

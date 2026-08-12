@@ -6,6 +6,7 @@ import Darwin
 import CoreMedia
 import AudioToolbox
 import AppKit
+import IOKit
 
 private let productIdentifier = "com.yasuhito.pi-dictation.bridge"
 private let protocolVersion = 3
@@ -91,6 +92,20 @@ private enum CompanionFailure: Error {
     case requestConflict
     case invalidState
     case failed
+}
+
+func consoleLockState(_ property: CFTypeRef?) -> Bool {
+    (property as? Bool) == true
+}
+
+private func ioConsoleIsLocked() -> Bool {
+    let root = IORegistryGetRootEntry(kIOMainPortDefault)
+    guard root != MACH_PORT_NULL else { return false }
+    defer { IOObjectRelease(root) }
+    let property = IORegistryEntryCreateCFProperty(
+        root, "IOConsoleLocked" as CFString, kCFAllocatorDefault, 0
+    )?.takeRetainedValue()
+    return consoleLockState(property)
 }
 
 private func permissionName(_ status: AVAuthorizationStatus) -> String {
@@ -2927,10 +2942,17 @@ private func serve() throws {
     let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
         recordings.failActive(reason: "session-lock")
     }
+    let consoleLockMonitor = DispatchSource.makeTimerSource(queue: .global())
+    consoleLockMonitor.schedule(deadline: .now(), repeating: .milliseconds(250))
+    consoleLockMonitor.setEventHandler {
+        if ioConsoleIsLocked() { recordings.failActive(reason: "session-lock") }
+    }
+    consoleLockMonitor.resume()
     defer {
         logger.event("companion-stop")
         logger.close()
         durationRequest.cancel()
+        consoleLockMonitor.cancel()
         for source in lifecycleSignals { source.cancel() }
         workspace.removeObserver(sleepObserver)
         workspace.removeObserver(lockObserver)
