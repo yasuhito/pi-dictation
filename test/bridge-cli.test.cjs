@@ -134,10 +134,13 @@ test("packaged real-device certification lists every required gate scenario with
   await t.test("declares the exact production protocol version", () => {
     assert.equal(output.protocolVersion, 3);
   });
-  await t.test("automates cancellation, duration, and arbitration without human actions", () => {
+  await t.test("automates cancellation and arbitration without human actions", () => {
     assert.deepEqual(output.scenarios.filter(({ requiresHumanAction }) => !requiresHumanAction).map(({ name }) => name), [
-      "bridge-cancellation", "bridge-duration-limit", "bridge-single-lease",
+      "bridge-cancellation", "bridge-single-lease",
     ]);
+  });
+  await t.test("requires real microphone input for the duration-limit WAV", () => {
+    assert.equal(output.scenarios.find(({ name }) => name === "bridge-duration-limit").requiresHumanAction, true);
   });
   await t.test("requires two independently configured hosts for arbitration", () => {
     assert.equal(output.scenarios.find(({ name }) => name === "bridge-single-lease").requiredHostAliases, 2);

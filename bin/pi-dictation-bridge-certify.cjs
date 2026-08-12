@@ -27,7 +27,10 @@ const scenarios = new Map([
     ],
   }],
   ["bridge-cancellation", { kind: "automated", host: true }],
-  ["bridge-duration-limit", { kind: "automated", host: true }],
+  ["bridge-duration-limit", {
+    kind: "duration", host: true,
+    actions: ["Speak continuously into the Mac microphone until this command prints its bounded JSON result."],
+  }],
   ["bridge-tunnel-reconnect", {
     kind: "tunnel", host: true, livenessBoundMilliseconds: tunnelLivenessBoundMilliseconds,
     reconnectValidation: "authenticated-remote-health",
@@ -431,6 +434,7 @@ async function waitForResult(credential, lease, timeoutMilliseconds) {
 }
 async function runAutomated(name, aliases) {
   const scenario = scenarios.get(name);
+  for (const action of scenario.actions || []) console.log(action);
   const expectedAliases = scenario.hostCount || 1;
   if (aliases.length !== expectedAliases) fail(`Scenario ${name} requires ${expectedAliases} configured SSH host alias${expectedAliases === 1 ? "" : "es"}.`);
   const hosts = aliases.map(configuredHost);
@@ -445,7 +449,7 @@ async function runAutomated(name, aliases) {
       const cancelled = await request(hosts[0].credential, "cancel", leases[0]);
       if (cancelled.status !== "ok" || cancelled.payload.state !== "cancelled") fail("Cancellation certification did not reach cancelled.");
     } else if (name === "bridge-duration-limit") {
-      const started = await request(hosts[0].credential, "start", { ...leases[0], maxDurationMs: 1_000 });
+      const started = await request(hosts[0].credential, "start", { ...leases[0], maxDurationMs: 5_000 });
       if (started.status !== "ok" || started.payload.state !== "recording") fail("Duration certification could not start capture.");
       const result = await waitForResult(hosts[0].credential, leases[0], 31_000);
       if (result.completion !== "duration-limit") fail("Duration certification did not report duration-limit.");
@@ -552,7 +556,7 @@ async function verify() {
     return;
   }
   if (scenario.kind === "clean-user") fail("Clean-user certification must resume with `advance --confirm`; verify cannot bypass its staged gates.");
-  if (scenario.kind === "automated") {
+  if (["automated", "duration"].includes(scenario.kind)) {
     if (!Array.isArray(state.aliases) || !Array.isArray(state.leases) || state.aliases.length !== state.leases.length) {
       fail("Refusing invalid automated certification recovery state.");
     }
@@ -582,7 +586,7 @@ async function verify() {
 function list(json) {
   const values = [...scenarios].map(([name, value]) => ({ name, kind: value.kind,
     requiredHostAliases: value.host === true ? value.hostCount || 1 : 0,
-    requiresHumanAction: ["guided", "tunnel", "lifecycle", "clean-user"].includes(value.kind),
+    requiresHumanAction: ["guided", "duration", "tunnel", "lifecycle", "clean-user"].includes(value.kind),
     ...(value.stages ? { stages: value.stages } : {}),
     ...(value.livenessBoundMilliseconds ? { livenessBoundMilliseconds: value.livenessBoundMilliseconds } : {}),
     ...(value.reconnectValidation ? { reconnectValidation: value.reconnectValidation } : {}) }));
@@ -610,7 +614,7 @@ async function main() {
     return prepareLifecycle(name, scenario);
   }
   if (scenario.kind === "clean-user") return prepareCleanUser(aliases);
-  if (scenario.kind === "automated") return runAutomated(name, aliases);
+  if (["automated", "duration"].includes(scenario.kind)) return runAutomated(name, aliases);
   if (scenario.kind === "tunnel") {
     if (aliases.length !== 1) fail(`Scenario ${name} requires one configured SSH host alias.`);
     return prepareTunnel(name, scenario, aliases[0]);
