@@ -186,6 +186,9 @@ test("packaged real-device certification lists every required gate scenario with
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes("function atomicState") && source.includes("renameSync(temporary, statePath)"), true);
   });
+  await t.test("removes the empty certification directory with directory semantics", () => {
+    assert.equal(readFileSync(certificationPath, "utf8").includes("rmdirSync(certificationRuntime)"), true);
+  });
   await t.test("separates the Bridge uninstall preview from final deletion confirmation", () => {
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials"]') &&

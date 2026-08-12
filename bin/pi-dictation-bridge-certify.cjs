@@ -2,7 +2,7 @@
 const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
-const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
 
@@ -105,7 +105,7 @@ function clearState() {
   rmSync(statePath, { force: true });
   if (existsSync(certificationRuntime)) {
     privateDirectory(certificationRuntime);
-    if (readdirSync(certificationRuntime).length === 0) rmSync(certificationRuntime);
+    if (readdirSync(certificationRuntime).length === 0) rmdirSync(certificationRuntime);
   }
 }
 function encode(fields) {
