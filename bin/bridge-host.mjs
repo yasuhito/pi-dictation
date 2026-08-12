@@ -399,6 +399,7 @@ export function installHost(alias, args = []) {
       logFile: paths.tunnelLog,
       stableAfterMs: 30000,
       sshArguments: resolvedTunnelArguments(alias, transport, paths.companionSocket),
+      listenerCleanupArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener-cleanup", paths.id],
       listenerProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener", paths.id],
       healthProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-health", paths.id],
     }, null, 2)}\n`);
@@ -1146,6 +1147,28 @@ function connectEndpoint(endpoint, timeoutMs = 2000) {
     socket.once("connect", () => { clearTimeout(timeout); socket.destroy(); resolveConnection(); });
     socket.once("error", (error) => { clearTimeout(timeout); reject(error); });
   });
+}
+
+export async function remoteListenerCleanup(id) {
+  const root = remoteRoot(id);
+  inspect(root, "directory", 0o700, "remote host bridge directory");
+  const endpointConfig = readOwnedJson(join(root, "endpoint.json"), "remote Recorder endpoint configuration");
+  const endpoint = endpointConfig.endpoint;
+  if (endpoint?.type !== "unix" || endpoint.path !== join(root, "listener.sock")) {
+    throw new BridgeHostError("Remote listener cleanup applies only to the managed Unix socket.");
+  }
+  if (!existsSync(endpoint.path)) return;
+  const info = lstatSync(endpoint.path);
+  if (!info.isSocket() || info.isSymbolicLink() || info.uid !== process.getuid() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600) {
+    throw new BridgeHostError("Refusing unsafe remote listener cleanup.");
+  }
+  try {
+    await connectEndpoint(endpoint, 500);
+    throw new BridgeHostError("Refusing to remove an active remote listener.");
+  } catch (error) {
+    if (error instanceof BridgeHostError) throw error;
+  }
+  rmSync(endpoint.path);
 }
 
 export async function remoteListener(id) {
