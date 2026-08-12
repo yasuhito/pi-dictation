@@ -298,6 +298,20 @@ test("native companion enforces authenticated owner liveness independently", mac
   } finally { await instance.cleanup(); }
 });
 
+test("read-only credential-effects polling cannot exhaust control cleanup", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 60_000 });
+    for (let index = 0; index < 65; index += 1) {
+      await request(instance.socket, owner, "credential-effects", {});
+    }
+    const cancelled = await request(instance.socket, owner, "cancel", lease);
+    assert.equal(cancelled.payload.state, "cancelled");
+  } finally { await instance.cleanup(); }
+});
+
 test("native companion streams capture-time RMS from recorded PCM", macOnly, async (t) => {
   const instance = await nativeHarness();
   try {

@@ -49,7 +49,7 @@ private let validRequestOperations: Set<String> = [
     "health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge",
     "credential-effects", "credential-cancel-recordings", "credential-quiesce-if-idle", "credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active",
 ]
-private let observationRequestOperations: Set<String> = ["health", "levels", "subscribe-levels", "status"]
+private let observationRequestOperations: Set<String> = ["credential-effects", "health", "levels", "subscribe-levels", "status"]
 private let maximumObservationRequestReceiptsPerCredential = 16_384
 private let maximumControlRequestReceiptsPerCredential = 64
 #if PROTOCOL_TESTING
