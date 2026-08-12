@@ -238,23 +238,37 @@ function installRemoteCandidate(alias, tarball, expectedSha256) {
   }
 }
 
-async function restartCompanionForLifecycleVerification() {
+const companionLifecycleScenarios = new Set(["companion-stop", "companion-restart"]);
+function isCompanionLifecycle(name) { return companionLifecycleScenarios.has(name); }
+
+async function restartCompanionForLifecycleVerification(credential) {
   const target = `gui/${process.getuid()}/${product}`;
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 15_000;
+  let launchAccepted = false;
   while (Date.now() < deadline) {
-    const result = spawnSync("launchctl", ["kickstart", target], {
-      stdio: "ignore", timeout: controlDeadlineMilliseconds,
-    });
-    if (!result.error && result.status === 0) return;
+    if (!launchAccepted) {
+      const result = spawnSync("launchctl", ["kickstart", target], {
+        stdio: "ignore", timeout: controlDeadlineMilliseconds,
+      });
+      launchAccepted = !result.error && result.status === 0;
+    }
+    if (launchAccepted) {
+      try {
+        await assertReady(credential);
+        return;
+      } catch {}
+    }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
-  fail("The owned companion could not be restarted for lifecycle verification.");
+  fail(launchAccepted
+    ? "Companion restart did not return authenticated readiness."
+    : "The owned companion could not be restarted for lifecycle verification.");
 }
 
 async function cleanupLifecycle(state, credential) {
   const expected = scenarios.get(state.scenario);
-  if (["companion-stop", "companion-restart"].includes(state.scenario)) {
-    await restartCompanionForLifecycleVerification();
+  if (isCompanionLifecycle(state.scenario)) {
+    await restartCompanionForLifecycleVerification(credential);
   }
   let status = await request(credential, "status", state.lease);
   const observedReason = status.payload.reason;
@@ -284,8 +298,8 @@ async function prepareLifecycle(name, scenario) {
         const status = await request(credential, "status", lease);
         if (status.payload.state !== "recording") break;
       } catch {
-        if (["companion-stop", "companion-restart"].includes(name)) {
-          await restartCompanionForLifecycleVerification();
+        if (isCompanionLifecycle(name)) {
+          await restartCompanionForLifecycleVerification(credential);
         }
       }
     }
