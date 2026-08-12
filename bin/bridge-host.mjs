@@ -289,7 +289,7 @@ function plist(paths, alias) {
 
 function bootstrapLaunchAgent(domain, path) {
   let result;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     result = spawnSync("launchctl", ["bootstrap", domain, path], { encoding: "utf8" });
     if (!result.error && result.status === 0) return;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
