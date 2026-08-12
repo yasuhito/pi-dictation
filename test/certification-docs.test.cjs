@@ -33,6 +33,12 @@ test("the actual npm tarball carries and executes its Bridge certification docum
     await t.test("ships the redacted certification template", () => {
       assert.equal(existsSync(join(packagedRoot, "docs", "certification", "bridge-recording-template.md")), true);
     });
+    await t.test("ships every linked certification record", () => {
+      assert.deepEqual([
+        "bridge-recording-0.6.0-2c7cafe.md",
+        "bridge-recording-0.6.0-d6012cf.md",
+      ].map((name) => existsSync(join(packagedRoot, "docs", "certification", name))), [true, true]);
+    });
     await t.test("runs the documented list command from packed bytes", () => {
       assert.equal(scenarios.includes("clean-user-tarball"), true);
     });

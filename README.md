@@ -252,13 +252,25 @@ pi-dictation-bridge-certify verify --confirm
 
 The gate covers Bridge levels and recognizable transcription, automated cancellation cleanup, an automated native duration limit that has no transcription interface, automated cross-host single-lease exclusion, staged tunnel-loss termination and authenticated reconnect, and the local Recorder contract. Tunnel fault injection owns its Recording lease, measures the fifteen-second bound from the fault, and runs authenticated remote health after restarting the exact tunnel LaunchAgent. Only microphone speech and observations in Pi's UI are manual; the command performs protocol, cleanup, duration, arbitration, and owned LaunchAgent fault steps itself. Lifecycle preparations cover sleep, logout, reboot, session lock, companion stop or restart, and default-input loss. Preparations that survive logout or reboot keep a private recovery capability only until `verify`; every control connection has a five-second deadline, and successful verification checks owner-scoped retained-audio counts, removes recovery state, and prints bounded JSON evidence containing neither credentials, capabilities, audio, transcripts, private paths, nor recording identities.
 
-From a disposable clean macOS user, the staged actual-tarball gate automates package and companion installation, host installation and its idempotent rerun, human and JSON diagnosis, upgrade reconciliation, credential rotation, credential cleanup, package uninstall, and a digest check for a pre-existing external artifact. It pauses only for real-audio preflight and Pi's real recording/UI observation:
+From a disposable clean macOS user, the staged actual-tarball gate installs the predecessor, verifies its real-audio preflight and Bridge recording, then installs the byte-identical candidate on both Mac and remote Pi. It upgrades the companion, requires a second candidate preflight and candidate Bridge recording, rotates credentials, previews the exact uninstall effects, requires a separate deletion confirmation, uninstalls the package, proves Bridge state returned to its pre-install absence, and verifies a pre-existing external artifact stayed byte-identical.
+
+Start the gate once:
 
 ```bash
 npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify prepare clean-user-tarball /absolute/path/pi-dictation-CANDIDATE.tgz /absolute/path/pi-dictation-PREDECESSOR.tgz my-pi /absolute/path/external-artifact
-npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after preflight
-npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after Bridge recording
 ```
+
+Run the following only when each displayed human step has succeeded. The command prints the next required observation before returning:
+
+```bash
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # predecessor preflight
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # predecessor recording
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # candidate preflight
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # candidate recording; prints uninstall preview
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # separately confirm reviewed deletion
+```
+
+If candidate upgrade or uninstall is interrupted, rerun the same `advance --confirm` command; private recovery state resumes the committed transition. `verify` intentionally cannot skip clean-user stages.
 
 ## Safety
 

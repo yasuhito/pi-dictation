@@ -164,6 +164,54 @@ test("packaged real-device certification lists every required gate scenario with
       source.includes("packagedPiCommand(state.predecessor") &&
       source.includes("state.predecessorSha256 === state.tarballSha256"), true);
   });
+  await t.test("uses human and JSON doctor diagnosis from packed bytes", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('["bridge", "doctor"]') && source.includes('["bridge", "doctor", "--json"]'), true);
+  });
+  await t.test("installs the exact candidate digest on both hosts before candidate upgrade and recording", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)") &&
+      source.includes('["--", alias, "sha256sum", remoteTarball]') &&
+      source.includes('["--", alias, "npm", "install", "--global", remoteTarball]') &&
+      source.includes('["bridge", "upgrade"]') &&
+      source.includes('phase: "awaiting-candidate-preflight"') &&
+      source.includes('phase: "awaiting-candidate-recording"'), true);
+  });
+  await t.test("keeps recovery state outside the Bridge runtime removed by uninstall", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('"Caches", "pi-dictation-certification"') &&
+      source.includes('const statePath = join(certificationRuntime, "state.json")'), true);
+  });
+  await t.test("commits every recovery transition through an atomic private rename", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("function atomicState") && source.includes("renameSync(temporary, statePath)"), true);
+  });
+  await t.test("separates the Bridge uninstall preview from final deletion confirmation", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials"]') &&
+      source.includes('phase: "awaiting-uninstall-confirmation"') &&
+      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
+  });
+  await t.test("persists resumable states before predecessor install, candidate upgrade, and confirmed uninstall", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('phase: "preparing-predecessor"') &&
+      source.includes('phase: "upgrading-candidate"') && source.includes('phase: "uninstalling"'), true);
+  });
+  await t.test("replays idempotent installs and destructive cleanup from transitional phases", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('if (state.phase === "preparing-predecessor")') &&
+      source.includes('if (state.phase === "upgrading-candidate")') &&
+      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
+  });
+  await t.test("requires a new reviewed confirmation if uninstall effects change", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("uninstallPreviewSha256") &&
+      source.includes("Uninstall effects changed. Review the new preview"), true);
+  });
+  await t.test("does not let verify bypass clean-user staged gates", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.match(source, /scenario\.kind === "clean-user"\) fail\("Clean-user certification must resume with `advance --confirm`/);
+  });
   await t.test("does not import a repository test fixture", () => {
     assert.equal(readFileSync(certificationPath, "utf8").includes("test/fixtures"), false);
   });

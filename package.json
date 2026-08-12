@@ -32,7 +32,7 @@
     "extensions",
     "native",
     "docs/bridge-recording-support.md",
-    "docs/certification/bridge-recording-template.md",
+    "docs/certification/*.md",
     "pi-dictation.schema.json",
     "pi-dictation.example.json",
     "README.md",
