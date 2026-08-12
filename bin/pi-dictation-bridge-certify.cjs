@@ -238,8 +238,24 @@ function installRemoteCandidate(alias, tarball, expectedSha256) {
   }
 }
 
+async function restartCompanionForLifecycleVerification() {
+  const target = `gui/${process.getuid()}/${product}`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const result = spawnSync("launchctl", ["kickstart", target], {
+      stdio: "ignore", timeout: controlDeadlineMilliseconds,
+    });
+    if (!result.error && result.status === 0) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  fail("The owned companion could not be restarted for lifecycle verification.");
+}
+
 async function cleanupLifecycle(state, credential) {
   const expected = scenarios.get(state.scenario);
+  if (["companion-stop", "companion-restart"].includes(state.scenario)) {
+    await restartCompanionForLifecycleVerification();
+  }
   let status = await request(credential, "status", state.lease);
   const observedReason = status.payload.reason;
   if (["recording", "finalizing", "result-ready"].includes(status.payload.state)) {
@@ -267,7 +283,11 @@ async function prepareLifecycle(name, scenario) {
       try {
         const status = await request(credential, "status", lease);
         if (status.payload.state !== "recording") break;
-      } catch {}
+      } catch {
+        if (["companion-stop", "companion-restart"].includes(name)) {
+          await restartCompanionForLifecycleVerification();
+        }
+      }
     }
     await cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential);
   } catch (error) {

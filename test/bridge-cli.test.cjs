@@ -157,6 +157,11 @@ test("packaged real-device certification lists every required gate scenario with
   await t.test("declares authenticated remote health as the reconnect proof", () => {
     assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").reconnectValidation, "authenticated-remote-health");
   });
+  await t.test("actively restores the owned companion before stop or restart verification", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("restartCompanionForLifecycleVerification") &&
+      source.includes('["companion-stop", "companion-restart"].includes(name)'), true);
+  });
   await t.test("bounds each certification protocol control connection and destroys it in finally", () => {
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes("connection.setTimeout(controlDeadlineMilliseconds") && source.includes("finally {\n    connection.destroy();"), true);
