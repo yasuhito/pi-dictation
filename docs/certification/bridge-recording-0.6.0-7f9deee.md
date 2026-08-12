@@ -40,7 +40,7 @@ Synthetic integration results are not claimed as physical lifecycle certificatio
 | Live level history | PASS | Human confirmed actual changes corresponding to speech on the fixed scale |
 | recognizable transcription | PASS | A generated recognizable token remained identifiable; no phrase or full transcript is retained here |
 | tunnel loss and reconnect | PASS | Recording lease ended within the fifteen-second owner-liveness bound; stale managed Unix listener was safely removed; authenticated health returned; cleanup passed |
-| companion stop | **FAIL** | The Recording lease was attributed as `companion-stop` and its WAV was removed, but the LaunchAgent did not return to healthy service without intervention. Startup also required discarding the private request-receipt registry before health returned. This is not a passing lifecycle recovery. |
+| companion stop | **FAIL** | The Recording lease was attributed as `companion-stop` and its WAV was removed, but the certification flow only waited for launchd to restart a cleanly exited companion. A minimized real-device loop proved that `KeepAlive` did not restore authenticated health after this intentional stop; an explicit owned `kickstart` did. Removing the private request-receipt registry coincided with an early recovery attempt, but later minimized runs disproved it as a required recovery step. This candidate remains failed because it lacked the explicit restart and readiness proof. |
 
 ## Safe final doctor summary
 
@@ -87,4 +87,5 @@ These earlier attempts used different tarball bytes and are diagnostic history, 
 - No credential, lease capability, recording identity, private path, or complete SSH command is recorded.
 - Final owner-scoped incomplete-audio and retained-WAV counts were zero.
 - Temporary recovery material used during companion-stop diagnosis was deleted.
+- Follow-up diagnosis preserved the original failure while correcting the initial request-receipt suspicion: the minimized failure reproduced independently of registry removal.
 - No claim is made for synthetic, incomplete, or failed scenarios.
