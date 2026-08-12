@@ -68,3 +68,8 @@ Create the npm tarball once and record its SHA-256. Run the complete automated s
 A failure blocks release. Preserve the first failure in the record, identify a code fix or external cause, and rerun the complete affected scenario against the byte-identical tarball; do not report only the successful retry.
 
 Use [the certification record template](./certification/bridge-recording-template.md). Its bounded evidence is the auditable release decision; README claims must match the newest passing record exactly.
+
+## Certification records
+
+- [`0.6.0` at `2c7cafe`](./certification/bridge-recording-0.6.0-2c7cafe.md) — blocked before real-device scenarios because the companion socket was unavailable.
+- [`0.6.0` at `d6012cf`](./certification/bridge-recording-0.6.0-d6012cf.md) — real microphone, levels, transcription, cleanup, and Unix reconnection passed after fixes, but split tarballs and incomplete lifecycle/clean-user/fallback scenarios block certification.
