@@ -441,6 +441,42 @@ export function installHost(alias, args = []) {
   }
 }
 
+export function refreshHostSupervisors(aliases) {
+  const domain = `gui/${ownerUid()}`;
+  for (const alias of aliases) {
+    const paths = localPaths(alias);
+    assertOwnedHost(paths, alias);
+    const endpoint = readOwnedJson(paths.endpoint, "host endpoint");
+    let transport;
+    if (endpoint.type === "unix" && typeof endpoint.credentialFile === "string" &&
+        endpoint.path === join(dirname(endpoint.credentialFile), "listener.sock") &&
+        endpoint.path.endsWith(`/bridge/hosts/${paths.id}/listener.sock`)) {
+      transport = { endpoint, remoteForward: endpoint.path };
+    } else if (endpoint.type === "tcp" && typeof endpoint.credentialFile === "string" &&
+        endpoint.credentialFile.endsWith(`/bridge/hosts/${paths.id}/credential.json`) &&
+        ["127.0.0.1", "::1"].includes(endpoint.host) && Number.isInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535) {
+      transport = { endpoint, remoteForward: endpoint.host === "::1" ? `[::1]:${endpoint.port}` : `${endpoint.host}:${endpoint.port}` };
+    } else {
+      throw new BridgeHostError("Refusing invalid host endpoint during tunnel supervisor refresh.");
+    }
+    atomicWrite(paths.tunnel, `${JSON.stringify({
+      product: PRODUCT, hostId: paths.id, sshAlias: alias, statusFile: paths.state,
+      logFile: paths.tunnelLog, stableAfterMs: 30000,
+      sshArguments: resolvedTunnelArguments(alias, transport, paths.companionSocket),
+      listenerCleanupArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener-cleanup", paths.id],
+      listenerProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener", paths.id],
+      healthProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-health", paths.id],
+    }, null, 2)}\n`);
+    atomicWrite(paths.plist, plist(paths, alias));
+    spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
+    const loaded = spawnSync("launchctl", ["bootstrap", domain, paths.plist], { encoding: "utf8" });
+    if (loaded.error || loaded.status !== 0) throw new BridgeHostError("The refreshed host tunnel LaunchAgent could not be loaded.");
+    const kicked = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
+    if (kicked.error || kicked.status !== 0) throw new BridgeHostError("The refreshed host tunnel supervisor could not be started.");
+    state(paths, alias, { ...readStages(paths, alias), tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" });
+  }
+}
+
 export function hostStatus(alias) {
   const paths = localPaths(alias);
   assertOwnedHost(paths, alias);

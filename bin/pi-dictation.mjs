@@ -43,6 +43,7 @@ import {
   remoteListener,
   remoteListenerCleanup,
   remotePrepare,
+  refreshHostSupervisors,
   revokeHost,
   rotateHost,
 } from "./bridge-host.mjs";
@@ -970,6 +971,7 @@ async function upgrade(args) {
   }
   stopOwnedCompanion(p);
   install();
+  refreshHostSupervisors(upgradeState.hosts);
   atomicWrite(upgradePath, `${JSON.stringify({ ...upgradeState, phase: "preflight-required" })}\n`);
   console.log("Shared companion upgraded after every registered destination passed compatibility checks.");
   console.log("Required next step: run `pi-dictation bridge preflight`; completion includes all-host authenticated health checks.");
