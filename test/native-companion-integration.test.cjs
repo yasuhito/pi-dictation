@@ -141,7 +141,8 @@ for (const lifecycle of [
         await instance.waitForExit();
         await instance.start();
       } else {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+        const lifecycleSettleMilliseconds = lifecycle.name === "session-lock" ? 650 : 150;
+        await new Promise((resolveWait) => setTimeout(resolveWait, lifecycleSettleMilliseconds));
       }
       const result = await request(instance.socket, owner, "status", lease);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
@@ -159,6 +160,21 @@ for (const lifecycle of [
     } finally { await instance.cleanup(); }
   });
 }
+
+test("sleep attribution supersedes a just-observed console lock", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10_000 });
+    instance.signal("SIGUSR2");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    instance.signal("SIGTSTP");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    const result = await request(instance.socket, owner, "status", lease);
+    assert.equal(result.payload.reason, "sleep");
+  } finally { await instance.cleanup(); }
+});
 
 test("capture initialization failure is attributable and leaves no audio", macOnly, async (t) => {
   const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_FAIL_CAPTURE: "1" });

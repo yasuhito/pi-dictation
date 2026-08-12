@@ -1516,6 +1516,20 @@ private final class RecordingManager {
         failLocked(current, reason: reason)
     }
 
+    func failActiveAfterLockAttributionGrace() {
+        lock.lock()
+        let expectedId = activeId
+        lock.unlock()
+        guard let expectedId else { return }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            guard self.activeId == expectedId, let current = self.recordings[expectedId], current.state == "recording" else { return }
+            self.failLocked(current, reason: "session-lock")
+        }
+    }
+
     private func failIfActive(_ current: BridgeRecording, reason: String) {
         lock.lock()
         defer { lock.unlock() }
@@ -2917,7 +2931,11 @@ private func serve() throws {
     ]
 #if PROTOCOL_TESTING
     lifecycleSignals.append(signalSource(SIGTSTP, reason: "sleep", exits: false))
-    lifecycleSignals.append(signalSource(SIGUSR2, reason: "session-lock", exits: false))
+    signal(SIGUSR2, SIG_IGN)
+    let testSessionLock = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .global())
+    testSessionLock.setEventHandler { recordings.failActiveAfterLockAttributionGrace() }
+    testSessionLock.resume()
+    lifecycleSignals.append(testSessionLock)
     lifecycleSignals.append(signalSource(SIGWINCH, reason: "device-loss", exits: false))
 #endif
     let appleEvents = NSAppleEventManager.shared()
@@ -2945,7 +2963,7 @@ private func serve() throws {
     let consoleLockMonitor = DispatchSource.makeTimerSource(queue: .global())
     consoleLockMonitor.schedule(deadline: .now(), repeating: .milliseconds(250))
     consoleLockMonitor.setEventHandler {
-        if ioConsoleIsLocked() { recordings.failActive(reason: "session-lock") }
+        if ioConsoleIsLocked() { recordings.failActiveAfterLockAttributionGrace() }
     }
     consoleLockMonitor.resume()
     defer {
