@@ -2939,6 +2939,7 @@ private func serve() throws {
         while true {
             var timeout = timeval(tv_sec: 5, tv_usec: 0)
             var sendBuffer = fixedSocketSendBufferBytes
+            var noSignal: Int32 = 1
             let client = accept(listener, nil, nil)
             if client < 0 { continue }
             guard connectionLimiter.acquire() else {
@@ -2946,7 +2947,9 @@ private func serve() throws {
                 Darwin.close(client)
                 continue
             }
-            guard setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+            guard setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
+                             socklen_t(MemoryLayout<Int32>.size)) == 0,
+                  setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                              socklen_t(MemoryLayout<timeval>.size)) == 0,
                   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout,
                              socklen_t(MemoryLayout<timeval>.size)) == 0,

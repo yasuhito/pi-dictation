@@ -338,7 +338,7 @@ test("the Dictation strip preserves truthful Level slot states", async (t) => {
     strip.levelObservations.clear();
     strip.startedAt = Date.now() - 110;
     strip.observeLevel({ type: "observation", sequence: 0, capturedAtMs: 0, dbfs: -10 });
-    strip.observeLevel({ type: "observation", sequence: 2, capturedAtMs: 100, dbfs: -31 });
+    strip.observeLevel({ type: "observation", sequence: 2, capturedAtMs: 100, dbfs: -38 });
     const beforeDelayed = strip.levels.at(-1);
     strip.observeLevel({ type: "observation", sequence: 1, capturedAtMs: 50, dbfs: -10 });
     const afterDelayed = strip.levels.at(-1);

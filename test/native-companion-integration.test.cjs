@@ -337,6 +337,21 @@ test("native Level subscription receives an authenticated terminal event", macOn
   } finally { await instance.cleanup(); }
 });
 
+test("native companion survives a disconnected Level subscription", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    const subscription = await openSlowLevelSubscription(instance.socket, owner, lease);
+    subscription.destroy();
+    await request(instance.socket, owner, "cancel", lease);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const health = await request(instance.socket, owner, "health", {});
+    assert.equal(health.status, "ok");
+  } finally { await instance.cleanup(); }
+});
+
 test("exact Level subscription retry replaces the prior connection and replays", macOnly, async (t) => {
   const instance = await nativeHarness();
   try {
