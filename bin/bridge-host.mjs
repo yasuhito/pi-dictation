@@ -273,6 +273,9 @@ function resolvedTunnelArguments(alias, transport, companionSocket) {
     "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "-o", "ControlMaster=no",
     "-o", "ControlPath=none", "-o", "ControlPersist=no",
     "-o", "ExitOnForwardFailure=yes",
+  );
+  if (transport.endpoint.type === "unix") arguments_.push("-o", "StreamLocalBindUnlink=yes");
+  arguments_.push(
     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
     "-N", "-T", "-R", `${transport.remoteForward}:${companionSocket}`, hostname,
   );

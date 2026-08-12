@@ -552,6 +552,16 @@ for (const [mode, label] of [["companion-duration-disabled", "Pi"], ["mac-durati
   });
 }
 
+test("the Bridge recording timeline starts after authenticated startup", async () => {
+  const instance = await harness("pi-start-delay");
+  try {
+    const requestedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    assert.equal(recording.startedAt - requestedAt >= 180, true);
+  } finally { await instance.cleanup(); }
+});
+
 test("Pi's duration deadline includes delayed Bridge startup", async () => {
   const instance = await harness("pi-start-delay");
   instance.startOptions.maxDurationMs = 160;

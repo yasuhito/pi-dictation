@@ -4,8 +4,8 @@ const MAX_WAV_HEADER_BYTES = 64 * 1024;
 const MAX_SAMPLE_RATE = 192_000;
 const MIN_SAMPLE_RATE = 8_000;
 const MAX_INTERVAL_BYTES = 64 * 1024;
-const LEVEL_GATE_DB = -33;
-const LEVEL_CUTS_DB = [-31, -29, -27, -25, -23, -20, -17];
+const LEVEL_GATE_DB = -40;
+const LEVEL_CUTS_DB = [-37, -34, -31, -28, -25, -21, -17];
 
 export function levelForDb(db: number): number {
   if (!Number.isFinite(db) || db < LEVEL_GATE_DB) return 0;
