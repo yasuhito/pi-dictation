@@ -8,9 +8,11 @@
 
 Push-to-talk dictation for [Pi](https://github.com/badlogic/pi-mono). Press a shortcut, speak, press it again, and the transcription is pasted into Pi's editor.
 
-Pi Dictation supports OpenAI audio transcription and arbitrary local transcription commands. Failed or cancelled work does not leave background commands running or consuming resources indefinitely: recording and transcription run in separate, bounded process groups that are terminated on cancellation or session shutdown.
-
 ![Pi Dictation demo](https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.gif)
+
+Transcribe with OpenAI or any local transcription command. When Pi runs on a remote host over SSH, the optional Bridge can record from the Mac in front of you and send the audio securely to Pi for transcription.
+
+Pi Dictation limits recording time, stops background work when it is no longer needed, keeps temporary audio private, and cleans it up automatically—so a forgotten recording, a failed command, or leftover files do not quietly consume resources or expose your audio.
 
 ## Requirements
 
@@ -185,23 +187,6 @@ pi-dictation bridge uninstall my-pi        # preview
 2. In Pi on `my-pi`, run `/dictate-config`, choose Bridge recording, and save.
 3. Run `/dictate`, speak a recognizable phrase into the Mac microphone, then run `/dictate` again.
 4. Confirm the phrase is inserted into Pi.
-
-## Safety
-
-Pi Dictation:
-
-- prevents shortcut races from starting multiple recorders;
-- terminates entire recorder and transcriber process groups;
-- uses an independent process-group watchdog to stop recordings after 10 minutes by default, even if Pi is killed, then force-kills stubborn processes within 5 more seconds;
-- bounds subprocess output retained in memory;
-- aborts transcription on cancellation and session shutdown;
-- creates recordings in private (`0700`) temporary directories;
-- commits only validated PCM16 mono WAV output for transcription;
-- recovers owner-authenticated completed Bridge WAVs across transport loss or companion restart for at most ten minutes;
-- deletes Bridge audio on acknowledgement, cancellation, or expiry and removes its minimal retry tombstone ten minutes later;
-- removes temporary recordings after normal use, cancellation, failure, and graceful shutdown.
-
-An uncatchable Pi crash (for example, `SIGKILL`) can leave the private recording directory behind for the operating system's temporary-file cleanup.
 
 ## Development
 
