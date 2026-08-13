@@ -4,7 +4,7 @@
 
 - Decision: **PASS WITH ACCEPTED CLEAN-USER EXCEPTION**
 - Package version: `0.6.0`
-- Candidate commit: `c5b948bfc25cb2445d2e46dab386adcfb5b2496b`
+- Candidate commit: `c5b948beafd7ff11fdeb22f7933d49cbb743e812`
 - Tarball SHA-256: `b712e1e51f9b9495d40f47b482e932625f3fb88902e142666928415a2d109b92`
 - Candidate remained byte-identical across Mac and Linux: **yes**
 - Verifier: project owner with Pi coding agent automation
