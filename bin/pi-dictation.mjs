@@ -359,7 +359,7 @@ function launchAgentPlist(p, installId, enabled = false) {
 <!-- pi-dictation-install-id:${installId} -->
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key><array><string>${escaped}</string></array>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec &quot;$1&quot;</string><string>pi-dictation-bridge</string><string>${escaped}</string></array>
 ${supervision}  <key>ProcessType</key><string>Background</string>
 </dict></plist>
 `;

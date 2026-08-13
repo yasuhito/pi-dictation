@@ -10,6 +10,21 @@ const root = resolve(__dirname, "..");
 
 const macOnly = process.platform === "darwin" ? {} : { skip: "requires the macOS Swift toolchain" };
 
+test("production logout attribution observes workspace power-off before termination fallback", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.equal(source.includes("NSWorkspace.willPowerOffNotification") && source.includes("failActiveAfterPowerOffAttributionGrace"), true);
+});
+
+test("production termination fallback leaves time for authoritative logout attribution", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.match(source, /terminationRequest[\s\S]*milliseconds\(750\)[\s\S]*failActive\(reason: "companion-stop"\)/);
+});
+
+test("the companion LaunchAgent bypasses post-login app-bundle xpcproxy stalls", () => {
+  const source = readFileSync(join(root, "bin", "pi-dictation.mjs"), "utf8");
+  assert.match(source, /<string>\/bin\/sh<\/string><string>-c<\/string><string>exec &quot;\$1&quot;<\/string>/);
+});
+
 test("production lifecycle wiring distinguishes logout from restart and shutdown", macOnly, () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-lifecycle-wiring-"));
   const harness = join(directory, "LifecycleWiring.swift");

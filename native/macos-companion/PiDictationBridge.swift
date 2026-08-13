@@ -1517,16 +1517,24 @@ private final class RecordingManager {
     }
 
     func failActiveAfterLockAttributionGrace() {
+        failActiveAfterAttributionGrace(reason: "session-lock", milliseconds: 500)
+    }
+
+    func failActiveAfterPowerOffAttributionGrace() {
+        failActiveAfterAttributionGrace(reason: "logout", milliseconds: 500)
+    }
+
+    private func failActiveAfterAttributionGrace(reason: String, milliseconds: Int) {
         lock.lock()
         let expectedId = activeId
         lock.unlock()
         guard let expectedId else { return }
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(milliseconds)) { [weak self] in
             guard let self else { return }
             self.lock.lock()
             defer { self.lock.unlock() }
             guard self.activeId == expectedId, let current = self.recordings[expectedId], current.state == "recording" else { return }
-            self.failLocked(current, reason: "session-lock")
+            self.failLocked(current, reason: reason)
         }
     }
 
@@ -2923,8 +2931,21 @@ private func serve() throws {
     let durationRequest = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .global())
     durationRequest.setEventHandler { recordings.enforceDurationLimit() }
     durationRequest.resume()
+    signal(SIGTERM, SIG_IGN)
+    let terminationRequest = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+    terminationRequest.setEventHandler {
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(750)) {
+            recordings.failActive(reason: "companion-stop")
+            logger.event("companion-stop")
+            logger.close()
+            Darwin.close(listener)
+            unlink(paths.socket)
+            exit(EXIT_SUCCESS)
+        }
+    }
+    terminationRequest.resume()
     var lifecycleSignals = [
-        signalSource(SIGTERM, reason: "companion-stop", exits: true),
+        terminationRequest,
         signalSource(SIGINT, reason: "companion-stop", exits: true),
         signalSource(SIGHUP, reason: "logout", exits: true),
         signalSource(SIGQUIT, reason: "reboot", exits: true),
@@ -2957,6 +2978,9 @@ private func serve() throws {
     let sleepObserver = workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
         recordings.failActive(reason: "sleep")
     }
+    let powerOffObserver = workspace.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: nil) { _ in
+        recordings.failActiveAfterPowerOffAttributionGrace()
+    }
     let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
         recordings.failActiveAfterLockAttributionGrace()
     }
@@ -2973,6 +2997,7 @@ private func serve() throws {
         consoleLockMonitor.cancel()
         for source in lifecycleSignals { source.cancel() }
         workspace.removeObserver(sleepObserver)
+        workspace.removeObserver(powerOffObserver)
         workspace.removeObserver(lockObserver)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: logoutEvent)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: restartEvent)
