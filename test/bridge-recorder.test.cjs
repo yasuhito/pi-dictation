@@ -345,17 +345,50 @@ test("the Bridge recording adapter reapplies the same stop identity during final
 });
 
 for (const operation of ["start", "status", "stop", "acknowledge", "cancel"]) {
-  test(`the Bridge recording adapter retries the same ${operation} operation after a lost response`, async () => {
+  test(`the Bridge recording adapter retries the same ${operation} operation after a lost response`, async (t) => {
     const instance = await harness(`drop-${operation}-response`);
     try {
       const recording = await instance.recorder.start(instance.startOptions);
       if (operation === "cancel") await recording.cancel();
       else if (operation !== "start") await recording.stop();
       else await recording.cancel();
-      assert.equal(instance.events().filter((event) => event === operation).length >= 2, true);
+      const requestIds = instance.events()
+        .filter((event) => event.startsWith(`${operation}-request:`))
+        .map((event) => event.slice(`${operation}-request:`.length));
+      await t.test("classifies a lost authenticated response as retryable", () => {
+        assert.equal(requestIds.length >= 2, true);
+      });
+      await t.test("preserves the request identity across the ambiguous retry", () => {
+        assert.equal(requestIds[1], requestIds[0]);
+      });
     } finally { await instance.cleanup(); }
   });
 }
+
+test("Bridge control retries share one caller budget across ambiguous attempts", async (t) => {
+  const instance = await harness("slow-drop-health-responses");
+  try {
+    const { checkBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const startedAt = Date.now();
+    const available = await checkBridgeRecorder(instance.config, 180);
+    const elapsed = Date.now() - startedAt;
+    const requestIds = instance.events()
+      .filter((event) => event.startsWith("health-request:"))
+      .map((event) => event.slice("health-request:".length));
+    await t.test("starts the shared deadline before the first attempt completes", () => {
+      assert.equal(elapsed >= 160 && elapsed < 350, true);
+    });
+    await t.test("spans retries instead of resetting the budget", () => {
+      assert.equal(requestIds.length, 2);
+    });
+    await t.test("keeps the ambiguous request identity within that budget", () => {
+      assert.equal(requestIds[1], requestIds[0]);
+    });
+    await t.test("maps exhausted health retries to unavailable", () => {
+      assert.equal(available, false);
+    });
+  } finally { await instance.cleanup(); }
+});
 
 test("a deterministic local fetch write failure does not enter transport recovery", async (t) => {
   const instance = await harness();
@@ -382,8 +415,14 @@ test("an interrupted Bridge fetch restarts from byte zero", async (t) => {
   try {
     const recording = await instance.recorder.start(instance.startOptions);
     await recording.stop();
+    const requestIds = instance.events()
+      .filter((event) => event.startsWith("fetch-request:"))
+      .map((event) => event.slice("fetch-request:".length));
     await t.test("retries the fetch operation", () => {
-      assert.equal(instance.events().filter((event) => event === "fetch").length, 2);
+      assert.equal(requestIds.length, 2);
+    });
+    await t.test("preserves the request identity across transfer recovery", () => {
+      assert.equal(requestIds[1], requestIds[0]);
     });
     await t.test("commits only the complete recovered WAV", () => {
       assert.equal(existsSync(instance.startOptions.destination), true);
@@ -476,6 +515,19 @@ test("repeated concurrent Bridge lifecycle calls are idempotent", async (t) => {
     await stoppingInstance.cleanup();
     await cancellingInstance.cleanup();
   }
+});
+
+test("an external abort reason maps to the stable Recorder cancellation outcome", async () => {
+  const instance = await harness();
+  const controller = new AbortController();
+  instance.startOptions.signal = controller.signal;
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    controller.abort(new Error("caller-specific abort detail"));
+    while (!instance.events().includes("cancel")) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    const error = await recording.stop().catch((value) => value);
+    assert.equal(error.code, "cancelled");
+  } finally { await instance.cleanup(); }
 });
 
 test("Bridge cancellation interrupts finalization immediately", async (t) => {

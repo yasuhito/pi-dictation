@@ -570,7 +570,7 @@ async function startHealthServer(home, mode = "ok") {
 const { createHmac, randomBytes, timingSafeEqual } = require("node:crypto");
 const { chmodSync, readFileSync, rmSync } = require("node:fs");
 const net = require("node:net");
-const [credentialPath, socketPath, mode] = process.argv.slice(2);
+const [credentialPath, socketPath, mode, eventPath] = process.argv.slice(2);
 const credential = JSON.parse(readFileSync(credentialPath, "utf8"));
 const secret = Buffer.from(credential.secret, "base64");
 function encode(fields) {
@@ -588,21 +588,25 @@ function frame(value) {
 }
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
   const challenge = randomBytes(32);
-  socket.write(frame({ type: "challenge", challenge: challenge.toString("base64") }));
+  const challengeFrame = frame({ type: "challenge", challenge: challenge.toString("base64") });
+  if (mode === "phase-delays") setTimeout(() => socket.write(challengeFrame), 2700);
+  else socket.write(challengeFrame);
   let buffered = Buffer.alloc(0);
   socket.on("data", (chunk) => {
     buffered = Buffer.concat([buffered, chunk]);
     if (buffered.length < 4) return;
     const length = buffered.readUInt32BE(0); if (buffered.length !== length + 4) return;
     const request = JSON.parse(buffered.subarray(4));
+    if (eventPath) require("node:fs").appendFileSync(eventPath, request.operation + ":" + request.requestId + "\n");
     const payload = Buffer.from(request.payload, "base64");
     const expected = tag(["request", 3, challenge, credential.id, request.requestId, "health", payload]);
     const actual = Buffer.from(request.hmac, "hex");
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return socket.destroy();
     const responseVersion = mode === "wrong-version" ? 2 : 3;
-    const status = mode === "wrong-version" ? "version-mismatch" : "ok";
+    const status = mode === "wrong-version" ? "version-mismatch" : mode === "authenticated-busy" ? "busy" : "ok";
     const body = mode === "wrong-version"
       ? { clientVersion: 3, companionVersion: 2 }
+      : mode === "authenticated-busy" ? {}
       : {
           permission: mode === "control-permission" ? "authorized\u001b[31m" :
             mode === "unknown-permission" ? "unexpected" : "authorized",
@@ -616,6 +620,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
     if (mode === "trailing-response") {
       socket.write(response);
       setTimeout(() => socket.end(Buffer.from("x")), 10);
+    } else if (mode === "phase-delays") {
+      setTimeout(() => socket.end(response), 2700);
     } else {
       socket.end(response);
     }
@@ -627,7 +633,7 @@ server.listen(socketPath, () => { chmodSync(socketPath, 0o600); process.stdout.w
 `);
   const root = join(home, "Library", "Application Support", "pi-dictation", "bridge");
   const socket = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
-  const child = spawn(process.execPath, [script, join(root, "credential.json"), socket, mode], {
+  const child = spawn(process.execPath, [script, join(root, "credential.json"), socket, mode, join(home, "health-events.log")], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   await once(child.stdout, "data");
@@ -656,6 +662,54 @@ test("bridge health authenticates an exact-version request and response over the
     });
     await t.test("reports permission without opening the microphone", () => {
       assert.match(result.stdout, /Microphone permission: authorized/);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health resets its five-second deadline between authentication phases", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "phase-delays");
+    const startedAt = Date.now();
+    const result = runBridge(home, ["health"]);
+    const elapsed = Date.now() - startedAt;
+
+    await t.test("allows the combined challenge and response phases to exceed five seconds", () => {
+      assert.equal(result.status === 0 && elapsed >= 5200 && elapsed < 7000, true, result.stderr);
+    });
+    await t.test("performs one management request without retrying", () => {
+      assert.equal(readFileSync(join(home, "health-events.log"), "utf8").trim().split("\n").length, 1);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health maps an authenticated non-success status without retrying", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "authenticated-busy");
+    const result = runBridge(home, ["health"]);
+
+    await t.test("preserves the existing user-facing status message", () => {
+      assert.match(result.stderr, /The companion rejected health with authenticated status busy\./);
+    });
+    await t.test("does not retry the rejected management request", () => {
+      assert.equal(readFileSync(join(home, "health-events.log"), "utf8").trim().split("\n").length, 1);
     });
   } finally {
     server?.kill();

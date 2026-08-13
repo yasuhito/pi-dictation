@@ -558,6 +558,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         socket.write(Buffer.concat([response, audio.subarray(0, 100)]), () => socket.destroy());
         return;
       }
+      if (request.operation === "health" && mode === "slow-drop-health-responses") {
+        const delayed = setTimeout(() => socket.destroy(), 120);
+        delayed.unref();
+        return;
+      }
       if (request.operation === "start" && mode === "pi-start-delay") {
         const delayed = setTimeout(() => socket.end(response), 220);
         delayed.unref();
