@@ -20,6 +20,7 @@ const { test } = require("node:test");
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow, recoversLifecycleInlineAfterError } = require("../bin/certification-recovery.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -118,6 +119,45 @@ test("package exposes the unified Pi Dictation CLI and native companion source",
   });
 });
 
+test("lifecycle recovery owns the verdict after an interrupted request", async (t) => {
+  const original = new Error("transport-eof");
+  await t.test("returns successfully when recovery proves the scenario", async () => {
+    assert.equal(await recoverLifecycleOrRethrow(original, async () => "passed"), "passed");
+  });
+  await t.test("preserves the original error when recovery cannot prove the scenario", async () => {
+    await assert.rejects(recoverLifecycleOrRethrow(original, async () => { throw new Error("unavailable"); }), original);
+  });
+});
+
+test("logout and reboot retain recovery state after teardown errors", async (t) => {
+  await t.test("logout defers cleanup until post-login verification", () => {
+    assert.equal(recoversLifecycleInlineAfterError("logout"), false);
+  });
+  await t.test("reboot defers cleanup until post-login verification", () => {
+    assert.equal(recoversLifecycleInlineAfterError("reboot"), false);
+  });
+  await t.test("session lock still recovers inline", () => {
+    assert.equal(recoversLifecycleInlineAfterError("session-lock"), true);
+  });
+  await t.test("keeps heartbeat polling before the teardown error", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("while (true)") && !source.includes("if (!waitsForLifecycleInline(name)) return"), true);
+  });
+});
+
+test("lifecycle evidence commits recovery cleanup only after proving its reason", async (t) => {
+  await t.test("commits when the observed reason matches", () => {
+    let committed = false;
+    commitProvenLifecycle("companion-restart", "companion-restart", "failed", () => { committed = true; });
+    assert.equal(committed, true);
+  });
+  await t.test("retains recovery state when the observed reason differs", () => {
+    let committed = false;
+    try { commitProvenLifecycle(undefined, "companion-restart", "recording", () => { committed = true; }); } catch {}
+    assert.equal(committed, false);
+  });
+});
+
 test("packaged real-device certification lists every required gate scenario without repository fixtures", async (t) => {
   const result = spawnSync(process.execPath, [certificationPath, "list", "--json"], {
     cwd: packageRoot, encoding: "utf8",
@@ -134,10 +174,13 @@ test("packaged real-device certification lists every required gate scenario with
   await t.test("declares the exact production protocol version", () => {
     assert.equal(output.protocolVersion, 3);
   });
-  await t.test("automates cancellation, duration, and arbitration without human actions", () => {
+  await t.test("automates cancellation and arbitration without human actions", () => {
     assert.deepEqual(output.scenarios.filter(({ requiresHumanAction }) => !requiresHumanAction).map(({ name }) => name), [
-      "bridge-cancellation", "bridge-duration-limit", "bridge-single-lease",
+      "bridge-cancellation", "bridge-single-lease",
     ]);
+  });
+  await t.test("requires real microphone input for the duration-limit WAV", () => {
+    assert.equal(output.scenarios.find(({ name }) => name === "bridge-duration-limit").requiresHumanAction, true);
   });
   await t.test("requires two independently configured hosts for arbitration", () => {
     assert.equal(output.scenarios.find(({ name }) => name === "bridge-single-lease").requiredHostAliases, 2);
@@ -154,6 +197,20 @@ test("packaged real-device certification lists every required gate scenario with
   await t.test("declares authenticated remote health as the reconnect proof", () => {
     assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").reconnectValidation, "authenticated-remote-health");
   });
+  await t.test("classifies companion stop and restart through one lifecycle predicate", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('const companionLifecycleScenarios = new Set(["companion-stop", "companion-restart"])'), true);
+  });
+  await t.test("actively restores the owned companion before lifecycle verification", () => {
+    assert.equal(readFileSync(certificationPath, "utf8").includes("restartCompanionForLifecycleVerification"), true);
+  });
+  await t.test("retains recovery state until the expected lifecycle reason is proven", () => {
+    assert.equal(readFileSync(certificationPath, "utf8").includes("commitProvenLifecycle(observedReason, expected.reason, status.payload.state, clearState)"), true);
+  });
+  await t.test("requires authenticated readiness rather than only a successful launchctl submission", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("await assertReady(credential)") && source.includes("Companion restart did not return authenticated readiness"), true);
+  });
   await t.test("bounds each certification protocol control connection and destroys it in finally", () => {
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes("connection.setTimeout(controlDeadlineMilliseconds") && source.includes("finally {\n    connection.destroy();"), true);
@@ -163,6 +220,73 @@ test("packaged real-device certification lists every required gate scenario with
     assert.equal(source.includes('certificationCommand("npm", ["install", "--global", predecessor]') &&
       source.includes("packagedPiCommand(state.predecessor") &&
       source.includes("state.predecessorSha256 === state.tarballSha256"), true);
+  });
+  await t.test("uses human and JSON doctor diagnosis from packed bytes", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('["bridge", "doctor"]') && source.includes('["bridge", "doctor", "--json"]'), true);
+  });
+  await t.test("installs the exact candidate digest on both hosts before candidate upgrade and recording", async (stage) => {
+    const source = readFileSync(certificationPath, "utf8");
+    await stage.test("transfers the selected candidate", () => {
+      assert.equal(source.includes("installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)"), true);
+    });
+    await stage.test("checks the remote candidate digest", () => {
+      assert.equal(source.includes('["--", alias, "sha256sum", remoteTarball]'), true);
+    });
+    await stage.test("installs the remote candidate globally", () => {
+      assert.equal(source.includes('["--", alias, "npm", "install", "--global", remoteTarball]'), true);
+    });
+    await stage.test("upgrades the configured Bridge", () => {
+      assert.equal(source.includes('["bridge", "upgrade"]'), true);
+    });
+    await stage.test("requires candidate real-audio preflight", () => {
+      assert.equal(source.includes('phase: "awaiting-candidate-preflight"'), true);
+    });
+    await stage.test("requires candidate Bridge recording", () => {
+      assert.equal(source.includes('phase: "awaiting-candidate-recording"'), true);
+    });
+  });
+  await t.test("interrupted automated certification cleanup cannot emit passing evidence", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("Rerun the complete scenario; recovery is not passing evidence."), true);
+  });
+  await t.test("keeps recovery state outside the Bridge runtime removed by uninstall", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('"Caches", "pi-dictation-certification"') &&
+      source.includes('const statePath = join(certificationRuntime, "state.json")'), true);
+  });
+  await t.test("commits every recovery transition through an atomic private rename", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("function atomicState") && source.includes("renameSync(temporary, statePath)"), true);
+  });
+  await t.test("removes the empty certification directory with directory semantics", () => {
+    assert.equal(readFileSync(certificationPath, "utf8").includes("rmdirSync(certificationRuntime)"), true);
+  });
+  await t.test("separates the Bridge uninstall preview from final deletion confirmation", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials"]') &&
+      source.includes('phase: "awaiting-uninstall-confirmation"') &&
+      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
+  });
+  await t.test("persists resumable states before predecessor install, candidate upgrade, and confirmed uninstall", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('phase: "preparing-predecessor"') &&
+      source.includes('phase: "upgrading-candidate"') && source.includes('phase: "uninstalling"'), true);
+  });
+  await t.test("replays idempotent installs and destructive cleanup from transitional phases", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes('if (state.phase === "preparing-predecessor")') &&
+      source.includes('if (state.phase === "upgrading-candidate")') &&
+      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
+  });
+  await t.test("requires a new reviewed confirmation if uninstall effects change", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("uninstallPreviewSha256") &&
+      source.includes("Uninstall effects changed. Review the new preview"), true);
+  });
+  await t.test("does not let verify bypass clean-user staged gates", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.match(source, /scenario\.kind === "clean-user"\) fail\("Clean-user certification must resume with `advance --confirm`/);
   });
   await t.test("does not import a repository test fixture", () => {
     assert.equal(readFileSync(certificationPath, "utf8").includes("test/fixtures"), false);

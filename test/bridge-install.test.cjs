@@ -425,6 +425,50 @@ test("remote Recorder configuration recovers an owned orphaned staging file", ()
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("remote listener cleanup is a no-op for a managed TCP fallback", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-tcp-cleanup-"));
+  const id = "1234567890abcdef";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  mkdirSync(hostRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(join(hostRoot, "endpoint.json"), JSON.stringify({ endpoint: { type: "tcp", host: "127.0.0.1", port: 43123 } }), { mode: 0o600 });
+  try {
+    const cleanup = spawnSync(process.execPath, [cli, "bridge", "remote-listener-cleanup", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote listener cleanup removes only a stale managed Unix socket", { skip: process.platform !== "linux" }, async (t) => {
+  const home = mkdtempSync(join("/tmp", "pd-stale-"));
+  const id = "234567890abcdef1";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const socketPath = join(hostRoot, "listener.sock");
+  const script = join(home, "stale-listener.cjs");
+  mkdirSync(hostRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(join(hostRoot, "endpoint.json"), JSON.stringify({ endpoint: { type: "unix", path: socketPath } }), { mode: 0o600 });
+  writeFileSync(script, `const net=require("node:net");net.createServer().listen(${JSON.stringify(socketPath)},()=>console.log("ready"));\n`);
+  const server = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await once(server.stdout, "data");
+    server.kill("SIGKILL");
+    await once(server, "exit");
+    chmodSync(socketPath, 0o600);
+    const cleanup = spawnSync(process.execPath, [cli, "bridge", "remote-listener-cleanup", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    await t.test("accepts the owned stale socket", () => {
+      assert.equal(cleanup.status, 0, cleanup.stderr);
+    });
+    await t.test("removes the stale socket before reverse forwarding", () => {
+      assert.equal(existsSync(socketPath), false);
+    });
+  } finally {
+    if (server.exitCode === null) server.kill("SIGKILL");
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", { skip: process.platform !== "linux" }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-gatewayports-"));
   const id = "34567890abcdef12";
@@ -453,8 +497,9 @@ test("tunnel supervisor establishes listener, health, and bounded safe logging",
   const tools = join(home, "tools");
   const statusPath = join(home, "setup.json");
   const configurationPath = join(home, "tunnel.json");
+  const cleanupMarker = join(home, "listener-cleaned");
   mkdirSync(tools, { mode: 0o700 });
-  executable(join(tools, "ssh"), "#!/bin/sh\nif [ \"$1\" = tunnel ]; then exec /bin/sleep 30; fi\nexit 0\n");
+  executable(join(tools, "ssh"), "#!/bin/sh\nif [ \"$1\" = cleanup ]; then : > \"$CLEANUP_MARKER\"; exit 0; fi\nif [ \"$1\" = tunnel ]; then test -f \"$CLEANUP_MARKER\" || exit 42; exec /bin/sleep 30; fi\nexit 0\n");
   writeFileSync(statusPath, JSON.stringify({ stages: { tunnelProcess: "pending", listener: "pending", authenticatedHealth: "pending" } }), { mode: 0o600 });
   writeFileSync(configurationPath, JSON.stringify({
     product: "com.yasuhito.pi-dictation.bridge",
@@ -462,11 +507,12 @@ test("tunnel supervisor establishes listener, health, and bounded safe logging",
     logFile: join(home, "tunnel.log"),
     stableAfterMs: 1000,
     sshArguments: ["tunnel"],
+    listenerCleanupArguments: ["cleanup"],
     listenerProbeArguments: ["listener"],
     healthProbeArguments: ["health"],
   }), { mode: 0o600 });
   const supervisor = spawn(process.execPath, [join(root, "bin", "pi-dictation-tunnel.mjs"), configurationPath], {
-    cwd: root, env: { ...process.env, HOME: home, PATH: `${tools}:/usr/bin:/bin` }, stdio: "ignore",
+    cwd: root, env: { ...process.env, HOME: home, PATH: `${tools}:/usr/bin:/bin`, CLEANUP_MARKER: cleanupMarker }, stdio: "ignore",
   });
   try {
     let state;
@@ -477,6 +523,9 @@ test("tunnel supervisor establishes listener, health, and bounded safe logging",
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
     const log = readFileSync(join(home, "tunnel.log"), "utf8");
+    await t.test("cleans the managed remote listener before opening the tunnel", () => {
+      assert.equal(existsSync(cleanupMarker), true);
+    });
     await t.test("establishes listener and authenticated health", () => {
       assert.deepEqual(state.stages, { tunnelProcess: "running", listener: "established", authenticatedHealth: "ready" });
     });
@@ -504,6 +553,7 @@ test("tunnel supervisor aggregates repeated connection failures", async (t) => {
     logFile: join(home, "tunnel.log"),
     stableAfterMs: 300000,
     sshArguments: ["tunnel"],
+    listenerCleanupArguments: ["cleanup"],
     listenerProbeArguments: ["listener"],
     healthProbeArguments: ["health"],
   }), { mode: 0o600 });
@@ -529,7 +579,7 @@ test("tunnel supervisor escalates from TERM to KILL only for its owned SSH child
   const statusPath = join(home, "setup.json");
   const configurationPath = join(home, "tunnel.json");
   mkdirSync(tools, { mode: 0o700 });
-  executable(join(tools, "ssh"), "#!/bin/sh\nif [ \"$1\" != tunnel ]; then exit 1; fi\nprintf '%s' $$ > \"$CHILD_PID\"\ntrap '' TERM INT\nwhile :; do sleep 1; done\n");
+  executable(join(tools, "ssh"), "#!/bin/sh\nif [ \"$1\" = cleanup ]; then exit 0; fi\nif [ \"$1\" != tunnel ]; then exit 1; fi\nprintf '%s' $$ > \"$CHILD_PID\"\ntrap '' TERM INT\nwhile :; do sleep 1; done\n");
   writeFileSync(statusPath, JSON.stringify({ stages: { tunnelProcess: "pending", listener: "pending", authenticatedHealth: "pending" } }), { mode: 0o600 });
   writeFileSync(configurationPath, JSON.stringify({
     product: "com.yasuhito.pi-dictation.bridge",
@@ -537,6 +587,7 @@ test("tunnel supervisor escalates from TERM to KILL only for its owned SSH child
     logFile: join(home, "tunnel.log"),
     stableAfterMs: 1000,
     sshArguments: ["tunnel"],
+    listenerCleanupArguments: ["cleanup"],
     listenerProbeArguments: ["listener"],
     healthProbeArguments: ["health"],
   }), { mode: 0o600 });
@@ -609,6 +660,30 @@ test("bridge doctor diagnoses every layer without mutating LaunchAgents", async 
   }
 });
 
+test("remote revocation removes a partial host without changing another owned Recorder", async (t) => {
+  const f = fixture();
+  try {
+    const partialId = "2222222222222222";
+    const ownerId = "1111111111111111";
+    const remoteRoot = join(f.home, ".local", "share", "pi-dictation", "bridge", "hosts", partialId);
+    const configRoot = join(f.home, ".pi", "agent");
+    mkdirSync(remoteRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(configRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(remoteRoot, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", hostId: partialId }), { mode: 0o600 });
+    writeFileSync(join(remoteRoot, "credential.json"), JSON.stringify({ id: "22222222-2222-4222-8222-222222222222", secret: Buffer.alloc(32, 2).toString("base64") }), { mode: 0o600 });
+    const config = { recorder: { type: "local" } };
+    writeFileSync(join(configRoot, "pi-dictation.json"), JSON.stringify(config), { mode: 0o600 });
+    writeFileSync(join(configRoot, "pi-dictation.bridge-owner.json"), JSON.stringify({
+      product: "com.yasuhito.pi-dictation.bridge", hostId: ownerId, phase: "ready",
+      sha256: createHash("sha256").update(JSON.stringify(config)).digest("hex"),
+    }), { mode: 0o600 });
+    const result = run(f, ["remote-credential-revoke", partialId]);
+    await t.test("completes partial cleanup", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("removes only the partial host", () => assert.equal(existsSync(remoteRoot), false));
+    await t.test("preserves the other owned Recorder", () => assert.deepEqual(JSON.parse(readFileSync(join(configRoot, "pi-dictation.json"))), config));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
 test("scoped uninstall removes only the selected host bridge", async (t) => {
   const f = fixture();
   const effectsFile = join(f.home, "scoped-effects");
@@ -619,6 +694,8 @@ test("scoped uninstall removes only the selected host bridge", async (t) => {
       if (installed.status !== 0) throw new Error(installed.stderr);
     }
     server = await startCredentialServer(f, effectsFile);
+    const runtime = join(f.home, "Library", "Caches", "pi-dictation", "bridge");
+    writeFileSync(join(runtime, "request-receipts.json"), JSON.stringify({ schemaVersion: 4, receipts: [] }), { mode: 0o600 });
     const result = run(f, ["uninstall", "remove-pi", "--confirm"]);
     const listed = run(f, ["list", "--json"]);
     const remaining = JSON.parse(listed.stdout).hosts.map((host) => host.sshAlias);

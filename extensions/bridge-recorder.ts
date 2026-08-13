@@ -614,7 +614,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const livenessController = new AbortController();
       void streamLevels(config, credential, owned, levelController.signal, options.onLevel);
       void (async () => {
-        let nextProofAt = recordingStartedAt + OWNER_LIVENESS_INTERVAL_MS;
+        let nextProofAt = startRequestedAt + OWNER_LIVENESS_INTERVAL_MS;
         while (!livenessController.signal.aborted) {
           try { await abortableDelay(Math.max(0, nextProofAt - Date.now()), livenessController.signal); }
           catch { return; }

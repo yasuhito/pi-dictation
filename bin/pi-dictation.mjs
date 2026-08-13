@@ -41,7 +41,9 @@ import {
   remoteHealth,
   remoteInfo,
   remoteListener,
+  remoteListenerCleanup,
   remotePrepare,
+  refreshHostSupervisors,
   revokeHost,
   rotateHost,
 } from "./bridge-host.mjs";
@@ -357,7 +359,7 @@ function launchAgentPlist(p, installId, enabled = false) {
 <!-- pi-dictation-install-id:${installId} -->
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key><array><string>${escaped}</string></array>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec &quot;$1&quot;</string><string>pi-dictation-bridge</string><string>${escaped}</string></array>
 ${supervision}  <key>ProcessType</key><string>Background</string>
 </dict></plist>
 `;
@@ -969,6 +971,7 @@ async function upgrade(args) {
   }
   stopOwnedCompanion(p);
   install();
+  refreshHostSupervisors(upgradeState.hosts);
   atomicWrite(upgradePath, `${JSON.stringify({ ...upgradeState, phase: "preflight-required" })}\n`);
   console.log("Shared companion upgraded after every registered destination passed compatibility checks.");
   console.log("Required next step: run `pi-dictation bridge preflight`; completion includes all-host authenticated health checks.");
@@ -996,7 +999,7 @@ function assertRemovalLayout(p) {
   }
   if (pathExists(p.runtime)) {
     inspectPath(p.runtime, "directory", 0o700, "bridge runtime directory");
-    const allowed = /^(?:companion\.sock|companion\.log(?:\.[12])?|resource-metrics\.json|recording-[0-9a-f-]{36}\.(?:wav|json|reserve)|request-[0-9a-f-]{36}\.json|revocation-[0-9a-f-]{36}\.json)$/i;
+    const allowed = /^(?:companion\.sock|companion\.log(?:\.[12])?|resource-metrics\.json|request-receipts\.json|recording-[0-9a-f-]{36}\.(?:wav|json|reserve)|request-[0-9a-f-]{36}\.json|revocation-[0-9a-f-]{36}\.json)$/i;
     for (const name of readdirSync(p.runtime)) {
       if (!allowed.test(name)) throw new CliError(`Refusing unexpected runtime artifact '${name}' whose ownership cannot be proven.`);
       const artifact = join(p.runtime, name);
@@ -1092,6 +1095,7 @@ async function main() {
   if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
   if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
+  if (command === "remote-listener-cleanup" && args.length === 1) return remoteListenerCleanup(args[0]);
   if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);
   usage();
   throw new CliError("Unknown bridge command.");

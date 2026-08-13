@@ -287,6 +287,16 @@ function plist(paths, alias) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<!-- pi-dictation-host:${paths.id}:${escape(alias)} -->\n<plist version="1.0"><dict>\n<key>Label</key><string>${PRODUCT}.tunnel.${paths.id}</string>\n<key>ProgramArguments</key><array><string>${escape(process.execPath)}</string><string>${escape(supervisorPath)}</string><string>${escape(paths.tunnel)}</string></array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n`;
 }
 
+function bootstrapLaunchAgent(domain, path) {
+  let result;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    result = spawnSync("launchctl", ["bootstrap", domain, path], { encoding: "utf8" });
+    if (!result.error && result.status === 0) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  throw new BridgeHostError("The host tunnel LaunchAgent could not be loaded.");
+}
+
 function assertOwnedHost(paths, alias) {
   if (!existsSync(paths.root)) return;
   inspect(paths.root, "directory", 0o700, "host bridge directory");
@@ -399,6 +409,7 @@ export function installHost(alias, args = []) {
       logFile: paths.tunnelLog,
       stableAfterMs: 30000,
       sshArguments: resolvedTunnelArguments(alias, transport, paths.companionSocket),
+      listenerCleanupArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener-cleanup", paths.id],
       listenerProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener", paths.id],
       healthProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-health", paths.id],
     }, null, 2)}\n`);
@@ -416,8 +427,7 @@ export function installHost(alias, args = []) {
     const companionStart = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}`], { encoding: "utf8" });
     if (companionStart.error || companionStart.status !== 0) throw new BridgeHostError("The Mac companion could not be started with the host credential.");
     spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
-    const loaded = spawnSync("launchctl", ["bootstrap", domain, paths.plist], { encoding: "utf8" });
-    if (loaded.error || loaded.status !== 0) throw new BridgeHostError("The host tunnel LaunchAgent could not be loaded.");
+    bootstrapLaunchAgent(domain, paths.plist);
     const kicked = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
     if (kicked.error || kicked.status !== 0) throw new BridgeHostError("The host tunnel supervisor could not be started.");
     stages = { ...stages, tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" }; state(paths, alias, stages);
@@ -437,6 +447,41 @@ export function installHost(alias, args = []) {
   } catch (error) {
     state(paths, alias, stages, error instanceof Error ? error.message : "setup failed");
     throw error;
+  }
+}
+
+export function refreshHostSupervisors(aliases) {
+  const domain = `gui/${ownerUid()}`;
+  for (const alias of aliases) {
+    const paths = localPaths(alias);
+    assertOwnedHost(paths, alias);
+    const endpoint = readOwnedJson(paths.endpoint, "host endpoint");
+    let transport;
+    if (endpoint.type === "unix" && typeof endpoint.credentialFile === "string" &&
+        endpoint.path === join(dirname(endpoint.credentialFile), "listener.sock") &&
+        endpoint.path.endsWith(`/bridge/hosts/${paths.id}/listener.sock`)) {
+      transport = { endpoint, remoteForward: endpoint.path };
+    } else if (endpoint.type === "tcp" && typeof endpoint.credentialFile === "string" &&
+        endpoint.credentialFile.endsWith(`/bridge/hosts/${paths.id}/credential.json`) &&
+        ["127.0.0.1", "::1"].includes(endpoint.host) && Number.isInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535) {
+      transport = { endpoint, remoteForward: endpoint.host === "::1" ? `[::1]:${endpoint.port}` : `${endpoint.host}:${endpoint.port}` };
+    } else {
+      throw new BridgeHostError("Refusing invalid host endpoint during tunnel supervisor refresh.");
+    }
+    atomicWrite(paths.tunnel, `${JSON.stringify({
+      product: PRODUCT, hostId: paths.id, sshAlias: alias, statusFile: paths.state,
+      logFile: paths.tunnelLog, stableAfterMs: 30000,
+      sshArguments: resolvedTunnelArguments(alias, transport, paths.companionSocket),
+      listenerCleanupArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener-cleanup", paths.id],
+      listenerProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-listener", paths.id],
+      healthProbeArguments: [...baseSshOptions, alias, "pi-dictation", "bridge", "remote-health", paths.id],
+    }, null, 2)}\n`);
+    atomicWrite(paths.plist, plist(paths, alias));
+    spawnSync("launchctl", ["bootout", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { stdio: "ignore" });
+    bootstrapLaunchAgent(domain, paths.plist);
+    const kicked = spawnSync("launchctl", ["kickstart", `${domain}/${PRODUCT}.tunnel.${paths.id}`], { encoding: "utf8" });
+    if (kicked.error || kicked.status !== 0) throw new BridgeHostError("The refreshed host tunnel supervisor could not be started.");
+    state(paths, alias, { ...readStages(paths, alias), tunnelProcess: "running", listener: "pending", authenticatedHealth: "pending" });
   }
 }
 
@@ -1114,7 +1159,29 @@ export function remoteCredentialRevoke(id) {
       }
     }
   }
-  reconcileRemoteRecorder(id, { type: "local" });
+  const configPaths = remoteConfigPaths(id);
+  if (existsSync(configPaths.receipt)) {
+    const receipt = readOwnedJson(configPaths.receipt, "remote Pi Dictation configuration ownership receipt");
+    if (receipt.product !== PRODUCT || !/^[0-9a-f]{16}$/.test(receipt.hostId) ||
+        receipt.phase !== "ready") {
+      throw new BridgeHostError("Refusing an unowned remote Pi Dictation configuration.");
+    }
+    if (receipt.hostId === id) {
+      reconcileRemoteRecorder(id, { type: "local" });
+    } else {
+      const current = existsSync(configPaths.config)
+        ? readOwnedJson(configPaths.config, "remote Pi Dictation configuration") : {};
+      if (receipt.sha256 !== configDigest(current)) {
+        throw new BridgeHostError("Refusing an unowned remote Pi Dictation configuration.");
+      }
+      const encodedRecorder = JSON.stringify(current.recorder ?? {});
+      if (encodedRecorder.includes(root)) {
+        throw new BridgeHostError("Refusing to remove a host still referenced by remote Pi Dictation configuration.");
+      }
+    }
+  } else {
+    reconcileRemoteRecorder(id, { type: "local" });
+  }
   rmSync(root, { recursive: true });
   console.log(JSON.stringify({ revoked: true }));
 }
@@ -1146,6 +1213,35 @@ function connectEndpoint(endpoint, timeoutMs = 2000) {
     socket.once("connect", () => { clearTimeout(timeout); socket.destroy(); resolveConnection(); });
     socket.once("error", (error) => { clearTimeout(timeout); reject(error); });
   });
+}
+
+export async function remoteListenerCleanup(id) {
+  const root = remoteRoot(id);
+  inspect(root, "directory", 0o700, "remote host bridge directory");
+  const endpointConfig = readOwnedJson(join(root, "endpoint.json"), "remote Recorder endpoint configuration");
+  const endpoint = endpointConfig.endpoint;
+  if (endpoint?.type === "tcp") {
+    if (!(["127.0.0.1", "::1"].includes(endpoint.host)) || !Number.isInteger(endpoint.port) ||
+        endpoint.port < 1 || endpoint.port > 65535) {
+      throw new BridgeHostError("Refusing invalid remote TCP listener configuration.");
+    }
+    return;
+  }
+  if (endpoint?.type !== "unix" || endpoint.path !== join(root, "listener.sock")) {
+    throw new BridgeHostError("Remote listener cleanup applies only to the managed Unix socket.");
+  }
+  if (!existsSync(endpoint.path)) return;
+  const info = lstatSync(endpoint.path);
+  if (!info.isSocket() || info.isSymbolicLink() || info.uid !== process.getuid() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600) {
+    throw new BridgeHostError("Refusing unsafe remote listener cleanup.");
+  }
+  try {
+    await connectEndpoint(endpoint, 500);
+    throw new BridgeHostError("Refusing to remove an active remote listener.");
+  } catch (error) {
+    if (error instanceof BridgeHostError) throw error;
+  }
+  rmSync(endpoint.path);
 }
 
 export async function remoteListener(id) {

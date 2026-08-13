@@ -6,6 +6,7 @@ import Darwin
 import CoreMedia
 import AudioToolbox
 import AppKit
+import IOKit
 
 private let productIdentifier = "com.yasuhito.pi-dictation.bridge"
 private let protocolVersion = 3
@@ -35,7 +36,12 @@ private let ownerLivenessSeconds: TimeInterval = 15
 private let initialOwnerLivenessSeconds: TimeInterval = ownerLivenessSeconds
 #endif
 private let levelIntervalMilliseconds = 50
+private let captureFinalizationLeadMilliseconds = 250
 private let levelReplaySlots = 600
+
+func captureDurationSeconds(maximumDurationMs: Int) -> TimeInterval {
+    TimeInterval(max(1, maximumDurationMs - captureFinalizationLeadMilliseconds)) / 1000.0
+}
 private let levelSubscriberQueueLimit = 64
 private let maximumDiagnosticLevelObservations = 64
 private let maximumConnections = 16
@@ -44,7 +50,7 @@ private let validRequestOperations: Set<String> = [
     "health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge",
     "credential-effects", "credential-cancel-recordings", "credential-quiesce-if-idle", "credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active",
 ]
-private let observationRequestOperations: Set<String> = ["health", "levels", "subscribe-levels", "status"]
+private let observationRequestOperations: Set<String> = ["credential-effects", "health", "levels", "subscribe-levels", "status"]
 private let maximumObservationRequestReceiptsPerCredential = 16_384
 private let maximumControlRequestReceiptsPerCredential = 64
 #if PROTOCOL_TESTING
@@ -86,6 +92,20 @@ private enum CompanionFailure: Error {
     case requestConflict
     case invalidState
     case failed
+}
+
+func consoleLockState(_ property: CFTypeRef?) -> Bool {
+    (property as? Bool) == true
+}
+
+private func ioConsoleIsLocked() -> Bool {
+    let root = IORegistryGetRootEntry(kIOMainPortDefault)
+    guard root != MACH_PORT_NULL else { return false }
+    defer { IOObjectRelease(root) }
+    let property = IORegistryEntryCreateCFProperty(
+        root, "IOConsoleLocked" as CFString, kCFAllocatorDefault, 0
+    )?.takeRetainedValue()
+    return consoleLockState(property)
 }
 
 private func permissionName(_ status: AVAuthorizationStatus) -> String {
@@ -630,6 +650,7 @@ private struct AuthenticatedRequest {
 private struct PersistedRecording: Codable {
     let schemaVersion: Int
     let id: String
+    let bootSessionId: String?
     let ownerId: String
     let leaseHash: String
     let maximumResultBytes: Int64?
@@ -845,8 +866,22 @@ private final class LevelSubscriber {
     }
 }
 
+private func bootSessionIdentifier() -> String? {
+#if PROTOCOL_TESTING
+    if let overridden = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_BOOT_SESSION_ID"] {
+        return UUID(uuidString: overridden)?.uuidString.lowercased()
+    }
+#endif
+    var size = 0
+    guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1, size <= 128 else { return nil }
+    var bytes = [CChar](repeating: 0, count: size)
+    guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return nil }
+    return UUID(uuidString: String(cString: bytes))?.uuidString.lowercased()
+}
+
 private final class BridgeRecording {
     let id: String
+    let bootSessionId: String?
     let ownerId: String
     let leaseHash: Data
     let url: URL
@@ -876,10 +911,12 @@ private final class BridgeRecording {
     var activeFetchDescriptor: Int32?
 
     init(id: String, ownerId: String, leaseHash: Data, url: URL, maximumResultBytes: Int64,
-         state: String = "recording", length: Int? = nil, sha256: String? = nil,
+         bootSessionId: String? = bootSessionIdentifier(), state: String = "recording",
+         length: Int? = nil, sha256: String? = nil,
          completion: String = "stopped", failureReason: String? = nil,
          terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
         self.id = id
+        self.bootSessionId = bootSessionId
         self.ownerId = ownerId
         self.leaseHash = leaseHash
         self.url = url
@@ -1428,7 +1465,7 @@ private final class RecordingManager {
                         }
                         let audioRecorder = try AVAudioRecorder(url: url, settings: settings)
                         guard audioRecorder.prepareToRecord(), chmod(url.path, S_IRUSR | S_IWUSR) == 0,
-                              audioRecorder.record(),
+                              audioRecorder.record(forDuration: captureDurationSeconds(maximumDurationMs: maximumDurationMs)),
                               AVCaptureDevice.default(for: .audio)?.uniqueID == pinnedDevice.uniqueID else {
                             throw CompanionFailure.failed
                         }
@@ -1494,6 +1531,28 @@ private final class RecordingManager {
         defer { lock.unlock() }
         guard let activeId, let current = recordings[activeId], current.state == "recording" else { return }
         failLocked(current, reason: reason)
+    }
+
+    func failActiveAfterLockAttributionGrace() {
+        failActiveAfterAttributionGrace(reason: "session-lock", milliseconds: 500)
+    }
+
+    func failActiveAfterPowerOffAttributionGrace() {
+        failActiveAfterAttributionGrace(reason: "logout", milliseconds: 500)
+    }
+
+    private func failActiveAfterAttributionGrace(reason: String, milliseconds: Int) {
+        lock.lock()
+        let expectedId = activeId
+        lock.unlock()
+        guard let expectedId else { return }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(milliseconds)) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            guard self.activeId == expectedId, let current = self.recordings[expectedId], current.state == "recording" else { return }
+            self.failLocked(current, reason: reason)
+        }
     }
 
     private func failIfActive(_ current: BridgeRecording, reason: String) {
@@ -2075,8 +2134,8 @@ private final class RecordingManager {
 
     private func persistedValue(_ current: BridgeRecording) -> PersistedRecording {
         PersistedRecording(
-            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(),
+            schemaVersion: 3, id: current.id, bootSessionId: current.bootSessionId,
+            ownerId: current.ownerId, leaseHash: current.leaseHash.base64EncodedString(),
             maximumResultBytes: current.maximumResultBytes, state: current.state,
             length: current.length, sha256: current.sha256,
             completion: ["recording", "finalizing", "result-ready"].contains(current.state) ? current.completion : nil,
@@ -2087,8 +2146,8 @@ private final class RecordingManager {
 
     private func persistTransitionLocked(_ current: BridgeRecording, state: String, terminalAt: TimeInterval) throws {
         let value = PersistedRecording(
-            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(),
+            schemaVersion: 3, id: current.id, bootSessionId: current.bootSessionId,
+            ownerId: current.ownerId, leaseHash: current.leaseHash.base64EncodedString(),
             maximumResultBytes: current.maximumResultBytes, state: state,
             length: nil, sha256: nil, completion: nil, failureReason: nil, terminalAt: terminalAt
         )
@@ -2212,7 +2271,7 @@ private final class RecordingManager {
             let path = runtime + "/" + name
             let data = try readPrivateData(path, maximumBytes: maximumFrameBytes)
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "maximumResultBytes", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
+                  Set(["schemaVersion", "id", "bootSessionId", "ownerId", "leaseHash", "maximumResultBytes", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
                   Set(["schemaVersion", "id", "ownerId", "leaseHash", "state"]).isSubset(of: Set(object.keys)) else {
                 throw CompanionFailure.unsafeStorage
             }
@@ -2232,7 +2291,10 @@ private final class RecordingManager {
             let legacyMaximum = legacyLength <= maximumRetainedWavBytes - Int64(maximumWavHeaderBytes)
                 ? legacyLength + Int64(maximumWavHeaderBytes) : maximumRetainedWavBytes
             let restoredMaximum = persisted.maximumResultBytes ?? legacyMaximum
-            guard [1, 2].contains(persisted.schemaVersion),
+            let restoredBootSessionId = persisted.bootSessionId.flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
+            guard [1, 2, 3].contains(persisted.schemaVersion),
+                  (persisted.bootSessionId == nil || restoredBootSessionId != nil),
+                  (persisted.schemaVersion < 3 || restoredBootSessionId != nil),
                   restoredMaximum >= Int64(persisted.length ?? 0),
                   restoredMaximum <= maximumRetainedWavBytes,
                   UUID(uuidString: persisted.id) != nil,
@@ -2244,12 +2306,30 @@ private final class RecordingManager {
             let current = BridgeRecording(
                 id: persisted.id, ownerId: persisted.ownerId, leaseHash: leaseHash,
                 url: URL(fileURLWithPath: runtime + "/recording-" + persisted.id + ".wav"),
-                maximumResultBytes: restoredMaximum, state: persisted.state,
+                maximumResultBytes: restoredMaximum, bootSessionId: restoredBootSessionId,
+                state: persisted.state,
                 length: persisted.length, sha256: persisted.sha256,
                 completion: persisted.completion ?? "stopped", failureReason: persisted.failureReason,
                 terminalAt: persisted.terminalAt
             )
             recordings[current.id] = current
+            if let recordedBoot = current.bootSessionId,
+               let currentBoot = bootSessionIdentifier(), recordedBoot != currentBoot,
+               ["recording", "finalizing", "failed"].contains(current.state) {
+                current.state = "failed"
+                current.failureReason = "reboot"
+                current.length = nil
+                current.sha256 = nil
+                current.completion = "stopped"
+                current.terminalAt = current.terminalAt ?? Date().timeIntervalSince1970
+                do {
+                    try removeAudioLocked(current)
+                    try persistLocked(current)
+                } catch {
+                    scheduleCleanupRetryLocked(current)
+                    continue
+                }
+            }
             if revokedOwners.contains(current.ownerId) {
                 do { try cleanupRevokedRecordingLocked(current) }
                 catch { scheduleRevokedCleanupLocked(ownerId: current.ownerId) }
@@ -2753,6 +2833,29 @@ func ownerVisibleLifecycleReason(systemEvent: String) -> String? {
     }
 }
 
+private final class LogoutAttribution {
+    private let lock = NSLock()
+    private var continued = false
+
+    func markContinued() {
+        lock.lock()
+        continued = true
+        lock.unlock()
+    }
+
+    func markCancelled() {
+        lock.lock()
+        continued = false
+        lock.unlock()
+    }
+
+    func isContinued() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return continued
+    }
+}
+
 private final class LifecycleAppleEventRouter: NSObject {
     let onLogout: () -> Void
     let onReboot: () -> Void
@@ -2889,15 +2992,41 @@ private func serve() throws {
     let durationRequest = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .global())
     durationRequest.setEventHandler { recordings.enforceDurationLimit() }
     durationRequest.resume()
+    let logoutAttribution = LogoutAttribution()
+    let distributed = DistributedNotificationCenter.default()
+    let logoutContinuedObserver = distributed.addObserver(
+        forName: Notification.Name("com.apple.logoutContinued"), object: nil, queue: nil
+    ) { _ in logoutAttribution.markContinued() }
+    let logoutCancelledObserver = distributed.addObserver(
+        forName: Notification.Name("com.apple.logoutCancelled"), object: nil, queue: nil
+    ) { _ in logoutAttribution.markCancelled() }
+    signal(SIGTERM, SIG_IGN)
+    let terminationRequest = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+    terminationRequest.setEventHandler {
+        if logoutAttribution.isContinued() { recordings.failActive(reason: "logout") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(750)) {
+            recordings.failActive(reason: "companion-stop")
+            logger.event("companion-stop")
+            logger.close()
+            Darwin.close(listener)
+            unlink(paths.socket)
+            exit(EXIT_SUCCESS)
+        }
+    }
+    terminationRequest.resume()
     var lifecycleSignals = [
-        signalSource(SIGTERM, reason: "companion-stop", exits: true),
+        terminationRequest,
         signalSource(SIGINT, reason: "companion-stop", exits: true),
         signalSource(SIGHUP, reason: "logout", exits: true),
         signalSource(SIGQUIT, reason: "reboot", exits: true),
     ]
 #if PROTOCOL_TESTING
     lifecycleSignals.append(signalSource(SIGTSTP, reason: "sleep", exits: false))
-    lifecycleSignals.append(signalSource(SIGUSR2, reason: "session-lock", exits: false))
+    signal(SIGUSR2, SIG_IGN)
+    let testSessionLock = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .global())
+    testSessionLock.setEventHandler { recordings.failActiveAfterLockAttributionGrace() }
+    testSessionLock.resume()
+    lifecycleSignals.append(testSessionLock)
     lifecycleSignals.append(signalSource(SIGWINCH, reason: "device-loss", exits: false))
 #endif
     let appleEvents = NSAppleEventManager.shared()
@@ -2919,16 +3048,29 @@ private func serve() throws {
     let sleepObserver = workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
         recordings.failActive(reason: "sleep")
     }
-    let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
-        recordings.failActive(reason: "session-lock")
+    let powerOffObserver = workspace.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: nil) { _ in
+        recordings.failActiveAfterPowerOffAttributionGrace()
     }
+    let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
+        recordings.failActiveAfterLockAttributionGrace()
+    }
+    let consoleLockMonitor = DispatchSource.makeTimerSource(queue: .global())
+    consoleLockMonitor.schedule(deadline: .now(), repeating: .milliseconds(250))
+    consoleLockMonitor.setEventHandler {
+        if ioConsoleIsLocked() { recordings.failActiveAfterLockAttributionGrace() }
+    }
+    consoleLockMonitor.resume()
     defer {
         logger.event("companion-stop")
         logger.close()
         durationRequest.cancel()
+        consoleLockMonitor.cancel()
         for source in lifecycleSignals { source.cancel() }
         workspace.removeObserver(sleepObserver)
+        workspace.removeObserver(powerOffObserver)
         workspace.removeObserver(lockObserver)
+        distributed.removeObserver(logoutContinuedObserver)
+        distributed.removeObserver(logoutCancelledObserver)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: logoutEvent)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: restartEvent)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: shutdownEvent)

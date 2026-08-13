@@ -10,6 +10,26 @@ const root = resolve(__dirname, "..");
 
 const macOnly = process.platform === "darwin" ? {} : { skip: "requires the macOS Swift toolchain" };
 
+test("production logout attribution observes confirmed loginwindow teardown", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.equal(source.includes("com.apple.logoutContinued") && source.includes("com.apple.logoutCancelled"), true);
+});
+
+test("production logout confirmation wins before console-lock attribution", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.match(source, /terminationRequest[\s\S]*logoutAttribution\.isContinued\(\)[\s\S]*failActive\(reason: "logout"\)[\s\S]*milliseconds\(750\)/);
+});
+
+test("production termination fallback leaves time for authoritative logout attribution", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.match(source, /terminationRequest[\s\S]*milliseconds\(750\)[\s\S]*failActive\(reason: "companion-stop"\)/);
+});
+
+test("the companion LaunchAgent bypasses post-login app-bundle xpcproxy stalls", () => {
+  const source = readFileSync(join(root, "bin", "pi-dictation.mjs"), "utf8");
+  assert.match(source, /<string>\/bin\/sh<\/string><string>-c<\/string><string>exec &quot;\$1&quot;<\/string>/);
+});
+
 test("production lifecycle wiring distinguishes logout from restart and shutdown", macOnly, () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-lifecycle-wiring-"));
   const harness = join(directory, "LifecycleWiring.swift");
@@ -37,6 +57,35 @@ struct LifecycleWiring {
     const execution = spawnSync(executable, [], { encoding: "utf8" });
     if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
     assert.equal(execution.stdout.trim(), "logout,reboot,reboot");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("production console-lock state maps IOKit Booleans and rejects absence", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-console-lock-"));
+  const harness = join(directory, "ConsoleLock.swift");
+  const executable = join(directory, "ConsoleLock");
+  writeFileSync(harness, `
+import Foundation
+
+@main
+struct ConsoleLock {
+    static func main() {
+        print([consoleLockState(kCFBooleanTrue), consoleLockState(kCFBooleanFalse), consoleLockState(nil)])
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox", "-framework", "IOKit",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(execution.stdout.trim(), "[true, false, false]");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -77,6 +126,35 @@ struct DeviceWiring {
     const execution = spawnSync(executable, [], { encoding: "utf8" });
     if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
     assert.equal(execution.stdout.trim(), "true");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("production capture closes before the exact duration watchdog deadline", macOnly, () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-capture-duration-"));
+  const harness = join(directory, "CaptureDuration.swift");
+  const executable = join(directory, "CaptureDuration");
+  writeFileSync(harness, `
+import Foundation
+
+@main
+struct CaptureDuration {
+    static func main() {
+        print(captureDurationSeconds(maximumDurationMs: 1000))
+    }
+}
+`);
+  try {
+    const compilation = spawnSync("swiftc", [
+      "-D", "PI_DICTATION_TESTING",
+      join(root, "native", "macos-companion", "PiDictationBridge.swift"), harness,
+      "-o", executable,
+      "-framework", "AVFoundation", "-framework", "AppKit", "-framework", "CryptoKit", "-framework", "Security",
+      "-framework", "CoreMedia", "-framework", "AudioToolbox",
+    ], { encoding: "utf8" });
+    if (compilation.status !== 0) throw new Error(compilation.stderr || compilation.stdout);
+    const execution = spawnSync(executable, [], { encoding: "utf8" });
+    if (execution.status !== 0) throw new Error(execution.stderr || execution.stdout);
+    assert.equal(Number(execution.stdout.trim()) > 0 && Number(execution.stdout.trim()) < 1, true);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
