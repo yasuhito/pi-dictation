@@ -9,14 +9,30 @@ import { fileURLToPath } from "node:url";
 const WIDTH = 960;
 const HEIGHT = 420;
 const FPS = 15;
-const DURATION = 10;
+const DURATION = 11;
 const FRAMES = FPS * DURATION;
-const RECORDING_START = 0.9;
-const RECORDING_END = 5.15;
-const PROCESSING_END = 5.85;
-const TRANSCRIBING_END = 7.35;
-const READY_END = 8.45;
-const FADE_START = 9.35;
+
+/* ─────────────────────────────────────────────────────────
+ * ANIMATION STORYBOARD
+ *
+ *   0.00s   Pi waits for input
+ *   1.20s   Insert key overlay appears
+ *   1.80s   recording starts and the overlay fades
+ *   5.62s   Insert key overlay appears again
+ *   6.05s   recording stops; processing starts
+ *   6.75s   transcription starts
+ *   8.25s   dictated text appears
+ *   9.35s   ready state clears
+ *  10.35s   demo fades out before looping
+ * ───────────────────────────────────────────────────────── */
+const RECORDING_START = 1.8;
+const RECORDING_END = 6.05;
+const PROCESSING_END = 6.75;
+const TRANSCRIBING_END = 8.25;
+const READY_END = 9.35;
+const FADE_START = 10.35;
+const FIRST_KEY_PRESS = { appear: 1.2, fade: 1.8, hide: 2.12 };
+const SECOND_KEY_PRESS = { appear: 5.62, fade: 6.05, hide: 6.32 };
 const BARS = "▁▂▃▄▅▆▇█";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = join(repoRoot, "assets");
@@ -80,11 +96,19 @@ function phaseElapsed(time, phaseStart) {
   return `00:${String(elapsed).padStart(2, "0")}`;
 }
 
+function keyPressOpacity(time, timing) {
+  if (time < timing.appear || time > timing.hide) return 0;
+  if (time < timing.fade) return smoothstep(timing.appear, timing.appear + 0.12, time);
+  return 1 - smoothstep(timing.fade, timing.hide, time);
+}
+
 function keyBadge(label, opacity) {
   if (opacity <= 0) return "";
   return `<g opacity="${opacity.toFixed(3)}">
-    <rect x="756" y="70" width="132" height="38" rx="9" fill="#20252e" stroke="#566170"/>
-    <text x="822" y="95" text-anchor="middle" class="small" fill="#e8edf3">${escapeXml(label)}</text>
+    <rect x="748" y="61" width="148" height="54" rx="14" fill="#05070a" opacity="0.72"/>
+    <rect x="752" y="57" width="140" height="54" rx="13" fill="#f4f7fb" stroke="#ffffff" stroke-width="2"/>
+    <rect x="759" y="64" width="126" height="40" rx="9" fill="#dfe5ec" stroke="#aeb9c5"/>
+    <text x="822" y="90" text-anchor="middle" class="key" fill="#17202a">${escapeXml(label)}</text>
   </g>`;
 }
 
@@ -100,8 +124,8 @@ function frameSvg(frame) {
   const elapsed = `00:${String(elapsedSeconds).padStart(2, "0")}`;
   const fadeOpacity = 1 - smoothstep(FADE_START, DURATION, time);
   const overallOpacity = fadeOpacity;
-  const insertStartOpacity = 1 - smoothstep(0.72, 1.0, time) * smoothstep(0.72, 1.0, time);
-  const insertStopOpacity = time < 4.72 || time > 5.25 ? 0 : 1 - Math.abs(time - 4.98) / 0.27;
+  const insertStartOpacity = keyPressOpacity(time, FIRST_KEY_PRESS);
+  const insertStopOpacity = keyPressOpacity(time, SECOND_KEY_PRESS);
 
   let strip = "";
   if (recording) {
@@ -126,6 +150,7 @@ function frameSvg(frame) {
   <style>
     .mono { font-family: "JetBrains Mono", "Noto Sans Mono", monospace; }
     .small { font: 14px "JetBrains Mono", monospace; }
+    .key { font: 700 15px "JetBrains Mono", monospace; letter-spacing: 0.4px; }
     .strip { font-size: 17px; }
   </style>
   <rect width="960" height="420" rx="16" fill="#0b0e13"/>
