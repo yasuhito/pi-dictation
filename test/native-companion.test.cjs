@@ -10,9 +10,14 @@ const root = resolve(__dirname, "..");
 
 const macOnly = process.platform === "darwin" ? {} : { skip: "requires the macOS Swift toolchain" };
 
-test("production logout attribution observes workspace power-off before termination fallback", () => {
+test("production logout attribution observes confirmed loginwindow teardown", () => {
   const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
-  assert.equal(source.includes("NSWorkspace.willPowerOffNotification") && source.includes("failActiveAfterPowerOffAttributionGrace"), true);
+  assert.equal(source.includes("com.apple.logoutContinued") && source.includes("com.apple.logoutCancelled"), true);
+});
+
+test("production logout confirmation wins before console-lock attribution", () => {
+  const source = readFileSync(join(root, "native", "macos-companion", "PiDictationBridge.swift"), "utf8");
+  assert.match(source, /terminationRequest[\s\S]*logoutAttribution\.isContinued\(\)[\s\S]*failActive\(reason: "logout"\)[\s\S]*milliseconds\(750\)/);
 });
 
 test("production termination fallback leaves time for authoritative logout attribution", () => {

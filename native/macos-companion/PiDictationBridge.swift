@@ -2795,6 +2795,29 @@ func ownerVisibleLifecycleReason(systemEvent: String) -> String? {
     }
 }
 
+private final class LogoutAttribution {
+    private let lock = NSLock()
+    private var continued = false
+
+    func markContinued() {
+        lock.lock()
+        continued = true
+        lock.unlock()
+    }
+
+    func markCancelled() {
+        lock.lock()
+        continued = false
+        lock.unlock()
+    }
+
+    func isContinued() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return continued
+    }
+}
+
 private final class LifecycleAppleEventRouter: NSObject {
     let onLogout: () -> Void
     let onReboot: () -> Void
@@ -2931,9 +2954,18 @@ private func serve() throws {
     let durationRequest = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .global())
     durationRequest.setEventHandler { recordings.enforceDurationLimit() }
     durationRequest.resume()
+    let logoutAttribution = LogoutAttribution()
+    let distributed = DistributedNotificationCenter.default()
+    let logoutContinuedObserver = distributed.addObserver(
+        forName: Notification.Name("com.apple.logoutContinued"), object: nil, queue: nil
+    ) { _ in logoutAttribution.markContinued() }
+    let logoutCancelledObserver = distributed.addObserver(
+        forName: Notification.Name("com.apple.logoutCancelled"), object: nil, queue: nil
+    ) { _ in logoutAttribution.markCancelled() }
     signal(SIGTERM, SIG_IGN)
     let terminationRequest = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
     terminationRequest.setEventHandler {
+        if logoutAttribution.isContinued() { recordings.failActive(reason: "logout") }
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(750)) {
             recordings.failActive(reason: "companion-stop")
             logger.event("companion-stop")
@@ -2999,6 +3031,8 @@ private func serve() throws {
         workspace.removeObserver(sleepObserver)
         workspace.removeObserver(powerOffObserver)
         workspace.removeObserver(lockObserver)
+        distributed.removeObserver(logoutContinuedObserver)
+        distributed.removeObserver(logoutCancelledObserver)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: logoutEvent)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: restartEvent)
         appleEvents.removeEventHandler(forEventClass: coreEventClass, andEventID: shutdownEvent)
