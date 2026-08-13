@@ -425,6 +425,20 @@ test("remote Recorder configuration recovers an owned orphaned staging file", ()
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("remote listener cleanup is a no-op for a managed TCP fallback", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-tcp-cleanup-"));
+  const id = "1234567890abcdef";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  mkdirSync(hostRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(join(hostRoot, "endpoint.json"), JSON.stringify({ endpoint: { type: "tcp", host: "127.0.0.1", port: 43123 } }), { mode: 0o600 });
+  try {
+    const cleanup = spawnSync(process.execPath, [cli, "bridge", "remote-listener-cleanup", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("remote listener cleanup removes only a stale managed Unix socket", { skip: process.platform !== "linux" }, async (t) => {
   const home = mkdtempSync(join("/tmp", "pd-stale-"));
   const id = "234567890abcdef1";

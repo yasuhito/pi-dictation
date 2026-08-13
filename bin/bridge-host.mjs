@@ -1220,6 +1220,13 @@ export async function remoteListenerCleanup(id) {
   inspect(root, "directory", 0o700, "remote host bridge directory");
   const endpointConfig = readOwnedJson(join(root, "endpoint.json"), "remote Recorder endpoint configuration");
   const endpoint = endpointConfig.endpoint;
+  if (endpoint?.type === "tcp") {
+    if (!(["127.0.0.1", "::1"].includes(endpoint.host)) || !Number.isInteger(endpoint.port) ||
+        endpoint.port < 1 || endpoint.port > 65535) {
+      throw new BridgeHostError("Refusing invalid remote TCP listener configuration.");
+    }
+    return;
+  }
   if (endpoint?.type !== "unix" || endpoint.path !== join(root, "listener.sock")) {
     throw new BridgeHostError("Remote listener cleanup applies only to the managed Unix socket.");
   }
