@@ -185,17 +185,32 @@ pi-dictation bridge status my-pi
 
 Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently. Repeat the command for additional aliases; each gets an independent credential, tunnel LaunchAgent, listener, Recorder configuration, and health state while sharing the same Mac companion.
 
-Manage configured bridges without exposing secrets, private paths, SSH commands, or Recording lease identities:
+Manage configured bridges without exposing secrets, private paths, SSH commands, credentials, or Recording lease identities:
 
 ```bash
 pi-dictation bridge list
 pi-dictation bridge list --json
-pi-dictation bridge rotate my-pi
-pi-dictation bridge revoke my-pi
-pi-dictation bridge revoke my-pi --confirm
+pi-dictation bridge doctor
+pi-dictation bridge doctor my-pi --json
+pi-dictation bridge logs my-pi
+pi-dictation bridge repair my-pi
+pi-dictation bridge repair my-pi --confirm
+pi-dictation bridge upgrade
+pi-dictation bridge upgrade --confirm
+pi-dictation bridge uninstall my-pi
+pi-dictation bridge uninstall my-pi --confirm
+pi-dictation bridge uninstall --all --confirm
 ```
 
-Rotation stages a new owner-only credential on both hosts, verifies authenticated health through it, and only then revokes the old credential. It refuses to disrupt an unfinished Recording lease or retained WAV and preserves staged state for a safe retry. Revocation previews the target credential's live connections, active lease, incomplete audio, and retained WAV deletion counts unless `--confirm` is supplied; confirmation closes and deletes only that credential's bridge state.
+Doctor is read-only. It reports installation, microphone permission as deliberately unobserved, the current-build real-audio preflight receipt, companion LaunchAgent/socket observations, each tunnel process, the supervisor's last listener and authenticated-health observations, configured protocol compatibility and resource bounds, and Level support without claiming current Level availability. It never contacts the companion, opens the microphone, creates an authenticated receipt, probes SSH, reloads a process, removes a listener, changes a credential, or embeds logs. Human and `--json` reports are bounded and privacy-safe; request the three bounded, rotated, redacted tunnel-log generations separately with `bridge logs`.
+
+Repair prints the exact owned LaunchAgent and listener changes it would make. Only `--confirm` reloads the tunnel LaunchAgent and recreates its proven-owned listener; credentials, permission state, and audio are never repair actions. Unsafe, unowned, symlinked, hard-linked, or unexpected artifacts are refused.
+
+Upgrade first checks the package and protocol transition on every registered Pi destination and previews each credential's owned-audio effects. Any unreachable or incompatible destination stops the operation before the shared companion changes. Confirmation rolls every host to a freshly staged credential and atomically revokes the old credential only if idle; `--cancel-active` instead names affected aliases and uses confirmed destructive revocation. Each tunnel is stopped only after that atomic result, and any failed tunnel or companion `launchctl bootout` preserves resumable state without deleting the running build. Every upgraded build invalidates the old preflight: run `bridge preflight`, then rerun `bridge upgrade --confirm` to reload all owned tunnels and require authenticated all-host health.
+
+Uninstall previews connections, active Recording leases, incomplete audio, retained WAVs, and credential deletion. Without `--cancel-active`, confirmation uses atomic idle-only credential revocation so a recording that starts after preview still blocks deletion; explicit cancellation uses destructive revocation. It removes only the selected host's exactly proven tunnel, listener, credential, and owned remote Recorder configuration while other bridges remain, and refuses unexpected local or remote entries before recursive deletion. Removing the last host, or using `--all`, removes the shared companion and LaunchAgent only after every credential deletion is confirmed and a checked companion bootout succeeds. macOS may retain the app's microphone permission history in Privacy & Security after uninstall.
+
+The lower-level `bridge rotate` and `bridge revoke` commands remain available for credential administration. Rotation stages a new owner-only credential on both hosts, verifies authenticated health through it, and only then revokes the old credential. It refuses to disrupt an unfinished Recording lease or retained WAV and preserves staged state for a safe retry. Revocation previews the target credential's live connections, active lease, incomplete audio, and retained WAV deletion counts unless `--confirm` is supplied; confirmation closes and deletes only that credential's bridge state.
 
 Diagnose and maintain the complete bridge stack from the Mac:
 
