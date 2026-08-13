@@ -203,6 +203,55 @@ test("dictation help reports the Recorder selection", async () => {
   }
 });
 
+test("the extension registers the doctor command", async () => {
+  const runtime = await createRuntime();
+  assert.equal(typeof runtime.commands["dictate-doctor"], "function");
+});
+
+test("dictation doctor reports a privacy-safe ready setup", async (t) => {
+  const paths = testPaths("doctor-key-command");
+  process.env.PI_DICTATION_OPENAI_API_KEY = "doctor-openai-secret";
+  process.env.PI_DICTATION_OPENAI_API_KEY_COMMAND = `touch ${paths.marker}`;
+  const runtime = await createRuntime({
+    recorderArgs: "--token doctor-recorder-secret",
+    transcribeCommand: "printf doctor-transcriber-secret",
+  });
+  try {
+    await runtime.commands["dictate-doctor"]("", runtime.ctx);
+    const report = runtime.notifications.at(-1).message;
+    await t.test("identifies the report", () => assert.match(report, /Pi Dictation doctor/));
+    await t.test("reports readiness", () => assert.match(report, /Result: ready/));
+    await t.test("does not expose secrets or commands", () => {
+      assert.doesNotMatch(report, /doctor-(?:openai|recorder|transcriber)-secret|touch|--token/);
+    });
+    await t.test("does not execute the API-key command", () => assert.equal(existsSync(paths.marker), false));
+  } finally {
+    delete process.env.PI_DICTATION_OPENAI_API_KEY;
+    delete process.env.PI_DICTATION_OPENAI_API_KEY_COMMAND;
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("dictation doctor reports an unavailable Bridge Recorder", async () => {
+  const paths = testPaths("doctor-bridge");
+  writeFileSync(paths.marker, "credential-secret");
+  const runtime = await createRuntime({
+    recorderConfig: {
+      type: "bridge",
+      endpoint: { type: "unix", path: join(paths.dir, "missing.sock") },
+      credentialFile: paths.marker,
+    },
+  });
+  try {
+    await runtime.commands["dictate-doctor"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /Recorder: unavailable \(Bridge recording health check failed\)/);
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
 test("recording appears as a responsive above-editor Dictation strip", async (t) => {
   const paths = testPaths("recording-strip");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;

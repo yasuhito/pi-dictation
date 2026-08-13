@@ -27,6 +27,7 @@ import { join } from "node:path";
 import cliSpinners from "cli-spinners";
 import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
 import { showDictationConfig } from "./config-ui.js";
+import { diagnoseDictation } from "./doctor.js";
 import { levelForDb } from "./live-level.js";
 import { createRecorder, type LevelEvent, type LevelObservation, type Recording } from "./recorder.js";
 import { shellQuote } from "./shell.js";
@@ -784,6 +785,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       await showDictationConfig(ctx);
+    },
+  });
+
+  pi.registerCommand("dictate-doctor", {
+    description: "Diagnose Pi Dictation setup without exposing secrets",
+    handler: async (_args, ctx) => {
+      const report = await diagnoseDictation(loadConfig());
+      ctx.ui.notify(report.text, report.ready ? "info" : "warning");
     },
   });
 

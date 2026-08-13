@@ -57,23 +57,12 @@ Commands:
 - `/dictate` — start or stop dictation
 - `/dictate-cancel` — cancel recording or transcription
 - `/dictate-config` — switch non-destructively between Local recording and a configured Bridge recording, edit safe settings, and inspect privacy-safe availability/backend status
+- `/dictate-doctor` — diagnose configuration, Recorder availability, and the transcription backend without exposing secrets or custom commands
 - `/dictate-help` — show the current Recorder selection and transcription backend
 
 ## Diagnose setup
 
-Run the privacy-safe doctor when recording or transcription is not working:
-
-```bash
-npx -p pi-dictation pi-dictation-doctor
-```
-
-From a source checkout:
-
-```bash
-npm run doctor
-```
-
-The doctor checks Node.js, Pi, Linux or macOS support, configuration validity, recorder availability, the requested and effective transcription backend, and whether an OpenAI credential source is configured. It does not execute API-key commands or print custom commands or secret values.
+Run `/dictate-doctor` in Pi when recording or transcription is not working. It checks Node.js, Pi, Linux or macOS support, configuration validity, Recorder availability, the transcription backend, and whether an OpenAI credential source is configured. It does not execute API-key commands or print custom commands or secret values.
 
 ## Configure OpenAI transcription
 
