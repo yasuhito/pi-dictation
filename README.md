@@ -52,8 +52,6 @@ On macOS, Pi Dictation records from the system-default audio input and macOS may
 
 Press the configured shortcut (`Insert` by default) to begin recording. Press it again to stop and transcribe. On macOS, we recommend `f5` because many Mac keyboards mark that key with a microphone. If pressing it starts macOS Dictation instead of Pi Dictation, use `fn+F5` or configure the function keys as standard keys in System Settings.
 
-While recording, a one-line Dictation strip appears above the editor with a blinking recording marker, recent live microphone levels, and elapsed time. The same strip shows processing, transcription, completion, cancellation, and failure states, then hides automatically. Live levels are available for PCM16 mono WAV recorder output, including custom recorder commands that produce that format. Incomplete or unsupported output uses a flat silent line rather than simulated activity.
-
 Commands:
 
 - `/dictate` — start or stop dictation
