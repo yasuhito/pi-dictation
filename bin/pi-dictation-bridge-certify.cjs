@@ -2,7 +2,7 @@
 const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
-const { commitProvenLifecycle, recoverLifecycleOrRethrow, waitsForLifecycleInline } = require("./certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow, recoversLifecycleInlineAfterError } = require("./certification-recovery.cjs");
 const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -292,7 +292,6 @@ async function prepareLifecycle(name, scenario) {
     if (started.status !== "ok" || started.payload.state !== "recording") fail("Real-device Recording lease did not start.");
     console.log(scenario.action);
     console.log("After login or reboot, run: pi-dictation-bridge-certify verify");
-    if (!waitsForLifecycleInline(name)) return;
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 5000));
       try {
@@ -306,6 +305,10 @@ async function prepareLifecycle(name, scenario) {
     }
     await cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential);
   } catch (error) {
+    if (!recoversLifecycleInlineAfterError(name)) {
+      console.error("Private certification recovery state remains; run `pi-dictation-bridge-certify verify` after login to prove cleanup and remove it.");
+      return;
+    }
     try {
       return await recoverLifecycleOrRethrow(error, () =>
         cleanupLifecycle({ schemaVersion: 1, scenario: name, lease }, credential));

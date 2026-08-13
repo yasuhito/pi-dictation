@@ -20,7 +20,7 @@ const { test } = require("node:test");
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
-const { commitProvenLifecycle, recoverLifecycleOrRethrow, waitsForLifecycleInline } = require("../bin/certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow, recoversLifecycleInlineAfterError } = require("../bin/certification-recovery.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -129,15 +129,19 @@ test("lifecycle recovery owns the verdict after an interrupted request", async (
   });
 });
 
-test("logout and reboot stage recovery without an inline cleanup race", async (t) => {
-  await t.test("logout returns after staging", () => {
-    assert.equal(waitsForLifecycleInline("logout"), false);
+test("logout and reboot retain recovery state after teardown errors", async (t) => {
+  await t.test("logout defers cleanup until post-login verification", () => {
+    assert.equal(recoversLifecycleInlineAfterError("logout"), false);
   });
-  await t.test("reboot returns after staging", () => {
-    assert.equal(waitsForLifecycleInline("reboot"), false);
+  await t.test("reboot defers cleanup until post-login verification", () => {
+    assert.equal(recoversLifecycleInlineAfterError("reboot"), false);
   });
-  await t.test("session lock remains observable inline", () => {
-    assert.equal(waitsForLifecycleInline("session-lock"), true);
+  await t.test("session lock still recovers inline", () => {
+    assert.equal(recoversLifecycleInlineAfterError("session-lock"), true);
+  });
+  await t.test("keeps heartbeat polling before the teardown error", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("while (true)") && !source.includes("if (!waitsForLifecycleInline(name)) return"), true);
   });
 });
 
