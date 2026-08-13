@@ -1159,7 +1159,29 @@ export function remoteCredentialRevoke(id) {
       }
     }
   }
-  reconcileRemoteRecorder(id, { type: "local" });
+  const configPaths = remoteConfigPaths(id);
+  if (existsSync(configPaths.receipt)) {
+    const receipt = readOwnedJson(configPaths.receipt, "remote Pi Dictation configuration ownership receipt");
+    if (receipt.product !== PRODUCT || !/^[0-9a-f]{16}$/.test(receipt.hostId) ||
+        receipt.phase !== "ready") {
+      throw new BridgeHostError("Refusing an unowned remote Pi Dictation configuration.");
+    }
+    if (receipt.hostId === id) {
+      reconcileRemoteRecorder(id, { type: "local" });
+    } else {
+      const current = existsSync(configPaths.config)
+        ? readOwnedJson(configPaths.config, "remote Pi Dictation configuration") : {};
+      if (receipt.sha256 !== configDigest(current)) {
+        throw new BridgeHostError("Refusing an unowned remote Pi Dictation configuration.");
+      }
+      const encodedRecorder = JSON.stringify(current.recorder ?? {});
+      if (encodedRecorder.includes(root)) {
+        throw new BridgeHostError("Refusing to remove a host still referenced by remote Pi Dictation configuration.");
+      }
+    }
+  } else {
+    reconcileRemoteRecorder(id, { type: "local" });
+  }
   rmSync(root, { recursive: true });
   console.log(JSON.stringify({ revoked: true }));
 }

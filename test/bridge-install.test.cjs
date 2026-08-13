@@ -646,6 +646,30 @@ test("bridge doctor diagnoses every layer without mutating LaunchAgents", async 
   }
 });
 
+test("remote revocation removes a partial host without changing another owned Recorder", async (t) => {
+  const f = fixture();
+  try {
+    const partialId = "2222222222222222";
+    const ownerId = "1111111111111111";
+    const remoteRoot = join(f.home, ".local", "share", "pi-dictation", "bridge", "hosts", partialId);
+    const configRoot = join(f.home, ".pi", "agent");
+    mkdirSync(remoteRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(configRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(remoteRoot, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", hostId: partialId }), { mode: 0o600 });
+    writeFileSync(join(remoteRoot, "credential.json"), JSON.stringify({ id: "22222222-2222-4222-8222-222222222222", secret: Buffer.alloc(32, 2).toString("base64") }), { mode: 0o600 });
+    const config = { recorder: { type: "local" } };
+    writeFileSync(join(configRoot, "pi-dictation.json"), JSON.stringify(config), { mode: 0o600 });
+    writeFileSync(join(configRoot, "pi-dictation.bridge-owner.json"), JSON.stringify({
+      product: "com.yasuhito.pi-dictation.bridge", hostId: ownerId, phase: "ready",
+      sha256: createHash("sha256").update(JSON.stringify(config)).digest("hex"),
+    }), { mode: 0o600 });
+    const result = run(f, ["remote-credential-revoke", partialId]);
+    await t.test("completes partial cleanup", () => assert.equal(result.status, 0, result.stderr));
+    await t.test("removes only the partial host", () => assert.equal(existsSync(remoteRoot), false));
+    await t.test("preserves the other owned Recorder", () => assert.deepEqual(JSON.parse(readFileSync(join(configRoot, "pi-dictation.json"))), config));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
 test("scoped uninstall removes only the selected host bridge", async (t) => {
   const f = fixture();
   const effectsFile = join(f.home, "scoped-effects");
