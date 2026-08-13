@@ -144,7 +144,9 @@ function frameSvg(frame) {
   }
 
   const editorText = pasted ? "Let’s make the command line feel a little more human." : "";
-  const cursorX = pasted ? 64 + 18 + editorText.length * 10.15 : 82;
+  const editorTextX = 82;
+  const editorCharacterWidth = 9.64;
+  const cursorX = editorTextX + editorText.length * editorCharacterWidth;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
   <style>
@@ -170,8 +172,8 @@ function frameSvg(frame) {
     ${strip}
 
     <rect x="54" y="272" width="852" height="68" rx="8" fill="#12171e" stroke="#3b4655"/>
-    <text x="82" y="312" class="mono" font-size="16" fill="#edf2f7">${escapeXml(editorText)}</text>
-    <rect x="${cursorX}" y="292" width="2" height="24" fill="#58d6ff" opacity="${pasted ? 0.8 : 1}"/>
+    <text x="${editorTextX}" y="312" class="mono" font-size="16" fill="#edf2f7">${escapeXml(editorText)}</text>
+    <rect x="${cursorX}" y="291" width="10" height="25" rx="1" fill="#58d6ff" opacity="${pasted ? 0.72 : 0.9}"/>
 
     <line x1="54" y1="359" x2="906" y2="359" stroke="#252c36"/>
     <text x="64" y="388" class="mono" font-size="13" fill="#657181">~/Work/pi-dictation</text>
