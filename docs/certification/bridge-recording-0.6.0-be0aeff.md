@@ -2,7 +2,7 @@
 
 ## Release candidate
 
-- Decision: **PASS WITH ACCEPTED CLEAN-USER EXCEPTION**
+- Decision: **SUPERSEDED — NOT THE RELEASE ARTIFACT**
 - Package version: `0.6.0`
 - Commit: `be0aeff96e3216564e5e3c6c029d3f5c10530410`
 - Tarball SHA-256: `f55e41b60532828ab0ad268f8915c0b92ddaecc3fffe02b6a1ac41b2d23ac504`
@@ -10,7 +10,9 @@
 - Verifier: project owner with Pi coding agent automation
 - Completed: `2026-08-13T04:18:38Z`
 
-The project owner explicitly accepted release without the disposable clean-user gate because creating another macOS account solely for certification was disproportionate for this initial release. This is a bounded exception, not evidence that the omitted gate passed. Install, upgrade, maintenance, real-audio, and restoration checks were instead run in an existing isolated macOS account. A clean-user defect reported after release remains actionable.
+The project owner explicitly accepted release without the disposable clean-user gate because creating another macOS account solely for certification was disproportionate for this initial release. This is a bounded exception, not evidence that the omitted gate passed. Install, upgrade, maintenance, real-audio, and restoration checks were instead run in an existing isolated macOS account.
+
+Independent review found that certification records and support claims added after `be0aeff` changed files included by `npm pack`, so this saved tarball could not serve as the package produced from the final release tree. Review also found that interrupted automated/tunnel recovery could clean audio and emit passing evidence without rerunning the scenario. No listed normal completion relied on that recovery path, but the audit defect disqualifies this artifact as the final release candidate. Both findings are fixed in its successor; this record remains diagnostic evidence only.
 
 ## Certified platform
 

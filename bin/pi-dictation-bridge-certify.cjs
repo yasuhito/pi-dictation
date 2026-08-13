@@ -607,8 +607,7 @@ async function verify() {
       await assertNoOwnedAudio(host.credential);
     }
     clearState();
-    safeEvidence(state.scenario, false);
-    return;
+    fail("Interrupted certification audio was cleaned safely. Rerun the complete scenario; recovery is not passing evidence.");
   }
   if (scenario.kind === "tunnel") {
     if (!state.lease || typeof state.alias !== "string") fail("Refusing invalid tunnel certification recovery state.");
@@ -616,8 +615,7 @@ async function verify() {
     try { await request(host.credential, "cancel", state.lease); } catch {}
     await assertNoOwnedAudio(host.credential);
     clearState();
-    safeEvidence(state.scenario, false);
-    return;
+    fail("Interrupted tunnel certification audio was cleaned safely. Rerun the complete scenario; recovery is not passing evidence.");
   }
   if (!process.argv.slice(2).includes("--confirm")) fail("Guided certification requires --confirm after every listed observation succeeds.");
   if (scenario.host) await assertNoOwnedAudio(configuredHost(state.alias).credential);

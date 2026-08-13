@@ -225,14 +225,30 @@ test("packaged real-device certification lists every required gate scenario with
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes('["bridge", "doctor"]') && source.includes('["bridge", "doctor", "--json"]'), true);
   });
-  await t.test("installs the exact candidate digest on both hosts before candidate upgrade and recording", () => {
+  await t.test("installs the exact candidate digest on both hosts before candidate upgrade and recording", async (stage) => {
     const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)") &&
-      source.includes('["--", alias, "sha256sum", remoteTarball]') &&
-      source.includes('["--", alias, "npm", "install", "--global", remoteTarball]') &&
-      source.includes('["bridge", "upgrade"]') &&
-      source.includes('phase: "awaiting-candidate-preflight"') &&
-      source.includes('phase: "awaiting-candidate-recording"'), true);
+    await stage.test("transfers the selected candidate", () => {
+      assert.equal(source.includes("installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)"), true);
+    });
+    await stage.test("checks the remote candidate digest", () => {
+      assert.equal(source.includes('["--", alias, "sha256sum", remoteTarball]'), true);
+    });
+    await stage.test("installs the remote candidate globally", () => {
+      assert.equal(source.includes('["--", alias, "npm", "install", "--global", remoteTarball]'), true);
+    });
+    await stage.test("upgrades the configured Bridge", () => {
+      assert.equal(source.includes('["bridge", "upgrade"]'), true);
+    });
+    await stage.test("requires candidate real-audio preflight", () => {
+      assert.equal(source.includes('phase: "awaiting-candidate-preflight"'), true);
+    });
+    await stage.test("requires candidate Bridge recording", () => {
+      assert.equal(source.includes('phase: "awaiting-candidate-recording"'), true);
+    });
+  });
+  await t.test("interrupted automated certification cleanup cannot emit passing evidence", () => {
+    const source = readFileSync(certificationPath, "utf8");
+    assert.equal(source.includes("Rerun the complete scenario; recovery is not passing evidence."), true);
   });
   await t.test("keeps recovery state outside the Bridge runtime removed by uninstall", () => {
     const source = readFileSync(certificationPath, "utf8");
