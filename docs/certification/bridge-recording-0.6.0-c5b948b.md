@@ -1,11 +1,11 @@
-# Bridge recording certification: 0.6.0 candidate at 009450c
+# Bridge recording certification: 0.6.0 candidate at c5b948b
 
 ## Release candidate
 
 - Decision: **PASS WITH ACCEPTED CLEAN-USER EXCEPTION**
 - Package version: `0.6.0`
-- Candidate commit: `009450ca580f2a528a02744d9d5f440d7b4decb7`
-- Tarball SHA-256: `8e36613319d8b9ee2b0d778638bca5c2d3ee0cd7af9f46b7068085601fbab827`
+- Candidate commit: `c5b948bfc25cb2445d2e46dab386adcfb5b2496b`
+- Tarball SHA-256: `b712e1e51f9b9495d40f47b482e932625f3fb88902e142666928415a2d109b92`
 - Candidate remained byte-identical across Mac and Linux: **yes**
 - Verifier: project owner with Pi coding agent automation
 - Completed: `2026-08-13T04:32:27Z`
@@ -27,7 +27,7 @@ The project owner explicitly accepted release without the disposable clean-user 
 
 ## Exact-artifact integrity
 
-The final tarball was installed globally on both certified hosts and its SHA-256 matched on both. Compared with the immediately preceding real-device artifact, all product mechanism files were byte-identical:
+The final tarball was installed globally on the certified Mac and its digest matched the Linux-produced artifact and its SHA-256 matched on both. Compared with the immediately preceding real-device artifact, all product mechanism files were byte-identical:
 
 - `bin/bridge-host.mjs`
 - `bin/pi-dictation.mjs`
