@@ -26,31 +26,29 @@ Pi Dictation supports OpenAI audio transcription and arbitrary local transcripti
 
 On macOS, Pi Dictation records from the system-default audio input and macOS may ask the terminal running Pi for microphone permission. Native Windows support remains on the [roadmap](./TODO.md) until its process-lifecycle safety design is validated.
 
-## Install
+## Install and set up
 
-From npm:
+1. Install one of the recorder commands listed in [Requirements](#requirements).
+2. Install Pi Dictation from npm:
 
-```bash
-pi install npm:pi-dictation
-```
+   ```bash
+   pi install npm:pi-dictation
+   ```
 
-From GitHub:
+3. Configure a transcription backend. For OpenAI, set the API key before starting Pi:
 
-```bash
-pi install git:github.com/yasuhito/pi-dictation
-```
+   ```bash
+   export OPENAI_API_KEY=...
+   ```
 
-From a local checkout:
+   To keep the key in the system keyring, see [Configure OpenAI transcription](#configure-openai-transcription). To keep audio on your machine, see [Configure a local transcription command](#configure-a-local-transcription-command).
 
-```bash
-pi install /absolute/path/to/pi-dictation
-```
-
-Restart Pi or run `/reload` after installation.
+4. Restart Pi or run `/reload`.
+5. Run `/dictate-config` to review the Recorder and settings. On macOS, change the shortcut to `f8` because Mac keyboards commonly lack an Insert key, then run `/reload` again.
 
 ## Use
 
-Press `Insert` to begin recording. Press it again to stop and transcribe. Mac keyboards commonly lack an Insert key, so macOS users should configure a shortcut such as `f8` and use `fn+F8` when the function-key row controls media features.
+Press the configured shortcut (`Insert` by default) to begin recording. Press it again to stop and transcribe. If the macOS function-key row controls media features, use `fn+F8` for an `f8` shortcut.
 
 While recording, a one-line Dictation strip appears above the editor with a blinking recording marker, recent live microphone levels, and elapsed time. The same strip shows processing, transcription, completion, cancellation, and failure states, then hides automatically. Live levels are available for PCM16 mono WAV recorder output, including custom recorder commands that produce that format. Incomplete or unsupported output uses a flat silent line rather than simulated activity.
 
@@ -79,13 +77,7 @@ The doctor checks Node.js, Pi, Linux or macOS support, configuration validity, r
 
 ## Configure OpenAI transcription
 
-The simplest option is `OPENAI_API_KEY`:
-
-```bash
-export OPENAI_API_KEY=...
-```
-
-To avoid storing the key in shell configuration, save it in the system keyring.
+To avoid storing `OPENAI_API_KEY` in shell configuration, save the key in the system keyring.
 
 Linux with Secret Service:
 
