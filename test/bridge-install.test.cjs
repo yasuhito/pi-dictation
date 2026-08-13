@@ -656,6 +656,8 @@ test("scoped uninstall removes only the selected host bridge", async (t) => {
       if (installed.status !== 0) throw new Error(installed.stderr);
     }
     server = await startCredentialServer(f, effectsFile);
+    const runtime = join(f.home, "Library", "Caches", "pi-dictation", "bridge");
+    writeFileSync(join(runtime, "request-receipts.json"), JSON.stringify({ schemaVersion: 4, receipts: [] }), { mode: 0o600 });
     const result = run(f, ["uninstall", "remove-pi", "--confirm"]);
     const listed = run(f, ["list", "--json"]);
     const remaining = JSON.parse(listed.stdout).hosts.map((host) => host.sshAlias);

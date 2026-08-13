@@ -999,7 +999,7 @@ function assertRemovalLayout(p) {
   }
   if (pathExists(p.runtime)) {
     inspectPath(p.runtime, "directory", 0o700, "bridge runtime directory");
-    const allowed = /^(?:companion\.sock|companion\.log(?:\.[12])?|resource-metrics\.json|recording-[0-9a-f-]{36}\.(?:wav|json|reserve)|request-[0-9a-f-]{36}\.json|revocation-[0-9a-f-]{36}\.json)$/i;
+    const allowed = /^(?:companion\.sock|companion\.log(?:\.[12])?|resource-metrics\.json|request-receipts\.json|recording-[0-9a-f-]{36}\.(?:wav|json|reserve)|request-[0-9a-f-]{36}\.json|revocation-[0-9a-f-]{36}\.json)$/i;
     for (const name of readdirSync(p.runtime)) {
       if (!allowed.test(name)) throw new CliError(`Refusing unexpected runtime artifact '${name}' whose ownership cannot be proven.`);
       const artifact = join(p.runtime, name);
