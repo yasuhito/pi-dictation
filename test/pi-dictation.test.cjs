@@ -382,10 +382,16 @@ test("the Dictation strip renders actual appended PCM as live level history", as
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
     await waitFor(() => /[▂▃▄▅▆▇█]/.test(runtime.widget().render(32)[0]));
+    const stalledUntil = Date.now() + 250;
+    while (Date.now() < stalledUntil) { /* simulate a busy Pi event loop */ }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
     const fullWidth = runtime.widget().render(32)[0];
     const [minimumWidth] = runtime.widget().render(14);
     await t.test("shows measured levels at full width", () => {
       assert.match(fullWidth, /^[● ] REC  .+  \d\d:\d\d$/);
+    });
+    await t.test("keeps the newest measured level at the right edge", () => {
+      assert.match(fullWidth, /[▂▃▄▅▆▇█]  \d\d:\d\d$/);
     });
     await t.test("fits the minimum width", () => {
       assert.equal(visibleWidth(minimumWidth), 14);

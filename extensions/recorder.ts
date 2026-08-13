@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { open, rename, rm, stat } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import type { RecorderConfig } from "./config.js";
 import { GrowingPcm16WavInput } from "./live-level.js";
@@ -342,42 +343,31 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
       }
 
       const recordingStartedAt = Date.now();
+      const levelTimelineStartedAt = performance.now();
       let state: "active" | "stopping" | "stopped" | "cancelled" | "failed" = "active";
       let stopPromise: Promise<void> | undefined;
       let cancelPromise: Promise<void> | undefined;
       let durationReached = false;
       let cancellationRequested = false;
       let unexpected = false;
-      let sequence = 0;
+      let lastLevelSequence = -1;
       let levelReadInFlight = false;
       const input = new GrowingPcm16WavInput(partial);
+      const emitLevel = (event: { type: "observation"; dbfs: number | "silence" } | { type: "unavailable" }) => {
+        const sequence = Math.max(0, Math.floor((performance.now() - levelTimelineStartedAt) / LEVEL_INTERVAL_MS));
+        if (sequence <= lastLevelSequence || state !== "active") return;
+        lastLevelSequence = sequence;
+        startOptions.onLevel({ ...event, sequence, capturedAtMs: sequence * LEVEL_INTERVAL_MS });
+      };
       const levelTimer = setInterval(async () => {
-        const currentSequence = sequence++;
         if (levelReadInFlight) return;
         levelReadInFlight = true;
         try {
           const samples = await input.readNewestInterval(LEVEL_INTERVAL_MS);
-          if (state !== "active") return;
-          if (!samples.length) {
-            startOptions.onLevel({
-              type: "unavailable",
-              sequence: currentSequence,
-              capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
-            });
-          } else {
-            startOptions.onLevel({
-              type: "observation",
-              sequence: currentSequence,
-              capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
-              dbfs: rmsDbfs(samples),
-            });
-          }
+          if (!samples.length) emitLevel({ type: "unavailable" });
+          else emitLevel({ type: "observation", dbfs: rmsDbfs(samples) });
         } catch {
-          if (state === "active") startOptions.onLevel({
-            type: "unavailable",
-            sequence: currentSequence,
-            capturedAtMs: currentSequence * LEVEL_INTERVAL_MS,
-          });
+          emitLevel({ type: "unavailable" });
         } finally {
           levelReadInFlight = false;
         }
