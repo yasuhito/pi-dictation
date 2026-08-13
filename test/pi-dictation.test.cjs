@@ -475,12 +475,29 @@ test("one Dictation strip transitions through processing, transcribing, ready, a
     const strip = runtime.widget();
 
     const stopping = runtime.shortcut(runtime.ctx);
-    await t.test("shows processing", () => {
-      assert.match(strip.render(32)[0], /Processing recording…/);
+    const processing = strip.render(48)[0];
+    await t.test("shows processing across the available width", () => {
+      assert.equal(visibleWidth(processing), 48);
+    });
+    await t.test("labels the processing phase", () => {
+      assert.match(processing, /Processing…/);
+    });
+    await t.test("shows indeterminate processing activity", () => {
+      assert.match(processing, /─+━+─+/);
     });
     await waitFor(() => existsSync(paths.marker));
-    await t.test("shows transcription", () => {
-      assert.match(strip.render(32)[0], /Transcribing…/);
+    const transcribing = strip.render(48)[0];
+    await t.test("shows transcription across the available width", () => {
+      assert.equal(visibleWidth(transcribing), 48);
+    });
+    await t.test("labels the transcription phase", () => {
+      assert.match(transcribing, /Transcribing…/);
+    });
+    await t.test("shows transcription elapsed time", () => {
+      assert.match(transcribing, /\d\d:\d\d$/);
+    });
+    await t.test("keeps the longer transcription phase full-width at the narrow boundary", () => {
+      assert.equal(visibleWidth(strip.render(28)[0]), 28);
     });
     await stopping;
     await t.test("shows completion", () => {

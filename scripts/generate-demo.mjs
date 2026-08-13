@@ -14,8 +14,8 @@ const FRAMES = FPS * DURATION;
 const RECORDING_START = 0.9;
 const RECORDING_END = 5.15;
 const PROCESSING_END = 5.85;
-const TRANSCRIBING_END = 6.85;
-const READY_END = 7.95;
+const TRANSCRIBING_END = 7.35;
+const READY_END = 8.45;
 const FADE_START = 9.35;
 const BARS = "▁▂▃▄▅▆▇█";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,6 +61,25 @@ function waveformSpans(time, columns = 73) {
   ].join("");
 }
 
+function activityBar(time, phaseStart, columns) {
+  const segmentWidth = 5;
+  const travel = columns - segmentWidth - 1;
+  const step = Math.floor((time - phaseStart) * 10);
+  const cycle = travel * 2;
+  const offset = ((step % cycle) + cycle) % cycle;
+  const segmentStart = 1 + (offset <= travel ? offset : cycle - offset);
+  return [
+    `<tspan fill="#53606f">${"─".repeat(segmentStart)}</tspan>`,
+    `<tspan fill="#58d6ff">${"━".repeat(segmentWidth)}</tspan>`,
+    `<tspan fill="#53606f">${"─".repeat(columns - segmentStart - segmentWidth)}</tspan>`,
+  ].join("");
+}
+
+function phaseElapsed(time, phaseStart) {
+  const elapsed = Math.max(0, Math.floor(time - phaseStart));
+  return `00:${String(elapsed).padStart(2, "0")}`;
+}
+
 function keyBadge(label, opacity) {
   if (opacity <= 0) return "";
   return `<g opacity="${opacity.toFixed(3)}">
@@ -90,10 +109,12 @@ function frameSvg(frame) {
       <tspan fill="${blinkOn ? "#ff5263" : "#11151b"}">●</tspan><tspan fill="#e8edf3"> REC  </tspan>${waveformSpans(time)}<tspan fill="#7f8a98">  ${elapsed}</tspan>
     </text>`;
   } else if (processing || transcribing) {
-    const frames = ["◌", "◒", "◐", "◓"];
+    const frames = ["◜", "◠", "◝", "◞", "◡", "◟"];
     const spinner = frames[Math.floor(time * 10) % frames.length];
-    const label = processing ? "Processing recording…" : "Transcribing…";
-    strip = `<text x="64" y="252" class="mono strip" fill="#ffca67">${spinner} ${label}</text>`;
+    const label = processing ? "Processing…" : "Transcribing…";
+    const phaseStart = processing ? RECORDING_END : PROCESSING_END;
+    const columns = 82 - Array.from(`${spinner} ${label}  `).length - 7;
+    strip = `<text x="64" y="252" class="mono strip"><tspan fill="#ffca67">${spinner} ${label}  </tspan>${activityBar(time, phaseStart, columns)}<tspan fill="#7f8a98">  ${phaseElapsed(time, phaseStart)}</tspan></text>`;
   } else if (ready) {
     strip = `<text x="64" y="252" class="mono strip" fill="#62d394">✓ Dictation ready</text>`;
   }
