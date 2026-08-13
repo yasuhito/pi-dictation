@@ -295,11 +295,11 @@ test("shortcut changes save with the reload boundary", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-shortcut-"));
   const path = join(directory, "pi-dictation.json");
   writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Shortcut:", "f8", "Save changes"] });
+  const runtime = fakeContext({ selections: ["Shortcut:", "f5", "Save changes"] });
   const { showDictationConfig } = await loadUi();
   await showDictationConfig(runtime.ctx, { path, env: {}, detectRecorder });
   await t.test("saves the selected shortcut", () => {
-    assert.equal(JSON.parse(readFileSync(path, "utf8")).shortcut, "f8");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).shortcut, "f5");
   });
   await t.test("explains the reload requirement", () => {
     assert.match(runtime.notifications.at(-1).message, /require \/reload or restart/);

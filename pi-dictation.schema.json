@@ -24,7 +24,7 @@
     "shortcut": {
       "type": "string",
       "default": "insert",
-      "description": "Pi shortcut used to toggle dictation. Mac keyboards commonly need a shortcut such as f8 instead of insert."
+      "description": "Pi shortcut used to toggle dictation. On macOS, f5 is recommended because many Mac keyboards mark it with a microphone."
     },
     "language": {
       "type": "string",

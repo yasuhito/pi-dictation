@@ -46,11 +46,11 @@ macOSでは、システムのデフォルト音声入力から録音します。
    認証情報管理ツールからAPIキーを取得する場合は、[OpenAI文字起こしの設定](#openai文字起こしの設定)を参照してください。音声を自分のマシン内だけで処理する場合は、[ローカル文字起こしコマンドの設定](#ローカル文字起こしコマンドの設定)を参照してください。
 
 4. Piを再起動するか `/reload` を実行します。
-5. `/dictate-config` を実行し、Recorderと設定を確認します。MacのキーボードにはInsertキーがないことが多いため、macOSではショートカットを `f8` に変更し、もう一度 `/reload` を実行します。
+5. `/dictate-config` を実行し、Recorderと設定を確認します。macOSでは、マイクの印が付いていることが多い `f5` にショートカットを変更し、もう一度 `/reload` を実行します。
 
 ## 使い方
 
-設定したショートカット（デフォルトは `Insert`）を押すと録音を開始します。もう一度押すと録音を停止し、文字起こしを始めます。macOSでファンクションキー列がメディア操作に割り当てられている場合、`f8` のショートカットには `fn+F8` を使います。
+設定したショートカット（デフォルトは `Insert`）を押すと録音を開始します。もう一度押すと録音を停止し、文字起こしを始めます。macOSでは、マイクの印が付いていることが多い `f5` を推奨します。押したときにPi DictationではなくmacOSの音声入力が起動する場合は、`fn+F5` を使うか、システム設定でファンクションキーを標準キーとして使用するよう設定してください。
 
 録音中は、エディターの上に1行のDictationステータスが表示されます。点滅する録音マーカー、直近のマイク入力レベル、経過時間を確認できます。同じ領域に処理中、文字起こし中、完了、キャンセル、失敗の状態も表示され、その後自動的に消えます。入力レベルは、PCM16モノラルWAVを出力する録音コマンドで利用できます。この形式を出力するカスタム録音コマンドにも対応します。不完全な出力や未対応の出力では、実際にはない音声活動を表示せず、無音を示す平坦な線を表示します。
 
@@ -98,7 +98,7 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
-  "shortcut": "f8",
+  "shortcut": "f5",
   "language": "ja",
   "openaiModel": "gpt-4o-mini-transcribe",
   "openaiApiKeyCommand": "security find-generic-password -a \"$USER\" -s pi-dictation-openai -w"

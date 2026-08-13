@@ -30,7 +30,7 @@ type ConfigUiOptions = {
   acquireBridgeLock?: typeof acquireBridgeSelectionLock;
 };
 
-const SHORTCUTS = ["insert", "f8", "f9", "ctrl+space", "ctrl+shift+d", "alt+d", "(default)"];
+const SHORTCUTS = ["insert", "f5", "f8", "f9", "ctrl+space", "ctrl+shift+d", "alt+d", "(default)"];
 
 function display(value: unknown): string {
   const text = String(value === "" ? "(automatic)" : value).replace(/[\x00-\x1f\x7f]/g, "�");

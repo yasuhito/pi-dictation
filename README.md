@@ -46,11 +46,11 @@ On macOS, Pi Dictation records from the system-default audio input and macOS may
    To retrieve the key from a credential manager instead, see [Configure OpenAI transcription](#configure-openai-transcription). To keep audio on your machine, see [Configure a local transcription command](#configure-a-local-transcription-command).
 
 4. Restart Pi or run `/reload`.
-5. Run `/dictate-config` to review the Recorder and settings. On macOS, change the shortcut to `f8` because Mac keyboards commonly lack an Insert key, then run `/reload` again.
+5. Run `/dictate-config` to review the Recorder and settings. On macOS, change the shortcut to `f5`—the key marked with a microphone on many Mac keyboards—then run `/reload` again.
 
 ## Use
 
-Press the configured shortcut (`Insert` by default) to begin recording. Press it again to stop and transcribe. If the macOS function-key row controls media features, use `fn+F8` for an `f8` shortcut.
+Press the configured shortcut (`Insert` by default) to begin recording. Press it again to stop and transcribe. On macOS, we recommend `f5` because many Mac keyboards mark that key with a microphone. If pressing it starts macOS Dictation instead of Pi Dictation, use `fn+F5` or configure the function keys as standard keys in System Settings.
 
 While recording, a one-line Dictation strip appears above the editor with a blinking recording marker, recent live microphone levels, and elapsed time. The same strip shows processing, transcription, completion, cancellation, and failure states, then hides automatically. Live levels are available for PCM16 mono WAV recorder output, including custom recorder commands that produce that format. Incomplete or unsupported output uses a flat silent line rather than simulated activity.
 
@@ -98,7 +98,7 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
-  "shortcut": "f8",
+  "shortcut": "f5",
   "language": "ja",
   "openaiModel": "gpt-4o-mini-transcribe",
   "openaiApiKeyCommand": "security find-generic-password -a \"$USER\" -s pi-dictation-openai -w"
