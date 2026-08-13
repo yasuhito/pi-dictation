@@ -13,4 +13,8 @@ function commitProvenLifecycle(observedReason, expectedReason, observedState, co
   commit();
 }
 
-module.exports = { commitProvenLifecycle, recoverLifecycleOrRethrow };
+function waitsForLifecycleInline(name) {
+  return !new Set(["logout", "reboot"]).has(name);
+}
+
+module.exports = { commitProvenLifecycle, recoverLifecycleOrRethrow, waitsForLifecycleInline };

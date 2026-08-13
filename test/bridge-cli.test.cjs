@@ -20,7 +20,7 @@ const { test } = require("node:test");
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
 const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
-const { commitProvenLifecycle, recoverLifecycleOrRethrow } = require("../bin/certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow, waitsForLifecycleInline } = require("../bin/certification-recovery.cjs");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -126,6 +126,18 @@ test("lifecycle recovery owns the verdict after an interrupted request", async (
   });
   await t.test("preserves the original error when recovery cannot prove the scenario", async () => {
     await assert.rejects(recoverLifecycleOrRethrow(original, async () => { throw new Error("unavailable"); }), original);
+  });
+});
+
+test("logout and reboot stage recovery without an inline cleanup race", async (t) => {
+  await t.test("logout returns after staging", () => {
+    assert.equal(waitsForLifecycleInline("logout"), false);
+  });
+  await t.test("reboot returns after staging", () => {
+    assert.equal(waitsForLifecycleInline("reboot"), false);
+  });
+  await t.test("session lock remains observable inline", () => {
+    assert.equal(waitsForLifecycleInline("session-lock"), true);
   });
 });
 

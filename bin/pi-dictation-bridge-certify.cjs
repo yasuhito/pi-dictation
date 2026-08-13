@@ -2,7 +2,7 @@
 const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
-const { commitProvenLifecycle, recoverLifecycleOrRethrow } = require("./certification-recovery.cjs");
+const { commitProvenLifecycle, recoverLifecycleOrRethrow, waitsForLifecycleInline } = require("./certification-recovery.cjs");
 const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
@@ -292,6 +292,7 @@ async function prepareLifecycle(name, scenario) {
     if (started.status !== "ok" || started.payload.state !== "recording") fail("Real-device Recording lease did not start.");
     console.log(scenario.action);
     console.log("After login or reboot, run: pi-dictation-bridge-certify verify");
+    if (!waitsForLifecycleInline(name)) return;
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 5000));
       try {
