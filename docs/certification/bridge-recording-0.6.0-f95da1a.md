@@ -24,7 +24,7 @@ Owner-scoped cleanup proved zero incomplete or retained audio before private cer
 
 macOS restart traverses loginwindow's confirmed logout sequence, so the pre-shutdown process correctly persisted `logout` but could not distinguish the subsequent kernel restart. The successor persists the validated `kern.bootsessionuuid` with each Recording lease. On startup, a changed boot session promotes interrupted or teardown-terminal work to `reboot` before owner status is served, while same-boot physical logout remains `logout`.
 
-Physical reboot must be rerun against the successor exact tarball; no success is inferred here.
+Physical reboot must be rerun against the successor exact tarball; no success is inferred here. That successor was later packaged as candidate `fb6460e`.
 
 ## Still incomplete
 
