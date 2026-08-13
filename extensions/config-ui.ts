@@ -30,26 +30,11 @@ type ConfigUiOptions = {
   acquireBridgeLock?: typeof acquireBridgeSelectionLock;
 };
 
-const FIELD_ENVIRONMENT: Record<EditableField, string> = {
-  shortcut: "PI_DICTATION_SHORTCUT",
-  language: "PI_DICTATION_LANGUAGE",
-  openaiModel: "PI_DICTATION_OPENAI_MODEL",
-  timeoutMs: "PI_DICTATION_TIMEOUT_MS",
-  maxRecordingMs: "PI_DICTATION_MAX_RECORDING_MS",
-  spinner: "PI_DICTATION_SPINNER",
-};
-
 const SHORTCUTS = ["insert", "f8", "f9", "ctrl+space", "ctrl+shift+d", "alt+d", "(default)"];
 
 function display(value: unknown): string {
   const text = String(value === "" ? "(automatic)" : value).replace(/[\x00-\x1f\x7f]/g, "�");
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
-}
-
-function configuredSource(env: NodeJS.ProcessEnv, variable: string, fileValue: unknown): string | undefined {
-  if (env[variable]) return variable;
-  if (fileValue) return "configuration";
-  return undefined;
 }
 
 type RecorderStatuses = {
@@ -77,20 +62,15 @@ async function recorderStatuses(
 }
 
 function backendStatus(persisted: DictationConfigFile, env: NodeJS.ProcessEnv): string {
-  const commandSource = configuredSource(env, "PI_DICTATION_TRANSCRIBE_CMD", persisted.transcribeCommand);
-  let backend: string;
-  if (commandSource) backend = `custom command configured (${commandSource}; not executed)`;
-  else {
-    const credentialSource = env.PI_DICTATION_OPENAI_API_KEY
-      ? "PI_DICTATION_OPENAI_API_KEY"
-      : env.OPENAI_API_KEY
-        ? "OPENAI_API_KEY"
-        : persisted.openaiApiKey
-          ? "configuration"
-          : configuredSource(env, "PI_DICTATION_OPENAI_API_KEY_COMMAND", persisted.openaiApiKeyCommand);
-    backend = credentialSource ? `OpenAI credential configured (${credentialSource})` : "not configured";
-  }
-  return backend;
+  if (persisted.transcribeCommand) return "custom command configured (not executed)";
+  const credentialSource = env.OPENAI_API_KEY
+    ? "OPENAI_API_KEY"
+    : persisted.openaiApiKey
+      ? "configuration"
+      : persisted.openaiApiKeyCommand
+        ? "key command"
+        : undefined;
+  return credentialSource ? `OpenAI credential configured (${credentialSource})` : "not configured";
 }
 
 function parseSingleLine(value: string, label: string): string | undefined {
@@ -143,18 +123,15 @@ export async function showDictationConfig(
 
   while (true) {
     const values: Record<EditableField, string | number> = {
-      shortcut: env.PI_DICTATION_SHORTCUT || draft.shortcut || DEFAULT_SHORTCUT,
-      language: env.PI_DICTATION_LANGUAGE || draft.language || "",
-      openaiModel: env.PI_DICTATION_OPENAI_MODEL || draft.openaiModel || "gpt-4o-mini-transcribe",
-      timeoutMs: normalizeDuration(
-        env.PI_DICTATION_TIMEOUT_MS || draft.timeoutMs || DEFAULT_TIMEOUT_MS,
-        DEFAULT_TIMEOUT_MS
-      ),
+      shortcut: draft.shortcut || DEFAULT_SHORTCUT,
+      language: draft.language || "",
+      openaiModel: draft.openaiModel || "gpt-4o-mini-transcribe",
+      timeoutMs: normalizeDuration(draft.timeoutMs || DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
       maxRecordingMs: normalizeDuration(
-        env.PI_DICTATION_MAX_RECORDING_MS || draft.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
+        draft.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
         DEFAULT_MAX_RECORDING_MS
       ),
-      spinner: env.PI_DICTATION_SPINNER || draft.spinner || DEFAULT_SPINNER,
+      spinner: draft.spinner || DEFAULT_SPINNER,
     };
     const selectedRecorder = draft.recorders?.selected || "local";
     const selectedStatus = selectedRecorder === "local" ? statuses.local : statuses.bridge;
@@ -169,14 +146,10 @@ export async function showDictationConfig(
       { id: "save", label: "Save changes" },
       { id: "cancel", label: "Cancel" },
     ];
-    const overrideNames = (Object.keys(FIELD_ENVIRONMENT) as EditableField[])
-      .map((field) => env[FIELD_ENVIRONMENT[field]] ? FIELD_ENVIRONMENT[field] : undefined)
-      .filter(Boolean);
     const title = [
       "Pi Dictation settings",
       `Recorder selection: ${selectedRecorder === "local" ? "Local recording" : "Bridge recording"}`,
       `Backend: ${backend}`,
-      overrideNames.length ? `Environment overrides: ${overrideNames.join(", ")}` : "Environment overrides: none",
     ].join("\n");
     const selected = await ctx.ui.select(title, entries.map(({ label }) => label));
     if (!selected) return;
@@ -240,8 +213,6 @@ export async function showDictationConfig(
         const status = selection === "local" ? statuses.local : statuses.bridge;
         if (status === "unavailable") messages.push("The selected Recorder is currently unavailable; run Pi Dictation doctor before recording.");
       }
-      const overridden = [...dirty].map((field) => FIELD_ENVIRONMENT[field]).filter((name) => env[name]);
-      if (overridden.length) messages.push(`Saved values are currently overridden by ${overridden.join(", ")}.`);
       ctx.ui.notify(messages.join(" "), "info");
       return;
     }

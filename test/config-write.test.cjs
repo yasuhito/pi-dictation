@@ -92,10 +92,61 @@ test("Recorder selection chooses the persisted Bridge Recorder profile", async (
   assert.deepEqual(loadConfig(path, {}).recorder, { type: "bridge", ...bridge });
 });
 
-test("the removed Recorder environment override is ignored", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-recorder-env-"));
+test("package-specific environment settings are ignored", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-env-"));
+  const path = join(directory, "pi-dictation.json");
+  writeFileSync(path, JSON.stringify({
+    shortcut: "f8",
+    language: "en",
+    transcribeCommand: "transcribe {file}",
+    openaiModel: "file-model",
+    openaiBaseUrl: "https://file.example/v1",
+    openaiApiKey: "file-key",
+    openaiApiKeyCommand: "file-key-command",
+    timeoutMs: 2000,
+    maxRecordingMs: 3000,
+    spinner: "dots",
+  }));
   const { loadConfig } = await configModule();
-  assert.deepEqual(loadConfig(join(directory, "missing.json"), { PI_DICTATION_RECORD_CMD: "PRIVATE" }).recorder, { type: "local" });
+  const config = loadConfig(path, {
+    PI_DICTATION_SHORTCUT: "insert",
+    PI_DICTATION_LANGUAGE: "ja",
+    PI_DICTATION_TRANSCRIBE_CMD: "environment-transcriber",
+    PI_DICTATION_OPENAI_MODEL: "environment-model",
+    PI_DICTATION_OPENAI_BASE_URL: "https://environment.example/v1",
+    PI_DICTATION_OPENAI_API_KEY: "package-key",
+    PI_DICTATION_OPENAI_API_KEY_COMMAND: "environment-key-command",
+    PI_DICTATION_TIMEOUT_MS: "9000",
+    PI_DICTATION_MAX_RECORDING_MS: "10000",
+    PI_DICTATION_SPINNER: "arc",
+    OPENAI_API_KEY: "standard-key",
+  });
+  assert.deepEqual(
+    {
+      shortcut: config.shortcut,
+      language: config.language,
+      transcribeCommand: config.transcribeCommand,
+      openaiModel: config.openaiModel,
+      openaiBaseUrl: config.openaiBaseUrl,
+      openaiApiKey: config.openaiApiKey,
+      openaiApiKeyCommand: config.openaiApiKeyCommand,
+      timeoutMs: config.timeoutMs,
+      maxRecordingMs: config.maxRecordingMs,
+      spinner: config.spinner,
+    },
+    {
+      shortcut: "f8",
+      language: "en",
+      transcribeCommand: "transcribe {file}",
+      openaiModel: "file-model",
+      openaiBaseUrl: "https://file.example/v1",
+      openaiApiKey: "standard-key",
+      openaiApiKeyCommand: "file-key-command",
+      timeoutMs: 2000,
+      maxRecordingMs: 3000,
+      spinner: "dots",
+    }
+  );
 });
 
 test("Local Recorder profiles cannot override their discriminator", async () => {

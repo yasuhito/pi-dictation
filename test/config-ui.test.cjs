@@ -269,34 +269,6 @@ test("invalid configuration errors do not expose file contents", async () => {
   assert.doesNotMatch(runtime.notifications.at(-1).message, /PRIVATE_SECRET/);
 });
 
-test("environment overrides are identified without exposing hidden values", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-env-"));
-  const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Cancel"] });
-  const { showDictationConfig } = await loadUi();
-  await showDictationConfig(runtime.ctx, {
-    path,
-    env: { PI_DICTATION_LANGUAGE: "ja", PI_DICTATION_OPENAI_API_KEY: "PRIVATE_API_KEY" },
-    detectRecorder,
-  });
-  assert.match(runtime.dialogs[0].title, /PI_DICTATION_LANGUAGE/);
-});
-
-test("saving an overridden field warns which environment variable wins", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-override-"));
-  const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Language:", "Save changes"], edits: ["en"] });
-  const { showDictationConfig } = await loadUi();
-  await showDictationConfig(runtime.ctx, {
-    path,
-    env: { PI_DICTATION_LANGUAGE: "ja" },
-    detectRecorder,
-  });
-  assert.match(runtime.notifications.at(-1).message, /overridden by PI_DICTATION_LANGUAGE/);
-});
-
 test("invalid duration input does not change the configuration", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-duration-"));
   const path = join(directory, "pi-dictation.json");

@@ -8,14 +8,14 @@
 //   "shortcut": "insert",
 //   "language": "ja",
 //   "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -",
-//   "recorder": { "type": "local", "command": "pw-record --format s16 --rate 16000 --channels 1 {file}" },
+//   "recorders": { "selected": "local", "local": { "command": "pw-record --format s16 --rate 16000 --channels 1 {file}" } },
 //   "maxRecordingMs": 600000,
 //   "openaiModel": "gpt-4o-mini-transcribe"
 // }
 //
 // Transcription backend order:
-// 1. PI_DICTATION_TRANSCRIBE_CMD or config.transcribeCommand
-// 2. OpenAI audio transcription when OPENAI_API_KEY is set
+// 1. config.transcribeCommand
+// 2. OpenAI audio transcription when OPENAI_API_KEY or a configured credential is available
 //
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";

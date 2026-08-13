@@ -66,7 +66,7 @@ macOSでは、システムのデフォルト音声入力から録音します。
 
 ## OpenAI文字起こしの設定
 
-Pi Dictationの文字起こし用認証情報は、Piのモデルプロバイダー用ログインとは別です。`/login` を実行したことやOpenAIまたはChatGPTモデルを利用できることだけでは、音声文字起こしは設定されません。このバックエンドを使う前に、`OPENAI_API_KEY`、`PI_DICTATION_OPENAI_API_KEY`、または `openaiApiKeyCommand` を設定してください。
+Pi Dictationの文字起こし用認証情報は、Piのモデルプロバイダー用ログインとは別です。`/login` を実行したことやOpenAIまたはChatGPTモデルを利用できることだけでは、音声文字起こしは設定されません。このバックエンドを使う前に、`OPENAI_API_KEY` または `openaiApiKeyCommand` を設定してください。
 
 APIキーをより安全に保存するには、`openaiApiKeyCommand` を使って認証情報管理ツールから取得できます。標準出力にAPIキーだけを出力する、信頼できる非対話コマンドを使用してください。
 
@@ -139,20 +139,7 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 | `maxRecordingMs` | `600000` | 最大録音時間。`1000`〜`3600000` ミリ秒 |
 | `spinner` | `arc` | `cli-spinners` のアニメーション名 |
 
-Recorderの選択とプロファイルには環境変数による上書きがありません。それ以外の実行時設定には、次の環境変数も使えます。
-
-- `PI_DICTATION_SHORTCUT`
-- `PI_DICTATION_LANGUAGE`
-- `PI_DICTATION_TRANSCRIBE_CMD`
-- `PI_DICTATION_OPENAI_MODEL`
-- `PI_DICTATION_OPENAI_BASE_URL`
-- `PI_DICTATION_OPENAI_API_KEY`
-- `PI_DICTATION_OPENAI_API_KEY_COMMAND`
-- `PI_DICTATION_TIMEOUT_MS`
-- `PI_DICTATION_MAX_RECORDING_MS`
-- `PI_DICTATION_SPINNER`
-
-環境変数は設定ファイルより優先されます。`PI_DICTATION_OPENAI_API_KEY` と `OPENAI_API_KEY` の両方が設定されている場合は、パッケージ固有の `PI_DICTATION_OPENAI_API_KEY` が優先されます。
+`OPENAI_API_KEY` だけは環境変数で設定でき、`openaiApiKey` より優先されます。それ以外の設定には設定ファイルを使用します。
 
 ## SSH Bridgeを使う
 

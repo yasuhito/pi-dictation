@@ -66,7 +66,7 @@ Run `/dictate-doctor` in Pi when recording or transcription is not working. It c
 
 ## Configure OpenAI transcription
 
-Pi Dictation's transcription credential is separate from Pi's model-provider login. Running `/login` or having an OpenAI or ChatGPT model available does not configure audio transcription. Set `OPENAI_API_KEY`, `PI_DICTATION_OPENAI_API_KEY`, or `openaiApiKeyCommand` before using this backend.
+Pi Dictation's transcription credential is separate from Pi's model-provider login. Running `/login` or having an OpenAI or ChatGPT model available does not configure audio transcription. Set `OPENAI_API_KEY` or `openaiApiKeyCommand` before using this backend.
 
 For stronger protection at rest, `openaiApiKeyCommand` can retrieve the key from a credential manager. Any trusted, non-interactive command that writes only the key to standard output can be used.
 
@@ -139,20 +139,7 @@ For settings not available in `/dictate-config`, edit `~/.pi/agent/pi-dictation.
 | `maxRecordingMs` | `600000` | Maximum recording duration; accepts `1000`–`3600000` ms |
 | `spinner` | `arc` | `cli-spinners` animation name |
 
-Recorder selection and profiles have no environment override. The remaining runtime settings can also be set with environment variables:
-
-- `PI_DICTATION_SHORTCUT`
-- `PI_DICTATION_LANGUAGE`
-- `PI_DICTATION_TRANSCRIBE_CMD`
-- `PI_DICTATION_OPENAI_MODEL`
-- `PI_DICTATION_OPENAI_BASE_URL`
-- `PI_DICTATION_OPENAI_API_KEY`
-- `PI_DICTATION_OPENAI_API_KEY_COMMAND`
-- `PI_DICTATION_TIMEOUT_MS`
-- `PI_DICTATION_MAX_RECORDING_MS`
-- `PI_DICTATION_SPINNER`
-
-Environment variables take precedence over the configuration file. The package-specific `PI_DICTATION_OPENAI_API_KEY` takes precedence over `OPENAI_API_KEY` when both are set.
+All settings use the configuration file except `OPENAI_API_KEY`, which takes precedence over `openaiApiKey`.
 
 ## Use an SSH bridge
 

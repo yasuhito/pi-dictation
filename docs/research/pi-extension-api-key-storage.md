@@ -41,7 +41,7 @@ These are **model-provider** credentials. An extension can deliberately register
 
 ### Pi Dictation handling
 
-Pi Dictation does not register an OpenAI model provider or ask `ctx.modelRegistry` for provider authentication. It resolves, in order, its package-specific environment variable, the conventional `OPENAI_API_KEY`, a literal package-config value, and then (when no literal is resolved) its `openaiApiKeyCommand`; it sends the key itself to `/audio/transcriptions`. See [`extensions/config.ts`](../../extensions/config.ts) and [`extensions/pi-dictation.ts`](../../extensions/pi-dictation.ts).
+Pi Dictation does not register an OpenAI model provider or ask `ctx.modelRegistry` for provider authentication. It resolves, in order, the conventional `OPENAI_API_KEY`, a literal package-config value, and then (when no literal is resolved) its `openaiApiKeyCommand`; it sends the key itself to `/audio/transcriptions`. See [`extensions/config.ts`](../../extensions/config.ts) and [`extensions/pi-dictation.ts`](../../extensions/pi-dictation.ts).
 
 Consequences:
 
@@ -119,11 +119,11 @@ Therefore the README should avoid the unconditional phrase “save the key in th
 5. **Keep macOS Keychain as the preferred macOS secure example.** The current `security add-generic-password ... -w` and lookup command are consistent with Pi's own command-retrieval documentation.
 6. **Add a Pi-auth distinction note.** Suggested English text:
 
-   > Pi Dictation's transcription credential is separate from Pi's model-provider login. Running `/login` or having an OpenAI/ChatGPT model available does not configure the audio-transcription request; set `OPENAI_API_KEY`, `PI_DICTATION_OPENAI_API_KEY`, or `openaiApiKeyCommand`.
+   > Pi Dictation's transcription credential is separate from Pi's model-provider login. Running `/login` or having an OpenAI/ChatGPT model available does not configure the audio-transcription request; set `OPENAI_API_KEY` or `openaiApiKeyCommand`.
 
    Suggested Japanese text:
 
-   > Pi Dictationの文字起こし用認証情報は、Piのモデルプロバイダー用ログインとは別です。`/login` を実行したことやOpenAI/ChatGPTモデルを利用できることだけでは、音声文字起こしリクエストは設定されません。`OPENAI_API_KEY`、`PI_DICTATION_OPENAI_API_KEY`、または `openaiApiKeyCommand` を設定してください。
+   > Pi Dictationの文字起こし用認証情報は、Piのモデルプロバイダー用ログインとは別です。`/login` を実行したことやOpenAI/ChatGPTモデルを利用できることだけでは、音声文字起こしリクエストは設定されません。`OPENAI_API_KEY` または `openaiApiKeyCommand` を設定してください。
 
 7. **Describe literal `openaiApiKey` accurately.** It remains supported and the config file is saved with `0600`, but it is plaintext; recommend environment injection or credential-manager commands for stronger at-rest protection.
 8. **Keep both translations semantically aligned.** Commands, caveats, credential precedence, and the Pi-auth distinction should match in `README.md` and `README.ja.md`.
@@ -138,7 +138,9 @@ Therefore the README should avoid the unconditional phrase “save the key in th
    - generic note that any trusted command printing only the key can be used.
 4. Plaintext `openaiApiKey` only as an explicitly less-preferred fallback.
 
-## Review findings
+## Review findings at the time of research
+
+The README findings below were resolved in the subsequent documentation update.
 
 - **Medium — `README.md` and `README.ja.md`, “Configure OpenAI transcription” lead:** “the system keyring” overstates Linux availability. Secret Service is appropriate but conditional, especially on remote/headless Linux. Reframe and add prerequisites/caveat.
 - **Medium — `README.md` and `README.ja.md`, OpenAI setup:** the docs do not explicitly distinguish Pi provider `/login` credentials from Pi Dictation's extension-specific transcription key. Users may reasonably assume Pi's OpenAI login is reused. Add the distinction note.

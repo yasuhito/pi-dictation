@@ -204,7 +204,7 @@
     "openaiApiKey": {
       "type": "string",
       "default": "",
-      "description": "OpenAI-compatible API key. Prefer an environment variable or openaiApiKeyCommand."
+      "description": "OpenAI-compatible API key. Prefer OPENAI_API_KEY or openaiApiKeyCommand."
     },
     "openaiApiKeyCommand": {
       "type": "string",

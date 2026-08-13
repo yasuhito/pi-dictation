@@ -278,28 +278,22 @@ export function loadConfig(
     : recorders.local;
 
   return {
-    shortcut: env.PI_DICTATION_SHORTCUT || fromFile.shortcut || DEFAULT_SHORTCUT,
-    language: env.PI_DICTATION_LANGUAGE || fromFile.language || "",
+    shortcut: fromFile.shortcut || DEFAULT_SHORTCUT,
+    language: fromFile.language || "",
     recorder,
     recorderSelection,
     recorders,
-    transcribeCommand: env.PI_DICTATION_TRANSCRIBE_CMD || fromFile.transcribeCommand || "",
-    openaiModel: env.PI_DICTATION_OPENAI_MODEL || fromFile.openaiModel || "gpt-4o-mini-transcribe",
-    openaiBaseUrl:
-      env.PI_DICTATION_OPENAI_BASE_URL || fromFile.openaiBaseUrl || "https://api.openai.com/v1",
-    openaiApiKey:
-      env.PI_DICTATION_OPENAI_API_KEY || env.OPENAI_API_KEY || fromFile.openaiApiKey || "",
-    openaiApiKeyCommand:
-      env.PI_DICTATION_OPENAI_API_KEY_COMMAND || fromFile.openaiApiKeyCommand || "",
-    timeoutMs: normalizeDuration(
-      env.PI_DICTATION_TIMEOUT_MS || fromFile.timeoutMs || DEFAULT_TIMEOUT_MS,
-      DEFAULT_TIMEOUT_MS
-    ),
+    transcribeCommand: fromFile.transcribeCommand || "",
+    openaiModel: fromFile.openaiModel || "gpt-4o-mini-transcribe",
+    openaiBaseUrl: fromFile.openaiBaseUrl || "https://api.openai.com/v1",
+    openaiApiKey: env.OPENAI_API_KEY || fromFile.openaiApiKey || "",
+    openaiApiKeyCommand: fromFile.openaiApiKeyCommand || "",
+    timeoutMs: normalizeDuration(fromFile.timeoutMs || DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     maxRecordingMs: normalizeDuration(
-      env.PI_DICTATION_MAX_RECORDING_MS || fromFile.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
+      fromFile.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
       DEFAULT_MAX_RECORDING_MS
     ),
-    spinner: env.PI_DICTATION_SPINNER || fromFile.spinner || DEFAULT_SPINNER,
+    spinner: fromFile.spinner || DEFAULT_SPINNER,
     configError,
   };
 }
