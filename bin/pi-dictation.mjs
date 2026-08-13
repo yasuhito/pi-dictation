@@ -43,6 +43,8 @@ import {
   remoteListener,
   remoteListenerCleanup,
   remotePrepare,
+  remoteRecorderRemovalCheck,
+  remoteRecorderRemovalRelease,
   refreshHostSupervisors,
   revokeHost,
   rotateHost,
@@ -1094,6 +1096,8 @@ async function main() {
   if (command === "remote-prepare" && args.length === 2) return remotePrepare(args[0], args[1]);
   if (command === "remote-credential-commit" && args.length === 3) return remoteCredentialCommit(args[0], args[1], args[2]);
   if (command === "remote-credential-revoke" && args.length === 1) return remoteCredentialRevoke(args[0]);
+  if (command === "remote-recorder-removal-check" && args.length === 1) return remoteRecorderRemovalCheck(args[0]);
+  if (command === "remote-recorder-removal-release" && args.length === 1) return remoteRecorderRemovalRelease(args[0]);
   if (command === "remote-listener" && args.length === 1) return remoteListener(args[0]);
   if (command === "remote-listener-cleanup" && args.length === 1) return remoteListenerCleanup(args[0]);
   if (command === "remote-health" && args.length === 1) return remoteHealth(args[0], healthAt);

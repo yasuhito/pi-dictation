@@ -778,7 +778,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("dictate-config", {
     description: "Configure Pi Dictation",
-    handler: async (_args, ctx) => showDictationConfig(ctx),
+    handler: async (_args, ctx) => {
+      if (recordingPhase !== "idle") {
+        ctx.ui.notify("Recorder selection cannot be changed during dictation.", "warning");
+        return;
+      }
+      await showDictationConfig(ctx);
+    },
   });
 
   pi.registerCommand("dictate-help", {
@@ -791,7 +797,7 @@ export default function (pi: ExtensionAPI) {
           ? `OpenAI ${config.openaiModel}`
           : "not configured";
       ctx.ui.notify(
-        `Pi Dictation: shortcut=${config.shortcut}, recorder=${config.recorder.type}${config.recorder.type === "local" && config.recorder.command ? " (custom)" : ""}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
+        `Pi Dictation: shortcut=${config.shortcut}, Recorder selection=${config.recorderSelection}${config.recorder.type === "local" && config.recorder.command ? " (custom)" : ""}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
         backend === "not configured" ? "warning" : "info"
       );
     },

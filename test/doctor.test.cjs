@@ -147,6 +147,21 @@ for (const { name, config, expected } of [
   });
 }
 
+test("doctor diagnoses the selected Local Recorder while preserving a Bridge profile", () => {
+  const result = runDoctor({
+    config: JSON.stringify({ recorders: {
+      selected: "local",
+      local: { command: "capture {file}" },
+      bridge: {
+        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+        credentialFile: "/home/user/.config/pi-dictation/credential",
+      },
+    } }),
+    env: { PI_DICTATION_TRANSCRIBE_CMD: "transcribe {file}" },
+  });
+  assert.match(result.stdout, /Recorder: ok \(custom local command configured\)/);
+});
+
 test("doctor recognizes an OpenAI key command without executing it", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-dictation-key-command-"));
   const marker = join(dir, "executed");

@@ -63,10 +63,62 @@ test("an omitted Recorder defaults to local", async () => {
   assert.deepEqual(loadConfig(join(directory, "missing.json"), {}).recorder, { type: "local" });
 });
 
+test("Recorder selection chooses the persisted Local Recorder profile", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-selection-"));
+  const path = join(directory, "pi-dictation.json");
+  writeFileSync(path, JSON.stringify({
+    recorders: {
+      selected: "local",
+      local: { command: "capture {file}" },
+      bridge: {
+        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+        credentialFile: "/home/user/.config/pi-dictation/credential",
+      },
+    },
+  }));
+  const { loadConfig } = await configModule();
+  assert.deepEqual(loadConfig(path, {}).recorder, { type: "local", command: "capture {file}" });
+});
+
+test("Recorder selection chooses the persisted Bridge Recorder profile", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-bridge-selection-"));
+  const path = join(directory, "pi-dictation.json");
+  const bridge = {
+    endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+    credentialFile: "/home/user/.config/pi-dictation/credential",
+  };
+  writeFileSync(path, JSON.stringify({ recorders: { selected: "bridge", bridge } }));
+  const { loadConfig } = await configModule();
+  assert.deepEqual(loadConfig(path, {}).recorder, { type: "bridge", ...bridge });
+});
+
 test("the removed Recorder environment override is ignored", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-recorder-env-"));
   const { loadConfig } = await configModule();
   assert.deepEqual(loadConfig(join(directory, "missing.json"), { PI_DICTATION_RECORD_CMD: "PRIVATE" }).recorder, { type: "local" });
+});
+
+test("Local Recorder profiles cannot override their discriminator", async () => {
+  const { validateConfigFile } = await configModule();
+  assert.throws(
+    () => validateConfigFile({ recorders: {
+      selected: "local",
+      local: {
+        type: "bridge",
+        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+        credentialFile: "/home/user/.config/pi-dictation/credential",
+      },
+    } }),
+    /Unknown Recorder configuration field/
+  );
+});
+
+test("configuration validation rejects Bridge selection without a Bridge profile", async () => {
+  const { validateConfigFile } = await configModule();
+  assert.throws(
+    () => validateConfigFile({ recorders: { selected: "bridge" } }),
+    /requires a configured Bridge Recorder/
+  );
 });
 
 test("runtime validation rejects the removed top-level recordCommand", async () => {

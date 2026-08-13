@@ -37,6 +37,8 @@ case "$*" in
   *" remote-listener "*) printf '{"listener":"established"}\\n'; exit 0 ;;
   *" remote-health "*) printf '{"protocolVersion":3,"authenticatedHealth":"ok"}\\n'; exit 0 ;;
   *" remote-credential-commit "*) printf '{"committed":true}\\n'; exit 0 ;;
+  *" remote-recorder-removal-check "*) if [ "$SSH_SELECTED_BRIDGE" = 1 ]; then echo 'Select Local recording with /dictate-config before removing the selected Bridge Recorder.' >&2; exit 1; fi; printf '{"removable":true}\\n'; exit 0 ;;
+  *" remote-recorder-removal-release "*) printf '{"released":true}\\n'; exit 0 ;;
   *" remote-credential-revoke "*) if [ "$SSH_REMOTE_REVOKE_FAIL" = 1 ]; then exit 1; fi; printf '{"revoked":true}\\n'; exit 0 ;;
 esac
 exit 2
@@ -192,7 +194,7 @@ test("remote credential commit keeps a readable credential through interruption"
       cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test", PI_DICTATION_TEST_INTERRUPT: "after-remote-current-copy" },
     });
     const config = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8"));
-    const readableDuringInterruption = existsSync(config.recorder.credentialFile);
+    const readableDuringInterruption = existsSync(config.recorders.bridge.credentialFile);
     const retried = spawnSync(process.execPath, [cli, "bridge", "remote-credential-commit", id, oldCredential.id, nextCredential.id], {
       cwd: root, encoding: "utf8", env: { ...process.env, HOME: home, NODE_ENV: "test" },
     });
@@ -331,7 +333,10 @@ test("remote prepare installs private Recorder endpoint state without a package 
     const runtimeConfig = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8"));
     await t.test("succeeds", () => assert.equal(result.status, 0, result.stderr));
     await t.test("stores a Bridge Recorder endpoint", () => assert.equal(recorder.type, "bridge"));
-    await t.test("configures the Recorder file consumed by Pi", () => assert.deepEqual(runtimeConfig.recorder, recorder));
+    await t.test("configures the Bridge profile without changing Recorder selection", () => assert.deepEqual(runtimeConfig.recorders, {
+      selected: "local",
+      bridge: { endpoint: recorder.endpoint, credentialFile: recorder.credentialFile },
+    }));
     await t.test("keeps host state private", () => assert.equal(require("node:fs").lstatSync(host).mode & 0o777, 0o700));
     await t.test("keeps the shared credential private", () => assert.equal(require("node:fs").lstatSync(join(host, "credential.json")).mode & 0o777, 0o600));
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -360,6 +365,70 @@ test("remote prepare bounds credential stdin before parsing", () => {
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("remote prepare preserves a user-selected Local Recorder while updating the Bridge profile", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-selection-"));
+  const id = "bcdef0123456789a";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const configPath = join(home, ".pi", "agent", "pi-dictation.json");
+  const credential = { id: "33333333-3333-4333-8333-333333333333", secret: Buffer.alloc(32, 9).toString("base64") };
+  const invoke = (endpoint) => spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+    cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+  });
+  try {
+    const first = invoke({ type: "unix", path: join(hostRoot, "listener.sock") });
+    if (first.status !== 0) throw new Error(first.stderr);
+    const selectedLocal = JSON.parse(readFileSync(configPath, "utf8"));
+    selectedLocal.recorders.selected = "local";
+    writeFileSync(configPath, JSON.stringify(selectedLocal), { mode: 0o600 });
+    const second = invoke({ type: "tcp", host: "127.0.0.1", port: 43125 });
+    assert.equal(second.status, 0, second.stderr);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote removal reservation permits cleanup while Local Recorder remains selected", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-reserved-revoke-"));
+  const id = "bdef0123456789ac";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const endpoint = { type: "unix", path: join(hostRoot, "listener.sock") };
+  const credential = { id: "35353535-3535-4353-8353-353535353535", secret: Buffer.alloc(32, 20).toString("base64") };
+  const invoke = (command) => spawnSync(process.execPath, [cli, "bridge", command, id, ...(command === "remote-prepare" ? [Buffer.from(JSON.stringify(endpoint)).toString("base64")] : [])], {
+    cwd: root,
+    encoding: "utf8",
+    input: command === "remote-prepare" ? JSON.stringify(credential) : undefined,
+    env: { ...process.env, HOME: home },
+  });
+  try {
+    const prepared = invoke("remote-prepare");
+    if (prepared.status !== 0) throw new Error(prepared.stderr);
+    const reserved = invoke("remote-recorder-removal-check");
+    if (reserved.status !== 0) throw new Error(reserved.stderr);
+    const revoked = invoke("remote-credential-revoke");
+    assert.equal(revoked.status, 0, revoked.stderr);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("remote revocation requires the Recorder selection reservation", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-selected-revoke-"));
+  const id = "cdef0123456789ab";
+  const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+  const configPath = join(home, ".pi", "agent", "pi-dictation.json");
+  const endpoint = { type: "unix", path: join(hostRoot, "listener.sock") };
+  const credential = { id: "34343434-3434-4343-8343-343434343434", secret: Buffer.alloc(32, 19).toString("base64") };
+  try {
+    const prepared = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+    });
+    if (prepared.status !== 0) throw new Error(prepared.stderr);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.recorders.selected = "bridge";
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    const revoked = spawnSync(process.execPath, [cli, "bridge", "remote-credential-revoke", id], {
+      cwd: root, encoding: "utf8", env: { ...process.env, HOME: home },
+    });
+    assert.match(revoked.stderr, /requires an owned Recorder selection lock/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("remote prepare reconciles an owned Unix endpoint to explicit TCP fallback", () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-fallback-"));
   const id = "abcdef0123456789";
@@ -374,7 +443,7 @@ test("remote prepare reconciles an owned Unix endpoint to explicit TCP fallback"
     if (first.status !== 0) throw new Error(first.stderr);
     const tcp = { type: "tcp", host: "127.0.0.1", port: 43123 };
     const second = invoke(tcp);
-    const recorder = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8")).recorder;
+    const recorder = JSON.parse(readFileSync(join(home, ".pi", "agent", "pi-dictation.json"), "utf8")).recorders.bridge;
     assert.deepEqual(recorder.endpoint, tcp, second.stderr);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
@@ -682,6 +751,32 @@ test("remote revocation removes a partial host without changing another owned Re
     await t.test("removes only the partial host", () => assert.equal(existsSync(remoteRoot), false));
     await t.test("preserves the other owned Recorder", () => assert.deepEqual(JSON.parse(readFileSync(join(configRoot, "pi-dictation.json"))), config));
   } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("selected Bridge refusal happens before credential revocation", async (t) => {
+  const f = fixture();
+  const effectsFile = join(f.home, "selected-removal-effects");
+  let server;
+  try {
+    const installed = run(f, ["install", "selected-pi"]);
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    server = await startCredentialServer(f, effectsFile);
+    const host = join(f.bridge, "hosts", hostDirectories(f.bridge)[0]);
+    const result = run(f, ["revoke", "selected-pi", "--confirm"], { SSH_SELECTED_BRIDGE: "1" });
+    await t.test("refuses with Recorder selection guidance", () => {
+      assert.match(result.stderr, /Select Local recording with \/dictate-config/);
+    });
+    await t.test("preserves the live credential", () => {
+      assert.equal(existsSync(join(host, "credential.json")), true);
+    });
+    await t.test("does not create a revocation intent", () => {
+      assert.equal(existsSync(join(host, "revocation.json")), false);
+    });
+  } finally {
+    server?.kill("SIGTERM");
+    if (server) await once(server, "exit").catch(() => {});
+    rmSync(f.home, { recursive: true, force: true });
+  }
 });
 
 test("scoped uninstall removes only the selected host bridge", async (t) => {

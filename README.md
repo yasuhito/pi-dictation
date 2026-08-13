@@ -56,8 +56,8 @@ Commands:
 
 - `/dictate` — start or stop dictation
 - `/dictate-cancel` — cancel recording or transcription
-- `/dictate-config` — edit safe settings interactively and inspect privacy-safe recorder/backend status
-- `/dictate-help` — show whether recorder selection is automatic or custom, plus the transcription backend
+- `/dictate-config` — switch non-destructively between Local recording and a configured Bridge recording, edit safe settings, and inspect privacy-safe availability/backend status
+- `/dictate-help` — show the current Recorder selection and transcription backend
 
 ## Diagnose setup
 
@@ -134,7 +134,7 @@ The command must write only the transcription to standard output.
 
 ## Configuration
 
-Configuration lives at `~/.pi/agent/pi-dictation.json`. Run `/dictate-config` to edit the shortcut, language, OpenAI model, duration limits, and spinner through Pi's TUI. The settings screen never displays API keys or custom command contents, preserves fields it does not edit, identifies environment overrides, and saves atomically with `0600` permissions. Shortcut changes require `/reload` or a restart; other saved changes apply to the next recording.
+Configuration lives at `~/.pi/agent/pi-dictation.json`. Run `/dictate-config` to choose the Local Recorder or one configured Bridge Recorder and to edit the shortcut, language, OpenAI model, duration limits, and spinner through Pi's TUI. Recorder selection is non-destructive: both profiles remain configured, no automatic fallback occurs, and Bridge installation or removal remains the responsibility of `pi-dictation bridge`. The settings screen never displays API keys, Bridge connection details, or custom command contents; it preserves fields it does not edit, identifies environment overrides, and saves atomically with `0600` permissions. Shortcut changes require `/reload` or a restart; other saved changes apply to the next recording.
 
 You can also start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation. Unknown fields and invalid values are rejected before external work starts.
 
@@ -142,7 +142,8 @@ You can also start from [`pi-dictation.example.json`](./pi-dictation.example.jso
 | --- | --- | --- |
 | `shortcut` | `insert` | Pi shortcut used to toggle dictation |
 | `language` | unset | Language passed to the OpenAI backend |
-| `recorder` | `{ "type": "local" }` | Discriminated local or Bridge Recorder configuration; local `command` is optional and uses `{file}` as the private staging WAV path |
+| `recorders` | `{ "selected": "local" }` | Persisted Recorder selection plus optional `local` and installer-managed `bridge` profiles; local `command` is optional and uses `{file}` as the private staging WAV path |
+| `recorder` | unset | Legacy single-Recorder configuration, migrated when `/dictate-config` next saves settings |
 | `transcribeCommand` | unset | Local transcription command |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI-compatible transcription model |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
@@ -152,7 +153,7 @@ You can also start from [`pi-dictation.example.json`](./pi-dictation.example.jso
 | `maxRecordingMs` | `600000` | Graceful-stop threshold from `1000`–`3600000` ms, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |
 | `spinner` | `arc` | `cli-spinners` animation name |
 
-Recorder configuration has no environment override. The remaining runtime settings can also be set with environment variables:
+Recorder selection and profiles have no environment override. The remaining runtime settings can also be set with environment variables:
 
 - `PI_DICTATION_SHORTCUT`
 - `PI_DICTATION_LANGUAGE`
@@ -183,7 +184,7 @@ pi-dictation bridge install my-pi
 pi-dictation bridge status my-pi
 ```
 
-Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently. Repeat the command for additional aliases; each gets an independent credential, tunnel LaunchAgent, listener, Recorder configuration, and health state while sharing the same Mac companion.
+Installation requires successful non-interactive SSH `BatchMode` authentication and an exact Pi Dictation package/protocol match on the remote host. It reuses the alias's host-key and routing configuration, creates a private per-host Unix listener by default, and reports tunnel process, listener establishment, and authenticated companion health independently. Installation adds the Bridge Recorder profile without changing Recorder selection; use `/dictate-config` on the Pi host to select Bridge recording explicitly. Repeat the command for additional aliases; each gets an independent credential, tunnel LaunchAgent, listener, Recorder configuration, and health state while sharing the same Mac companion.
 
 Manage configured bridges without exposing secrets, private paths, SSH commands, or Recording lease identities:
 
@@ -216,7 +217,7 @@ Doctor and list are the only stable JSON interfaces. Doctor is read-only: it doe
 
 Upgrade verifies non-interactive reachability, the package/protocol transition, and authenticated effects for every registered destination before stopping the shared companion. An active recording blocks it unless the named bridges are explicitly cancelled with `--cancel-active --confirm`; successful replacement clears readiness and requires a fresh interactive real-audio preflight followed by doctor confirmation of all-host health.
 
-Scoped uninstall revokes and removes only the selected host's tunnel, listener, credential, and Recorder configuration. The last-host or `--all` path additionally requires separate retained-WAV and credential-deletion flags before the shared companion is removed. Active recording deletion requires `--cancel-active`. Every maintenance command refuses symlinks, unexpected types, unsafe ownership or permissions, and unprovable artifacts. macOS microphone permission history can remain after complete uninstall and may be removed manually in Privacy & Security.
+Scoped uninstall revokes and removes only the selected host's tunnel, listener, credential, and Bridge Recorder profile. If that Bridge is selected, first choose Local recording with `/dictate-config`; uninstall never changes Recorder selection automatically. The last-host or `--all` path additionally requires separate retained-WAV and credential-deletion flags before the shared companion is removed. Active recording deletion requires `--cancel-active`. Every maintenance command refuses symlinks, unexpected types, unsafe ownership or permissions, and unprovable artifacts. macOS microphone permission history can remain after complete uninstall and may be removed manually in Privacy & Security.
 
 A TCP listener is never selected automatically. If the SSH server cannot forward Unix sockets, explicitly opt in to one exact loopback bind:
 
@@ -232,8 +233,9 @@ See [Bridge recording support and certification](./docs/bridge-recording-support
 ### Bridge smoke test
 
 1. On the Mac, confirm `pi-dictation bridge status my-pi` reports the tunnel, listener, and authenticated health as ready.
-2. In an interactive Pi session on `my-pi`, run `/dictate`, speak a recognizable phrase into the Mac microphone, then run `/dictate` again.
-3. Confirm the phrase is inserted into Pi. A successful stop means Pi authenticated the companion, bounded and verified the complete WAV, transcribed it on the Pi host, acknowledged Mac cleanup, and removed its own temporary audio.
+2. In an interactive Pi session on `my-pi`, run `/dictate-config`, choose Bridge recording, and save.
+3. Run `/dictate`, speak a recognizable phrase into the Mac microphone, then run `/dictate` again.
+4. Confirm the phrase is inserted into Pi. A successful stop means Pi authenticated the companion, bounded and verified the complete WAV, transcribed it on the Pi host, acknowledged Mac cleanup, and removed its own temporary audio.
 
 ### Real-device certification
 

@@ -5,6 +5,17 @@
   "description": "Configuration for the Pi Dictation extension on Linux and macOS.",
   "type": "object",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "not": {
+        "properties": {
+          "recorder": true,
+          "recorders": true
+        },
+        "required": ["recorder", "recorders"]
+      }
+    }
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -21,7 +32,8 @@
       "description": "Language passed to the OpenAI-compatible transcription backend."
     },
     "recorder": {
-      "description": "Recorder selection. Omit to auto-detect a local recorder.",
+      "deprecated": true,
+      "description": "Legacy single-Recorder configuration. Omit to auto-detect a local recorder.",
       "oneOf": [
         {
           "type": "object",
@@ -105,6 +117,74 @@
           }
         }
       ]
+    },
+    "recorders": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "selected": { "const": "bridge" } },
+            "required": ["selected"]
+          },
+          "then": {
+            "properties": { "bridge": true },
+            "required": ["bridge"]
+          }
+        }
+      ],
+      "description": "Persisted Recorder profiles and the Recorder selection used for the next recording.",
+      "properties": {
+        "selected": {
+          "enum": ["local", "bridge"]
+        },
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Explicit local recorder command. {file} is replaced with a private staging WAV path."
+            }
+          }
+        },
+        "bridge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoint", "credentialFile"],
+          "properties": {
+            "endpoint": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["type", "path"],
+                  "properties": {
+                    "type": { "const": "unix" },
+                    "path": { "type": "string", "pattern": "^/" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["type", "host", "port"],
+                  "properties": {
+                    "type": { "const": "tcp" },
+                    "host": { "enum": ["127.0.0.1", "::1"] },
+                    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                  }
+                }
+              ]
+            },
+            "credentialFile": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        }
+      }
     },
     "transcribeCommand": {
       "type": "string",

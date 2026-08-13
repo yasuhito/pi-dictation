@@ -397,6 +397,21 @@ async function requestJson(
   } finally { clearTimeout(timer); }
 }
 
+export async function checkBridgeRecorder(
+  config: BridgeRecorderConfig,
+  timeoutMs = 2000
+): Promise<boolean> {
+  try {
+    const credential = await readCredential(config.credentialFile);
+    const payload = await requestJson(config, credential, "health", {}, undefined, randomUUID(), timeoutMs);
+    return exactObject(payload, ["permission", "defaultInputAvailable"]) &&
+      (payload as Record<string, unknown>).permission === "authorized" &&
+      (payload as Record<string, unknown>).defaultInputAvailable === true;
+  } catch {
+    return false;
+  }
+}
+
 type StreamLevelEvent = Extract<LevelEvent, { type: "observation" | "unavailable" }> |
   { type: "terminal"; state: string };
 

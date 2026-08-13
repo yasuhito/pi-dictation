@@ -80,10 +80,18 @@ async function createRuntime({
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
   try {
     const persisted = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-    persisted.recorder = recorderConfig || {
+    const selectedRecorder = recorderConfig || {
       type: "local",
       command: `${process.execPath} ${recorderPath} {file} ${recorderArgs}`.trim(),
     };
+    if (persisted.recorders) {
+      persisted.recorders.selected = selectedRecorder.type;
+      persisted.recorders[selectedRecorder.type] = selectedRecorder.type === "local"
+        ? { command: selectedRecorder.command }
+        : { endpoint: selectedRecorder.endpoint, credentialFile: selectedRecorder.credentialFile };
+    } else {
+      persisted.recorder = selectedRecorder;
+    }
     writeFileSync(configPath, JSON.stringify(persisted));
   } catch {}
   if (transcribeCommand === null) delete process.env.PI_DICTATION_TRANSCRIBE_CMD;
@@ -168,6 +176,31 @@ test("portable process inspection rejects a missing process", () => {
 test("the extension registers the focused settings command", async () => {
   const runtime = await createRuntime();
   assert.equal(typeof runtime.commands["dictate-config"], "function");
+});
+
+test("the settings command refuses Recorder changes during recording", async () => {
+  const paths = testPaths("config-during-recording");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  const runtime = await createRuntime();
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    await runtime.commands["dictate-config"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /cannot be changed during dictation/i);
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("dictation help reports the Recorder selection", async () => {
+  const runtime = await createRuntime();
+  try {
+    await runtime.commands["dictate-help"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /Recorder selection=local/);
+  } finally {
+    await runtime.shutdown();
+  }
 });
 
 test("recording appears as a responsive above-editor Dictation strip", async (t) => {

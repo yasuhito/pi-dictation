@@ -36,6 +36,10 @@ _Avoid_: Remote input, remote microphone
 The module that starts a recording and returns a common handle for stopping it successfully or cancelling it, regardless of where the microphone is attached.
 _Avoid_: Recording command, capture service
 
+**Recorder selection**:
+The persisted choice of the Local Recorder or configured Bridge Recorder to use for the next recording. Changing the selection preserves both Recorder configurations and does not install, remove, or automatically fall back between them.
+_Avoid_: Microphone setting, recording mode
+
 **Recording lease**:
 The exclusive, capability-owned right to control one active bridge recording. Only the client holding that recording's secret capability may stop, cancel, or retrieve it.
 _Avoid_: Global recording session, active flag

@@ -29,7 +29,7 @@ function validateConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("configuration root must be an object");
   }
-  const knownFields = new Set([...STRING_FIELDS, "recorder", ...NUMBER_FIELDS]);
+  const knownFields = new Set([...STRING_FIELDS, "recorder", "recorders", ...NUMBER_FIELDS]);
   if (Object.keys(config).some((field) => !knownFields.has(field))) {
     throw new Error("unknown configuration field");
   }
@@ -49,7 +49,11 @@ function validateConfig(config) {
       throw new Error(`${field} must be an integer from ${MIN_DURATION_MS} to ${MAX_DURATION_MS}`);
     }
   }
+  if (config.recorder !== undefined && config.recorders !== undefined) {
+    throw new Error("recorder and recorders cannot both be configured");
+  }
   if (config.recorder !== undefined) validateRecorder(config.recorder);
+  if (config.recorders !== undefined) validateRecorderProfiles(config.recorders);
   return config;
 }
 
@@ -97,6 +101,41 @@ function validateRecorder(recorder) {
   if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
     throw new Error("Bridge TCP endpoint port must be from 1 to 65535");
   }
+}
+
+function validateRecorderProfiles(recorders) {
+  if (!recorders || typeof recorders !== "object" || Array.isArray(recorders)) {
+    throw new Error("recorders must be an object");
+  }
+  exactFields(recorders, ["selected", "local", "bridge"]);
+  if (recorders.selected !== "local" && recorders.selected !== "bridge") {
+    throw new Error("recorders.selected must be local or bridge");
+  }
+  if (recorders.selected === "bridge" && recorders.bridge === undefined) {
+    throw new Error("Bridge selection requires a configured Bridge Recorder");
+  }
+  if (recorders.local !== undefined) {
+    if (!recorders.local || typeof recorders.local !== "object" || Array.isArray(recorders.local)) {
+      throw new Error("recorders.local must be an object");
+    }
+    exactFields(recorders.local, ["command"]);
+    validateRecorder({ ...recorders.local, type: "local" });
+  }
+  if (recorders.bridge !== undefined) {
+    if (!recorders.bridge || typeof recorders.bridge !== "object" || Array.isArray(recorders.bridge)) {
+      throw new Error("recorders.bridge must be an object");
+    }
+    exactFields(recorders.bridge, ["endpoint", "credentialFile"]);
+    validateRecorder({ ...recorders.bridge, type: "bridge" });
+  }
+}
+
+function selectedRecorder(config) {
+  if (!config.recorders) return config.recorder || { type: "local" };
+  if (config.recorders.selected === "bridge" && config.recorders.bridge) {
+    return { ...config.recorders.bridge, type: "bridge" };
+  }
+  return { ...config.recorders.local, type: "local" };
 }
 
 function readConfig() {
@@ -191,7 +230,7 @@ if (config.error) {
   lines.push(`Config: ok (${config.status})`);
 }
 
-const recorder = config.value.recorder || { type: "local" };
+const recorder = selectedRecorder(config.value);
 if (recorder.type === "bridge") {
   lines.push("Recorder: configured (Bridge recording)");
 } else if (recorder.command) {

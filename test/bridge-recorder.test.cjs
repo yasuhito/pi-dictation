@@ -32,9 +32,10 @@ async function harness(mode = "valid", credentialMetadata = {}) {
   });
   await once(child, "message");
   const { createRecorder } = await jiti.import(join(root, "extensions", "recorder.ts"));
+  const config = { type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile };
   return {
-    child, socket, credential,
-    recorder: createRecorder({ type: "bridge", endpoint: { type: "unix", path: socket }, credentialFile }),
+    child, socket, credential, config,
+    recorder: createRecorder(config),
     eventFile,
     events() { return existsSync(eventFile) ? readFileSync(eventFile, "utf8").trim().split("\n") : []; },
     startOptions: {
@@ -54,6 +55,14 @@ async function harness(mode = "valid", credentialMetadata = {}) {
 }
 
 runRecorderContract("bridge recording", () => harness());
+
+test("the Bridge health check reports an authenticated available input", async () => {
+  const instance = await harness();
+  try {
+    const { checkBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    assert.equal(await checkBridgeRecorder(instance.config), true);
+  } finally { await instance.cleanup(); }
+});
 
 test("Bridge fetch and SHA-256 buffers remain fixed as WAV length grows", async (t) => {
   const measure = async (mode) => {

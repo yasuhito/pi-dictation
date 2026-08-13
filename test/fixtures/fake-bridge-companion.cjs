@@ -312,7 +312,9 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
           socket.destroy();
           return;
         }
-        if (request.operation === "start") {
+        if (request.operation === "health") {
+          responsePayload = { permission: "authorized", defaultInputAvailable: true };
+        } else if (request.operation === "start") {
           const existing = recordings.get(payload.recordingId);
           const leaseHash = typeof payload.leaseSecret === "string" ? digestSecret(payload.leaseSecret) : Buffer.alloc(0);
           if (busyStarts.has(replayKey)) {
