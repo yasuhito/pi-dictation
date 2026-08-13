@@ -1,0 +1,245 @@
+# Pi Dictation
+
+[English](./README.md)
+
+[![CI](https://github.com/yasuhito/pi-dictation/actions/workflows/ci.yml/badge.svg)](https://github.com/yasuhito/pi-dictation/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/pi-dictation.svg)](https://www.npmjs.com/package/pi-dictation)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[Pi](https://github.com/badlogic/pi-mono) のためのプッシュ・ツー・トーク音声入力です。ショートカットを押して話し、もう一度押すと、文字起こしがPiのエディターに貼り付けられます。
+
+Pi Dictationは、OpenAIの音声文字起こしと、任意のローカル文字起こしコマンドに対応しています。録音プロセスと文字起こしプロセスは分離され、リソース使用量が制限されます。キャンセル時やセッション終了時には、どちらのプロセスも終了します。
+
+![Pi Dictationのデモ](https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.gif)
+
+## 必要条件
+
+- `/bin/sh` とPOSIXプロセスグループに対応したLinuxまたはmacOS
+- Pi
+- Node.js 22.19以降
+- 次のいずれかの録音コマンド
+  - Linux：PipeWire環境の `pw-record`、またはALSA環境の `arecord`
+  - macOS：AVFoundationに対応したFFmpeg（`brew install ffmpeg`）
+- 次のいずれかの文字起こしバックエンド
+  - OpenAI APIキー
+  - `whisper-cli` などのローカルコマンド
+
+macOSでは、システムのデフォルト音声入力から録音します。Piを実行しているターミナルに対するマイクの使用許可をmacOSから求められる場合があります。ネイティブWindows対応は、プロセスのライフサイクルを安全に管理する設計が検証されるまで、[ロードマップ](./TODO.md)に記載されています。
+
+## インストール
+
+npmからインストールする場合：
+
+```bash
+pi install npm:pi-dictation
+```
+
+GitHubからインストールする場合：
+
+```bash
+pi install git:github.com/yasuhito/pi-dictation
+```
+
+ローカルのチェックアウトからインストールする場合：
+
+```bash
+pi install /absolute/path/to/pi-dictation
+```
+
+インストール後、Piを再起動するか `/reload` を実行してください。
+
+## 使い方
+
+`Insert` を押すと録音を開始します。もう一度押すと録音を停止し、文字起こしを始めます。MacのキーボードにはInsertキーがないことが多いため、macOSでは `f8` などのショートカットを設定してください。ファンクションキー列がメディア操作に割り当てられている場合は、`fn+F8` を使います。
+
+録音中は、エディターの上に1行のDictationステータスが表示されます。点滅する録音マーカー、直近のマイク入力レベル、経過時間を確認できます。同じ領域に処理中、文字起こし中、完了、キャンセル、失敗の状態も表示され、その後自動的に消えます。入力レベルは、PCM16モノラルWAVを出力する録音コマンドで利用できます。この形式を出力するカスタム録音コマンドにも対応します。不完全な出力や未対応の出力では、実際にはない音声活動を表示せず、無音を示す平坦な線を表示します。
+
+コマンド：
+
+- `/dictate` — 録音を開始または停止
+- `/dictate-cancel` — 録音または文字起こしをキャンセル
+- `/dictate-config` — ローカル録音と設定済みのBridge録音を非破壊的に切り替え、安全な設定を編集し、機密情報を表示しない可用性・バックエンド状態を確認
+- `/dictate-help` — 現在選択されているRecorderと文字起こしバックエンドを表示
+
+## セットアップの診断
+
+録音や文字起こしが動作しない場合は、機密情報を表示しないdoctorを実行してください。
+
+```bash
+npx -p pi-dictation pi-dictation-doctor
+```
+
+ソースのチェックアウトから実行する場合：
+
+```bash
+npm run doctor
+```
+
+doctorは、Node.js、Pi、LinuxまたはmacOSの対応状況、設定の妥当性、録音コマンドの可用性、要求された文字起こしバックエンドと実際に使われるバックエンド、OpenAIの認証情報ソースが設定されているかを確認します。APIキー取得コマンドは実行せず、カスタムコマンドや秘密の値も表示しません。
+
+## OpenAI文字起こしの設定
+
+もっとも簡単な方法は `OPENAI_API_KEY` です。
+
+```bash
+export OPENAI_API_KEY=...
+```
+
+シェル設定にキーを保存したくない場合は、システムのキーチェーンに保存します。
+
+LinuxのSecret Serviceを使う場合：
+
+```bash
+secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-dictation
+```
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "language": "ja",
+  "openaiModel": "gpt-4o-mini-transcribe",
+  "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
+}
+```
+
+macOSのキーチェーンを使う場合（キーは対話的に入力するため、シェル履歴に残りません）：
+
+```bash
+security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
+```
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "shortcut": "f8",
+  "language": "ja",
+  "openaiModel": "gpt-4o-mini-transcribe",
+  "openaiApiKeyCommand": "security find-generic-password -a \"$USER\" -s pi-dictation-openai -w"
+}
+```
+
+このバックエンドを使うと、設定されたOpenAI互換エンドポイントへ音声が送信されます。
+
+## ローカル文字起こしコマンドの設定
+
+コマンドには、`{file}` を通してWAVファイルのパスが渡されます。
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
+  "language": "ja",
+  "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -"
+}
+```
+
+コマンドは、標準出力に文字起こしだけを出力する必要があります。
+
+## 設定
+
+設定ファイルは `~/.pi/agent/pi-dictation.json` にあります。PiのTUIで `/dictate-config` を実行すると、ローカルRecorderまたは設定済みのBridge Recorderを選択し、ショートカット、言語、OpenAIモデル、時間制限、スピナーを編集できます。Recorderの選択は非破壊的です。両方のプロファイルが保持され、自動フォールバックは行われません。Bridgeのインストールと削除は、引き続き `pi-dictation bridge` が担います。設定画面には、APIキー、Bridgeの接続情報、カスタムコマンドの内容は表示されません。画面で編集しないフィールドは保持され、環境変数による上書きが示されます。保存時は `0600` 権限でアトミックに書き込みます。ショートカットの変更には `/reload` または再起動が必要です。それ以外の変更は、次の録音から反映されます。
+
+[`pi-dictation.example.json`](./pi-dictation.example.json) から設定を始めることもできます。JSON Schemaに対応したエディターでは、`$schema` フィールドによる入力補完と検証を利用できます。未知のフィールドや不正な値は、外部処理を開始する前に拒否されます。
+
+| フィールド | デフォルト | 用途 |
+| --- | --- | --- |
+| `shortcut` | `insert` | 音声入力を切り替えるPiショートカット |
+| `language` | 未設定 | OpenAIバックエンドに渡す言語 |
+| `recorders` | `{ "selected": "local" }` | 保存されたRecorderの選択と、任意の `local` およびインストーラー管理の `bridge` プロファイル。ローカルの `command` は任意で、`{file}` を非公開の一時WAVパスとして使用 |
+| `recorder` | 未設定 | 旧形式の単一Recorder設定。次に `/dictate-config` で保存すると移行 |
+| `transcribeCommand` | 未設定 | ローカル文字起こしコマンド |
+| `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI互換の文字起こしモデル |
+| `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI互換APIのベースURL |
+| `openaiApiKey` | 未設定 | APIキー。環境変数またはキーチェーンコマンドを推奨 |
+| `openaiApiKeyCommand` | 未設定 | APIキーを出力するコマンド |
+| `timeoutMs` | `120000` | 文字起こしのタイムアウト。`1000`〜`3600000` ミリ秒 |
+| `maxRecordingMs` | `600000` | 正常終了を試みるまでの録音時間。`1000`〜`3600000` ミリ秒。Piが突然終了した場合も適用され、終了しないプロセスはさらに5秒以内に強制終了 |
+| `spinner` | `arc` | `cli-spinners` のアニメーション名 |
+
+Recorderの選択とプロファイルには環境変数による上書きがありません。それ以外の実行時設定には、次の環境変数も使えます。
+
+- `PI_DICTATION_SHORTCUT`
+- `PI_DICTATION_LANGUAGE`
+- `PI_DICTATION_TRANSCRIBE_CMD`
+- `PI_DICTATION_OPENAI_MODEL`
+- `PI_DICTATION_OPENAI_BASE_URL`
+- `PI_DICTATION_OPENAI_API_KEY`
+- `PI_DICTATION_OPENAI_API_KEY_COMMAND`
+- `PI_DICTATION_TIMEOUT_MS`
+- `PI_DICTATION_MAX_RECORDING_MS`
+- `PI_DICTATION_SPINNER`
+
+環境変数は設定ファイルより優先されます。`PI_DICTATION_OPENAI_API_KEY` と `OPENAI_API_KEY` の両方が設定されている場合は、パッケージ固有の `PI_DICTATION_OPENAI_API_KEY` が優先されます。
+
+## SSH Bridgeを使う
+
+SSH Bridgeを使うと、Piを実行しているホストとは別のMacに接続されたマイクを利用できます。たとえば、PiはリモートのLinuxホストで実行し、手元のMacから録音できます。
+
+> **対応状況：** Pi Dictation `0.6.0` は、macOS `26.5.1 (25F80)` を搭載したApple M1 Pro MacBook Pro（`MacBookPro18,3`）で動作検証済みです。Intel Mac、ネイティブWindows、ループバック以外のリスナー、自動TCPフォールバック、パッケージとプロトコルのバージョン不一致、合格した検証記録がないmacOSバージョンはサポートされません。完全な対応範囲と現行リリースに適用される例外については、[Bridge録音の対応範囲と検証](./docs/bridge-recording-support.md)を参照してください。
+
+Bridge CLIは、MacとPiホストの両方でシェルから実行できる必要があります。両方のホストに同じバージョンのパッケージをグローバルインストールしてください。
+
+```bash
+npm install --global pi-dictation@0.6.0
+```
+
+マイクを接続したMacで、ネイティブコンパニオンをインストールし、事前確認を行います。続いて、Piホストへの接続に普段使っているSSHエイリアスにBridgeをインストールします。
+
+```bash
+pi-dictation bridge install
+pi-dictation bridge preflight
+pi-dictation bridge install my-pi
+pi-dictation bridge status my-pi
+```
+
+Bridgeのインストールには、非対話のSSH `BatchMode` 認証と、両方のホストで一致するPi Dictationパッケージおよびプロトコルのバージョンが必要です。インストールによってBridge Recorderプロファイルは追加されますが、自動的には選択されません。リモートホストのPiで `/dictate-config` を実行し、Bridge録音を選択してください。
+
+主なメンテナンスコマンド：
+
+```bash
+pi-dictation bridge list
+pi-dictation bridge doctor
+pi-dictation bridge logs my-pi
+pi-dictation bridge repair my-pi          # preview
+pi-dictation bridge repair my-pi --confirm
+pi-dictation bridge rotate my-pi
+pi-dictation bridge revoke my-pi           # preview
+pi-dictation bridge uninstall my-pi        # preview
+```
+
+`repair`、`revoke`、`uninstall` は、`--confirm` を要求する前に影響をプレビューします。安定したJSONインターフェースとして保証されるのは `list` と `doctor` だけです。認証情報の扱い、復旧、TCPフォールバック、アップグレード、アンインストール、保持期間、型付きエラー、リリース検証については、[Bridge録音の対応範囲と検証](./docs/bridge-recording-support.md)を参照してください。
+
+### Bridgeのスモークテスト
+
+1. Macで `pi-dictation bridge status my-pi` を実行し、トンネル、リスナー、認証済みヘルスがreadyと表示されることを確認します。
+2. `my-pi` 上のPiで `/dictate-config` を実行し、Bridge録音を選択して保存します。
+3. `/dictate` を実行し、Macのマイクに向かって判別できるフレーズを話してから、もう一度 `/dictate` を実行します。
+4. 話したフレーズがPiに挿入されることを確認します。
+
+## 安全性
+
+Pi Dictationは、次の安全対策を行います。
+
+- ショートカットの競合によって複数の録音プロセスが起動することを防止
+- 録音と文字起こしのプロセスグループ全体を終了
+- 独立したプロセスグループのwatchdogにより、Piが終了してもデフォルトで10分後に録音を停止し、終了しないプロセスをさらに5秒以内に強制終了
+- メモリに保持するサブプロセス出力を制限
+- キャンセル時とセッション終了時に文字起こしを中止
+- 非公開（`0700`）の一時ディレクトリに録音を作成
+- 検証済みのPCM16モノラルWAV出力だけを文字起こしに使用
+- 通信切断またはコンパニオン再起動後も、所有者認証済みの完了したBridge WAVを最長10分間復旧可能
+- 確認応答、キャンセル、有効期限切れの際にBridge音声を削除し、再試行状態を示す最小限の記録（tombstone）を10分後に削除
+- 通常利用、キャンセル、失敗、正常終了の後に一時録音を削除
+
+`SIGKILL` などによりPiが処理できない形で終了すると、OSによる一時ファイルの削除まで、非公開の録音ディレクトリが残る場合があります。
+
+## 開発
+
+```bash
+npm install
+npm run check
+npm run pack:check
+```
+
+## ライセンス
+
+MIT
