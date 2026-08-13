@@ -650,6 +650,7 @@ private struct AuthenticatedRequest {
 private struct PersistedRecording: Codable {
     let schemaVersion: Int
     let id: String
+    let bootSessionId: String?
     let ownerId: String
     let leaseHash: String
     let maximumResultBytes: Int64?
@@ -865,8 +866,22 @@ private final class LevelSubscriber {
     }
 }
 
+private func bootSessionIdentifier() -> String? {
+#if PROTOCOL_TESTING
+    if let overridden = ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_BOOT_SESSION_ID"] {
+        return UUID(uuidString: overridden)?.uuidString.lowercased()
+    }
+#endif
+    var size = 0
+    guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1, size <= 128 else { return nil }
+    var bytes = [CChar](repeating: 0, count: size)
+    guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else { return nil }
+    return UUID(uuidString: String(cString: bytes))?.uuidString.lowercased()
+}
+
 private final class BridgeRecording {
     let id: String
+    let bootSessionId: String?
     let ownerId: String
     let leaseHash: Data
     let url: URL
@@ -896,10 +911,12 @@ private final class BridgeRecording {
     var activeFetchDescriptor: Int32?
 
     init(id: String, ownerId: String, leaseHash: Data, url: URL, maximumResultBytes: Int64,
-         state: String = "recording", length: Int? = nil, sha256: String? = nil,
+         bootSessionId: String? = bootSessionIdentifier(), state: String = "recording",
+         length: Int? = nil, sha256: String? = nil,
          completion: String = "stopped", failureReason: String? = nil,
          terminalAt: TimeInterval? = nil, recorder: AVAudioRecorder? = nil) {
         self.id = id
+        self.bootSessionId = bootSessionId
         self.ownerId = ownerId
         self.leaseHash = leaseHash
         self.url = url
@@ -2117,8 +2134,8 @@ private final class RecordingManager {
 
     private func persistedValue(_ current: BridgeRecording) -> PersistedRecording {
         PersistedRecording(
-            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(),
+            schemaVersion: 3, id: current.id, bootSessionId: current.bootSessionId,
+            ownerId: current.ownerId, leaseHash: current.leaseHash.base64EncodedString(),
             maximumResultBytes: current.maximumResultBytes, state: current.state,
             length: current.length, sha256: current.sha256,
             completion: ["recording", "finalizing", "result-ready"].contains(current.state) ? current.completion : nil,
@@ -2129,8 +2146,8 @@ private final class RecordingManager {
 
     private func persistTransitionLocked(_ current: BridgeRecording, state: String, terminalAt: TimeInterval) throws {
         let value = PersistedRecording(
-            schemaVersion: 2, id: current.id, ownerId: current.ownerId,
-            leaseHash: current.leaseHash.base64EncodedString(),
+            schemaVersion: 3, id: current.id, bootSessionId: current.bootSessionId,
+            ownerId: current.ownerId, leaseHash: current.leaseHash.base64EncodedString(),
             maximumResultBytes: current.maximumResultBytes, state: state,
             length: nil, sha256: nil, completion: nil, failureReason: nil, terminalAt: terminalAt
         )
@@ -2254,7 +2271,7 @@ private final class RecordingManager {
             let path = runtime + "/" + name
             let data = try readPrivateData(path, maximumBytes: maximumFrameBytes)
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(["schemaVersion", "id", "ownerId", "leaseHash", "maximumResultBytes", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
+                  Set(["schemaVersion", "id", "bootSessionId", "ownerId", "leaseHash", "maximumResultBytes", "state", "length", "sha256", "completion", "failureReason", "terminalAt"]).isSuperset(of: Set(object.keys)),
                   Set(["schemaVersion", "id", "ownerId", "leaseHash", "state"]).isSubset(of: Set(object.keys)) else {
                 throw CompanionFailure.unsafeStorage
             }
@@ -2274,7 +2291,10 @@ private final class RecordingManager {
             let legacyMaximum = legacyLength <= maximumRetainedWavBytes - Int64(maximumWavHeaderBytes)
                 ? legacyLength + Int64(maximumWavHeaderBytes) : maximumRetainedWavBytes
             let restoredMaximum = persisted.maximumResultBytes ?? legacyMaximum
-            guard [1, 2].contains(persisted.schemaVersion),
+            let restoredBootSessionId = persisted.bootSessionId.flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
+            guard [1, 2, 3].contains(persisted.schemaVersion),
+                  (persisted.bootSessionId == nil || restoredBootSessionId != nil),
+                  (persisted.schemaVersion < 3 || restoredBootSessionId != nil),
                   restoredMaximum >= Int64(persisted.length ?? 0),
                   restoredMaximum <= maximumRetainedWavBytes,
                   UUID(uuidString: persisted.id) != nil,
@@ -2286,12 +2306,30 @@ private final class RecordingManager {
             let current = BridgeRecording(
                 id: persisted.id, ownerId: persisted.ownerId, leaseHash: leaseHash,
                 url: URL(fileURLWithPath: runtime + "/recording-" + persisted.id + ".wav"),
-                maximumResultBytes: restoredMaximum, state: persisted.state,
+                maximumResultBytes: restoredMaximum, bootSessionId: restoredBootSessionId,
+                state: persisted.state,
                 length: persisted.length, sha256: persisted.sha256,
                 completion: persisted.completion ?? "stopped", failureReason: persisted.failureReason,
                 terminalAt: persisted.terminalAt
             )
             recordings[current.id] = current
+            if let recordedBoot = current.bootSessionId,
+               let currentBoot = bootSessionIdentifier(), recordedBoot != currentBoot,
+               ["recording", "finalizing", "failed"].contains(current.state) {
+                current.state = "failed"
+                current.failureReason = "reboot"
+                current.length = nil
+                current.sha256 = nil
+                current.completion = "stopped"
+                current.terminalAt = current.terminalAt ?? Date().timeIntervalSince1970
+                do {
+                    try removeAudioLocked(current)
+                    try persistLocked(current)
+                } catch {
+                    scheduleCleanupRetryLocked(current)
+                    continue
+                }
+            }
             if revokedOwners.contains(current.ownerId) {
                 do { try cleanupRevokedRecordingLocked(current) }
                 catch { scheduleRevokedCleanupLocked(ownerId: current.ownerId) }
