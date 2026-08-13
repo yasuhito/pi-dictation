@@ -169,7 +169,7 @@ Environment variables take precedence over the configuration file. The package-s
 
 ## Install an SSH bridge
 
-> **Support status:** Bridge recording is not yet certified for a supported release. No macOS version or Mac model should be described as supported until one unchanged npm tarball has a passing [Bridge certification record](./docs/bridge-recording-support.md); source and synthetic test success alone are insufficient. Intel Macs, native Windows, non-loopback listeners, automatic TCP fallback, package/protocol mismatches, and macOS versions absent from a passing record are unsupported.
+> **Support status:** Pi Dictation `0.6.0` at `be0aeff` is certified on an Apple M1 Pro MacBook Pro (`MacBookPro18,3`) running macOS `26.5.1 (25F80)`, with the explicit clean-disposable-user exception recorded in the [Bridge certification record](./docs/certification/bridge-recording-0.6.0-be0aeff.md). The exact npm tarball passed the automated, real-device, lifecycle, maintenance, local Recorder, multi-client, Unix, IPv4, and IPv6 gates; source and synthetic test success alone are insufficient. Intel Macs, native Windows, non-loopback listeners, automatic TCP fallback, package/protocol mismatches, and macOS versions absent from a passing record are unsupported.
 
 Run setup on the Mac that owns the microphone. Install and preflight the native companion interactively before installing a host Bridge with the SSH alias already used for the Pi host:
 

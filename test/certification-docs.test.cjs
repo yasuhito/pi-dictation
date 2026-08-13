@@ -37,13 +37,14 @@ test("the actual npm tarball carries and executes its Bridge certification docum
       assert.deepEqual([
         "bridge-recording-0.6.0-2c7cafe.md",
         "bridge-recording-0.6.0-d6012cf.md",
-      ].map((name) => existsSync(join(packagedRoot, "docs", "certification", name))), [true, true]);
+        "bridge-recording-0.6.0-be0aeff.md",
+      ].map((name) => existsSync(join(packagedRoot, "docs", "certification", name))), [true, true, true]);
     });
     await t.test("runs the documented list command from packed bytes", () => {
       assert.equal(scenarios.includes("clean-user-tarball"), true);
     });
-    await t.test("does not claim an uncertified macOS version", () => {
-      assert.match(readme, /not yet certified for a supported release/);
+    await t.test("claims only the exact certified Mac and macOS build", () => {
+      assert.match(readme, /Apple M1 Pro MacBook Pro \(`MacBookPro18,3`\) running macOS `26\.5\.1 \(25F80\)`/);
     });
   } finally {
     rmSync(temporary, { recursive: true, force: true });
