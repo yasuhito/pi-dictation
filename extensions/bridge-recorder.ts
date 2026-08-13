@@ -567,8 +567,8 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const recordingId = randomUUID();
       const leaseSecret = randomBytes(32).toString("base64");
       const owned = leasePayload(recordingId, leaseSecret);
-      const recordingStartedAt = Date.now();
-      const piDurationDeadline = recordingStartedAt + options.maxDurationMs;
+      const startRequestedAt = Date.now();
+      const piDurationDeadline = startRequestedAt + options.maxDurationMs;
       let startPayload: unknown;
       const startRequestId = randomUUID();
       try {
@@ -600,6 +600,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       if (startShape?.recordingId !== recordingId || (!startIsActive && !startIsResultReady)) {
         throw new RecorderError("recording-failed");
       }
+      const recordingStartedAt = Date.now();
 
       let state: "active" | "stopping" | "stopped" | "cancelling" | "cancelled" | "failed" = "active";
       let stopPromise: Promise<void> | undefined;
@@ -613,7 +614,7 @@ export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
       const livenessController = new AbortController();
       void streamLevels(config, credential, owned, levelController.signal, options.onLevel);
       void (async () => {
-        let nextProofAt = recordingStartedAt + OWNER_LIVENESS_INTERVAL_MS;
+        let nextProofAt = startRequestedAt + OWNER_LIVENESS_INTERVAL_MS;
         while (!livenessController.signal.aborted) {
           try { await abortableDelay(Math.max(0, nextProofAt - Date.now()), livenessController.signal); }
           catch { return; }

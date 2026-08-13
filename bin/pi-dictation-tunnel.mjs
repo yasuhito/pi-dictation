@@ -25,6 +25,7 @@ const argumentListIsSafe = (value) => Array.isArray(value) && value.length <= MA
 if (configuration.product !== "com.yasuhito.pi-dictation.bridge" ||
     typeof configuration.logFile !== "string" || Buffer.byteLength(configuration.logFile) > 4096 ||
     !argumentListIsSafe(configuration.sshArguments) ||
+    !argumentListIsSafe(configuration.listenerCleanupArguments) ||
     !argumentListIsSafe(configuration.listenerProbeArguments) ||
     !argumentListIsSafe(configuration.healthProbeArguments) ||
     !Number.isSafeInteger(configuration.stableAfterMs) || configuration.stableAfterMs < 1000 || configuration.stableAfterMs > 300000) {
@@ -86,6 +87,17 @@ let failures = 0;
 while (!stopping) {
   const startedAt = Date.now();
   writeStatus({ tunnelProcess: "starting", listener: "pending", authenticatedHealth: "pending" });
+  const cleanup = spawnSync("ssh", configuration.listenerCleanupArguments, {
+    stdio: "ignore", timeout: 5000, maxBuffer: 64 * 1024,
+  });
+  if (cleanup.error || cleanup.status !== 0) {
+    writeStatus({ tunnelProcess: "stopped", listener: "pending", authenticatedHealth: "pending" });
+    failures = Math.min(failures + 1, 6);
+    logger.event("listener-cleanup-failed", { stage: "connect", retry: failures });
+    const ceiling = Math.min(60000, 1000 * (2 ** failures));
+    await sleep(Math.min(60000, Math.max(250, ceiling + randomInt(-Math.floor(ceiling / 4), Math.floor(ceiling / 4) + 1))));
+    continue;
+  }
   const tunnel = spawn("ssh", configuration.sshArguments, { stdio: "ignore" });
   child = tunnel;
   await new Promise((resolve) => {

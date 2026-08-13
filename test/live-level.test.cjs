@@ -36,7 +36,7 @@ function pcm(samples) {
 test("the fixed level scale keeps silence gated and preserves speech bands", async () => {
   const { levelForDb } = await jiti.import(join(packageRoot, "extensions", "live-level.ts"));
   assert.deepEqual(
-    [-Infinity, -34, -33, -31, -29, -27, -25, -23, -20, -17, -10].map(levelForDb),
+    [-Infinity, -41, -40, -37, -34, -31, -28, -25, -21, -17, -10].map(levelForDb),
     [0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7]
   );
 });

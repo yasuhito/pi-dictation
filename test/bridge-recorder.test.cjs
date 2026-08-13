@@ -552,6 +552,16 @@ for (const [mode, label] of [["companion-duration-disabled", "Pi"], ["mac-durati
   });
 }
 
+test("the Bridge recording timeline starts after authenticated startup", async () => {
+  const instance = await harness("pi-start-delay");
+  try {
+    const requestedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.cancel();
+    assert.equal(recording.startedAt - requestedAt >= 180, true);
+  } finally { await instance.cleanup(); }
+});
+
 test("Pi's duration deadline includes delayed Bridge startup", async () => {
   const instance = await harness("pi-start-delay");
   instance.startOptions.maxDurationMs = 160;
@@ -578,6 +588,25 @@ test("Bridge WAV validation distinguishes digital silence from quiet input", asy
     await silent.cleanup();
     await quiet.cleanup();
   }
+});
+
+test("Pi measures the first owner-liveness proof from the Recording lease request", async () => {
+  const instance = await harness("pi-start-delay");
+  instance.startOptions.maxDurationMs = 20000;
+  try {
+    const requestedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    const deadline = requestedAt + 5500;
+    let firstStatusAt;
+    while (firstStatusAt === undefined && Date.now() < deadline) {
+      firstStatusAt = instance.events()
+        .filter((event) => event.startsWith("status-at:"))
+        .map((event) => Number(event.slice("status-at:".length)))[0];
+      if (firstStatusAt === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.equal(firstStatusAt - requestedAt >= 4500 && firstStatusAt - requestedAt <= 5250, true);
+  } finally { await instance.cleanup(); }
 });
 
 test("Pi proves owner liveness with fresh authenticated status requests every five seconds", async (t) => {

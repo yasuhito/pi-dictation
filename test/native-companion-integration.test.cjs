@@ -56,7 +56,7 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
   });
   const socket = join(runtime, "companion.sock");
   let child;
-  async function launch(crashPoint) {
+  async function launch(crashPoint, launchEnvironment = {}) {
     let companionError = "";
     const previousSocket = existsSync(socket) ? lstatSync(socket).ino : undefined;
     child = spawn(executable, [], {
@@ -66,6 +66,7 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
         PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "60000",
         PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS: "60000",
         ...testEnvironment,
+        ...launchEnvironment,
         ...(crashPoint ? { PI_DICTATION_PROTOCOL_TEST_CRASH: crashPoint } : {}),
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -87,7 +88,7 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
     throw new Error(`native companion did not start: ${companionError.trim()}`);
   }
   async function stop() {
-    if (child.exitCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
     await new Promise((resolveWait) => child.once("exit", resolveWait));
   }
@@ -95,6 +96,7 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
   return {
     home, runtime, socket, primary, owners,
     async restart(crashPoint) { await stop(); await launch(crashPoint); },
+    async restartWithEnvironment(environment) { await stop(); await launch(undefined, environment); },
     stop,
     start: launch,
     signal(value) { child.kill(value); },
@@ -106,7 +108,7 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
       await new Promise((resolveWait) => child.once("exit", resolveWait));
     },
     async waitForExit() {
-      if (child.exitCode !== null) return true;
+      if (child.exitCode !== null || child.signalCode !== null) return true;
       const exited = await Promise.race([
         new Promise((resolveWait) => child.once("exit", () => resolveWait(true))),
         new Promise((resolveWait) => setTimeout(() => resolveWait(false), 2000)),
@@ -121,6 +123,25 @@ async function nativeHarness(initialCrashPoint, testEnvironment = {}) {
 async function disconnects(promise) {
   return promise.then(() => false, () => true);
 }
+
+test("native startup attributes an interrupted lease to a changed boot session", macOnly, async (t) => {
+  const firstBoot = "11111111-1111-1111-1111-111111111111";
+  const secondBoot = "22222222-2222-2222-2222-222222222222";
+  const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_BOOT_SESSION_ID: firstBoot });
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    instance.signal("SIGKILL");
+    await instance.waitForExit();
+    await instance.restartWithEnvironment({ PI_DICTATION_PROTOCOL_TEST_BOOT_SESSION_ID: secondBoot });
+    const status = await request(instance.socket, owner, "status", lease);
+    const effects = await request(instance.socket, owner, "credential-effects", {});
+    await t.test("reports reboot distinctly", () => assert.equal(status.payload.reason, "reboot"));
+    await t.test("deletes interrupted audio", () => assert.equal(effects.payload.incompleteAudio, 0));
+    await t.test("retains no completed WAV", () => assert.equal(effects.payload.retainedWav, 0));
+  } finally { await instance.cleanup(); }
+});
 
 for (const lifecycle of [
   { name: "sleep", signal: "SIGTSTP", restarts: false },
@@ -141,7 +162,8 @@ for (const lifecycle of [
         await instance.waitForExit();
         await instance.start();
       } else {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+        const lifecycleSettleMilliseconds = lifecycle.name === "session-lock" ? 650 : 150;
+        await new Promise((resolveWait) => setTimeout(resolveWait, lifecycleSettleMilliseconds));
       }
       const result = await request(instance.socket, owner, "status", lease);
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
@@ -159,6 +181,21 @@ for (const lifecycle of [
     } finally { await instance.cleanup(); }
   });
 }
+
+test("sleep attribution supersedes a just-observed console lock", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10_000 });
+    instance.signal("SIGUSR2");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    instance.signal("SIGTSTP");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+    const result = await request(instance.socket, owner, "status", lease);
+    assert.equal(result.payload.reason, "sleep");
+  } finally { await instance.cleanup(); }
+});
 
 test("capture initialization failure is attributable and leaves no audio", macOnly, async (t) => {
   const instance = await nativeHarness(undefined, { PI_DICTATION_PROTOCOL_TEST_FAIL_CAPTURE: "1" });
@@ -298,6 +335,20 @@ test("native companion enforces authenticated owner liveness independently", mac
   } finally { await instance.cleanup(); }
 });
 
+test("read-only credential-effects polling cannot exhaust control cleanup", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 60_000 });
+    for (let index = 0; index < 65; index += 1) {
+      await request(instance.socket, owner, "credential-effects", {});
+    }
+    const cancelled = await request(instance.socket, owner, "cancel", lease);
+    assert.equal(cancelled.payload.state, "cancelled");
+  } finally { await instance.cleanup(); }
+});
+
 test("native companion streams capture-time RMS from recorded PCM", macOnly, async (t) => {
   const instance = await nativeHarness();
   try {
@@ -334,6 +385,21 @@ test("native Level subscription receives an authenticated terminal event", macOn
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     await request(instance.socket, owner, "cancel", lease);
     assert.deepEqual((await subscription).terminal, { type: "terminal", state: "cancelled" });
+  } finally { await instance.cleanup(); }
+});
+
+test("native companion survives a disconnected Level subscription", macOnly, async () => {
+  const instance = await nativeHarness();
+  try {
+    const owner = instance.owners[0].credential;
+    const lease = capability();
+    await request(instance.socket, owner, "start", { ...lease, maxDurationMs: 10000 });
+    const subscription = await openSlowLevelSubscription(instance.socket, owner, lease);
+    subscription.destroy();
+    await request(instance.socket, owner, "cancel", lease);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    const health = await request(instance.socket, owner, "health", {});
+    assert.equal(health.status, "ok");
   } finally { await instance.cleanup(); }
 });
 
@@ -860,5 +926,28 @@ test("owner revocation cleanup survives a crash after WAV deletion", macOnly, as
     await t.test("restart replays the successful revocation", () => assert.equal(replay.status, "ok"));
     await t.test("restart preserves revoked WAV deletion", () => assert.equal(wavAbsent, true));
     await t.test("another owner remains usable", () => assert.equal(peer.status, "ok"));
+  } finally { await instance.cleanup(); }
+});
+
+test("confirmed upgrade cancellation deletes only the affected owner's recordings", macOnly, async (t) => {
+  const instance = await nativeHarness();
+  try {
+    const [affected, peer] = instance.owners;
+    const lease = capability();
+    await request(instance.socket, affected.credential, "start", { ...lease, maxDurationMs: 10000 });
+    privateJson(join(instance.home, "state", "root", "upgrade.json"), { product, phase: "quiescing" });
+    const cancelled = await request(instance.socket, affected.credential, "credential-cancel-recordings", {}, randomUUID());
+    const status = await request(instance.socket, affected.credential, "status", lease);
+    const replacement = capability();
+    const blockedReplacement = await request(instance.socket, affected.credential, "start", { ...replacement, maxDurationMs: 10000 });
+    const retainedPeer = await request(instance.socket, peer.credential, "health", {});
+    rmSync(join(instance.home, "state", "root", "upgrade.json"));
+    await instance.restart();
+    const retainedCredential = await request(instance.socket, affected.credential, "health", {});
+    await t.test("confirms the affected active Recording lease", () => assert.equal(cancelled.payload.activeRecordingLease, 1));
+    await t.test("deletes the affected Recording lease", () => assert.equal(status.status, "not-found"));
+    await t.test("blocks a replacement recording before companion replacement", () => assert.equal(blockedReplacement.status, "failed"));
+    await t.test("preserves another host bridge", () => assert.equal(retainedPeer.status, "ok"));
+    await t.test("preserves the affected bridge credential across replacement", () => assert.equal(retainedCredential.status, "ok"));
   } finally { await instance.cleanup(); }
 });

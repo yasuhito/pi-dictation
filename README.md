@@ -169,7 +169,14 @@ Environment variables take precedence over the configuration file. The package-s
 
 ## Install an SSH bridge
 
-After installing and preflighting the native Mac companion, install a bridge by using the SSH alias you already use for the Pi host:
+> **Support status:** Pi Dictation `0.6.0` is certified on an Apple M1 Pro MacBook Pro (`MacBookPro18,3`) running macOS `26.5.1 (25F80)`, with the explicit clean-disposable-user exception recorded in the [repository certification records](https://github.com/yasuhito/pi-dictation/tree/main/docs/certification). Certification combines final-tarball reruns with explicitly transferred evidence for byte-identical mechanisms across the automated, real-device, lifecycle, maintenance, local Recorder, multi-client, Unix, IPv4, and IPv6 gates; source and synthetic test success alone are insufficient. Intel Macs, native Windows, non-loopback listeners, automatic TCP fallback, package/protocol mismatches, and macOS versions absent from a passing record are unsupported.
+
+Run setup on the Mac that owns the microphone. Install and preflight the native companion interactively before installing a host Bridge with the SSH alias already used for the Pi host:
+
+```bash
+pi-dictation bridge install
+pi-dictation bridge preflight
+```
 
 ```bash
 pi-dictation bridge install my-pi
@@ -205,6 +212,27 @@ Uninstall previews connections, active Recording leases, incomplete audio, retai
 
 The lower-level `bridge rotate` and `bridge revoke` commands remain available for credential administration. Rotation stages a new owner-only credential on both hosts, verifies authenticated health through it, and only then revokes the old credential. It refuses to disrupt an unfinished Recording lease or retained WAV and preserves staged state for a safe retry. Revocation previews the target credential's live connections, active lease, incomplete audio, and retained WAV deletion counts unless `--confirm` is supplied; confirmation closes and deletes only that credential's bridge state.
 
+Diagnose and maintain the complete bridge stack from the Mac:
+
+```bash
+pi-dictation bridge doctor
+pi-dictation bridge doctor --json
+pi-dictation bridge logs                 # companion log
+pi-dictation bridge logs my-pi           # one tunnel log
+pi-dictation bridge repair my-pi          # preview
+pi-dictation bridge repair my-pi --confirm
+pi-dictation bridge upgrade
+pi-dictation bridge uninstall my-pi       # preview
+pi-dictation bridge uninstall my-pi --confirm
+pi-dictation bridge uninstall --all --delete-retained-wav --delete-credentials --confirm
+```
+
+Doctor and list are the only stable JSON interfaces. Doctor is read-only: it does not open the microphone, reload a LaunchAgent, remove a listener, execute a credential command, or repair anything. Logs are requested separately and expose only bounded structured safe fields from three one-MiB rotating generations. Repair previews the exact owned LaunchAgent/listener reconciliation and never changes credentials, permission, or audio.
+
+Upgrade verifies non-interactive reachability, the package/protocol transition, and authenticated effects for every registered destination before stopping the shared companion. An active recording blocks it unless the named bridges are explicitly cancelled with `--cancel-active --confirm`; successful replacement clears readiness and requires a fresh interactive real-audio preflight followed by doctor confirmation of all-host health.
+
+Scoped uninstall revokes and removes only the selected host's tunnel, listener, credential, and Recorder configuration. The last-host or `--all` path additionally requires separate retained-WAV and credential-deletion flags before the shared companion is removed. Active recording deletion requires `--cancel-active`. Every maintenance command refuses symlinks, unexpected types, unsafe ownership or permissions, and unprovable artifacts. macOS microphone permission history can remain after complete uninstall and may be removed manually in Privacy & Security.
+
 A TCP listener is never selected automatically. If the SSH server cannot forward Unix sockets, explicitly opt in to one exact loopback bind:
 
 ```bash
@@ -213,6 +241,8 @@ pi-dictation bridge install my-pi --transport tcp --allow-loopback --bind 127.0.
 ```
 
 Wildcard and non-loopback binds are refused. The installer does not install or update packages remotely; an incompatible remote package produces the exact `npm install` command needed before rerunning the same install.
+
+See [Bridge recording support and certification](./docs/bridge-recording-support.md) for the exact support boundary, typed-error recovery, credential and log handling, retention/deletion rules, complete certification matrix, and redacted evidence policy.
 
 ### Bridge smoke test
 
@@ -235,15 +265,27 @@ pi-dictation-bridge-certify prepare bridge-level-transcription my-pi
 pi-dictation-bridge-certify verify --confirm
 ```
 
-The gate covers Bridge levels and recognizable transcription, automated cancellation cleanup, an automated native duration limit that has no transcription interface, automated cross-host single-lease exclusion, staged tunnel-loss termination and authenticated reconnect, and the local Recorder contract. Tunnel fault injection owns its Recording lease, measures the fifteen-second bound from the fault, and runs authenticated remote health after restarting the exact tunnel LaunchAgent. Only microphone speech and observations in Pi's UI are manual; the command performs protocol, cleanup, duration, arbitration, and owned LaunchAgent fault steps itself. Lifecycle preparations cover sleep, logout, reboot, session lock, companion stop or restart, and default-input loss. Preparations that survive logout or reboot keep a private recovery capability only until `verify`; every control connection has a five-second deadline, and successful verification checks owner-scoped retained-audio counts, removes recovery state, and prints bounded JSON evidence containing neither credentials, capabilities, audio, transcripts, private paths, nor recording identities.
+The gate covers Bridge levels and recognizable transcription, automated cancellation cleanup, a native duration limit that asks only for real microphone input and has no transcription interface, automated cross-host single-lease exclusion, staged tunnel-loss termination and authenticated reconnect, and the local Recorder contract. Tunnel fault injection owns its Recording lease, measures the fifteen-second bound from the fault, and runs authenticated remote health after restarting the exact tunnel LaunchAgent. Only microphone speech and observations in Pi's UI are manual; the command performs protocol, cleanup, duration, arbitration, and owned LaunchAgent fault steps itself. Lifecycle preparations cover sleep, logout, reboot, session lock, companion stop or restart, and default-input loss. Preparations that survive logout or reboot keep a private recovery capability only until `verify`; every control connection has a five-second deadline, and successful verification checks owner-scoped retained-audio counts, removes recovery state, and prints bounded JSON evidence containing neither credentials, capabilities, audio, transcripts, private paths, nor recording identities.
 
-From a disposable clean macOS user, the staged actual-tarball gate automates package and companion installation, host installation and its idempotent rerun, human and JSON diagnosis, upgrade reconciliation, credential rotation, credential cleanup, package uninstall, and a digest check for a pre-existing external artifact. It pauses only for real-audio preflight and Pi's real recording/UI observation:
+From a disposable clean macOS user, the staged actual-tarball gate installs the predecessor, verifies its real-audio preflight and Bridge recording, then installs the byte-identical candidate on both Mac and remote Pi. It upgrades the companion, requires a second candidate preflight and candidate Bridge recording, rotates credentials, previews the exact uninstall effects, requires a separate deletion confirmation, uninstalls the package, proves Bridge state returned to its pre-install absence, and verifies a pre-existing external artifact stayed byte-identical.
+
+Start the gate once:
 
 ```bash
 npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify prepare clean-user-tarball /absolute/path/pi-dictation-CANDIDATE.tgz /absolute/path/pi-dictation-PREDECESSOR.tgz my-pi /absolute/path/external-artifact
-npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after preflight
-npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # after Bridge recording
 ```
+
+Run the following only when each displayed human step has succeeded. The command prints the next required observation before returning:
+
+```bash
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # predecessor preflight
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # predecessor recording
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # candidate preflight
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # candidate recording; prints uninstall preview
+npx --yes --package /absolute/path/pi-dictation-CANDIDATE.tgz pi-dictation-bridge-certify advance --confirm  # separately confirm reviewed deletion
+```
+
+If candidate upgrade or uninstall is interrupted, rerun the same `advance --confirm` command; private recovery state resumes the committed transition. `verify` intentionally cannot skip clean-user stages.
 
 ## Safety
 
