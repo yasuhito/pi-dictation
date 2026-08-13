@@ -8,7 +8,7 @@
 
 Push-to-talk dictation for [Pi](https://github.com/badlogic/pi-mono). Press a shortcut, speak, press it again, and the transcription is pasted into Pi's editor.
 
-Pi Dictation supports OpenAI audio transcription and arbitrary local transcription commands. Recorder and transcriber processes are isolated, bounded, and cleaned up on cancellation or session shutdown.
+Pi Dictation supports OpenAI audio transcription and arbitrary local transcription commands. Failed or cancelled work does not leave background commands running or consuming resources indefinitely: recording and transcription run in separate, bounded process groups that are terminated on cancellation or session shutdown.
 
 ![Pi Dictation demo](https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.gif)
 
