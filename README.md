@@ -41,7 +41,7 @@ On macOS, Pi Dictation records from the system-default audio input and macOS may
    export OPENAI_API_KEY=...
    ```
 
-   To keep the key in the system keyring, see [Configure OpenAI transcription](#configure-openai-transcription). To keep audio on your machine, see [Configure a local transcription command](#configure-a-local-transcription-command).
+   To retrieve the key from a credential manager instead, see [Configure OpenAI transcription](#configure-openai-transcription). To keep audio on your machine, see [Configure a local transcription command](#configure-a-local-transcription-command).
 
 4. Restart Pi or run `/reload`.
 5. Run `/dictate-config` to review the Recorder and settings. On macOS, change the shortcut to `f8` because Mac keyboards commonly lack an Insert key, then run `/reload` again.
@@ -77,9 +77,11 @@ The doctor checks Node.js, Pi, Linux or macOS support, configuration validity, r
 
 ## Configure OpenAI transcription
 
-To avoid storing `OPENAI_API_KEY` in shell configuration, save the key in the system keyring.
+Pi Dictation's transcription credential is separate from Pi's model-provider login. Running `/login` or having an OpenAI or ChatGPT model available does not configure audio transcription. Set `OPENAI_API_KEY`, `PI_DICTATION_OPENAI_API_KEY`, or `openaiApiKeyCommand` before using this backend.
 
-Linux with Secret Service:
+For stronger protection at rest, `openaiApiKeyCommand` can retrieve the key from a credential manager. Any trusted, non-interactive command that writes only the key to standard output can be used.
+
+Linux desktop with `secret-tool` and a running, unlocked Secret Service keyring:
 
 ```bash
 secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-dictation
@@ -93,6 +95,8 @@ secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-di
   "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
 }
 ```
+
+Secret Service is often unavailable on headless or SSH-only Linux hosts. Use an injected environment variable or another non-interactive credential-manager command in those environments.
 
 macOS Keychain (the command prompts for the key without placing it in shell history):
 
@@ -141,7 +145,7 @@ You can also start from [`pi-dictation.example.json`](./pi-dictation.example.jso
 | `transcribeCommand` | unset | Local transcription command |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI-compatible transcription model |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
-| `openaiApiKey` | unset | API key; prefer an environment variable or keyring command |
+| `openaiApiKey` | unset | API key stored as plaintext in the private configuration file; prefer an environment variable or credential-manager command |
 | `openaiApiKeyCommand` | unset | Command that prints the API key |
 | `timeoutMs` | `120000` | Transcription timeout; accepts `1000`–`3600000` ms |
 | `maxRecordingMs` | `600000` | Graceful-stop threshold from `1000`–`3600000` ms, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |

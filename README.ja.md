@@ -41,7 +41,7 @@ macOSでは、システムのデフォルト音声入力から録音します。
    export OPENAI_API_KEY=...
    ```
 
-   APIキーをシステムのキーチェーンに保存する場合は、[OpenAI文字起こしの設定](#openai文字起こしの設定)を参照してください。音声を自分のマシン内だけで処理する場合は、[ローカル文字起こしコマンドの設定](#ローカル文字起こしコマンドの設定)を参照してください。
+   認証情報管理ツールからAPIキーを取得する場合は、[OpenAI文字起こしの設定](#openai文字起こしの設定)を参照してください。音声を自分のマシン内だけで処理する場合は、[ローカル文字起こしコマンドの設定](#ローカル文字起こしコマンドの設定)を参照してください。
 
 4. Piを再起動するか `/reload` を実行します。
 5. `/dictate-config` を実行し、Recorderと設定を確認します。MacのキーボードにはInsertキーがないことが多いため、macOSではショートカットを `f8` に変更し、もう一度 `/reload` を実行します。
@@ -77,9 +77,11 @@ doctorは、Node.js、Pi、LinuxまたはmacOSの対応状況、設定の妥当�
 
 ## OpenAI文字起こしの設定
 
-`OPENAI_API_KEY` をシェル設定に保存したくない場合は、システムのキーチェーンに保存します。
+Pi Dictationの文字起こし用認証情報は、Piのモデルプロバイダー用ログインとは別です。`/login` を実行したことやOpenAIまたはChatGPTモデルを利用できることだけでは、音声文字起こしは設定されません。このバックエンドを使う前に、`OPENAI_API_KEY`、`PI_DICTATION_OPENAI_API_KEY`、または `openaiApiKeyCommand` を設定してください。
 
-LinuxのSecret Serviceを使う場合：
+APIキーをより安全に保存するには、`openaiApiKeyCommand` を使って認証情報管理ツールから取得できます。標準出力にAPIキーだけを出力する、信頼できる非対話コマンドを使用してください。
+
+`secret-tool` と、起動してロック解除されたSecret ServiceキーチェーンがあるLinuxデスクトップの場合：
 
 ```bash
 secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-dictation
@@ -93,6 +95,8 @@ secret-tool store --label="Pi Dictation OpenAI key" service openai account pi-di
   "openaiApiKeyCommand": "secret-tool lookup service openai account pi-dictation"
 }
 ```
+
+ヘッドレス環境やSSHだけで利用するLinuxホストでは、Secret Serviceを利用できないことがよくあります。その場合は、環境変数でAPIキーを渡すか、別の非対話型の認証情報管理コマンドを使用してください。
 
 macOSのキーチェーンを使う場合（キーは対話的に入力するため、シェル履歴に残りません）：
 
@@ -141,7 +145,7 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 | `transcribeCommand` | 未設定 | ローカル文字起こしコマンド |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI互換の文字起こしモデル |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI互換APIのベースURL |
-| `openaiApiKey` | 未設定 | APIキー。環境変数またはキーチェーンコマンドを推奨 |
+| `openaiApiKey` | 未設定 | 非公開の設定ファイルに平文で保存されるAPIキー。環境変数または認証情報管理コマンドを推奨 |
 | `openaiApiKeyCommand` | 未設定 | APIキーを出力するコマンド |
 | `timeoutMs` | `120000` | 文字起こしのタイムアウト。`1000`〜`3600000` ミリ秒 |
 | `maxRecordingMs` | `600000` | 正常終了を試みるまでの録音時間。`1000`〜`3600000` ミリ秒。Piが突然終了した場合も適用され、終了しないプロセスはさらに5秒以内に強制終了 |
