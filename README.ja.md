@@ -121,23 +121,22 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 
 ## 設定
 
-設定ファイルは `~/.pi/agent/pi-dictation.json` にあります。PiのTUIで `/dictate-config` を実行すると、ローカルRecorderまたは設定済みのBridge Recorderを選択し、ショートカット、言語、OpenAIモデル、時間制限、スピナーを編集できます。Recorderの選択は非破壊的です。両方のプロファイルが保持され、自動フォールバックは行われません。Bridgeのインストールと削除は、引き続き `pi-dictation bridge` が担います。設定画面には、APIキー、Bridgeの接続情報、カスタムコマンドの内容は表示されません。画面で編集しないフィールドは保持され、環境変数による上書きが示されます。保存時は `0600` 権限でアトミックに書き込みます。ショートカットの変更には `/reload` または再起動が必要です。それ以外の変更は、次の録音から反映されます。
+`/dictate-config` を実行すると、ローカル録音またはBridge録音を選択し、ショートカット、言語、OpenAIモデル、時間制限、スピナーを編集できます。ショートカットの変更には `/reload` または再起動が必要です。それ以外の変更は、次の録音から反映されます。
 
-[`pi-dictation.example.json`](./pi-dictation.example.json) から設定を始めることもできます。JSON Schemaに対応したエディターでは、`$schema` フィールドによる入力補完と検証を利用できます。未知のフィールドや不正な値は、外部処理を開始する前に拒否されます。
+`/dictate-config` にない項目は、`~/.pi/agent/pi-dictation.json` を編集します。[`pi-dictation.example.json`](./pi-dictation.example.json) には、エディターの入力補完と検証に使えるJSON Schemaが含まれています。
 
 | フィールド | デフォルト | 用途 |
 | --- | --- | --- |
 | `shortcut` | `insert` | 音声入力を切り替えるPiショートカット |
 | `language` | 未設定 | OpenAIバックエンドに渡す言語 |
-| `recorders` | `{ "selected": "local" }` | 保存されたRecorderの選択と、任意の `local` およびインストーラー管理の `bridge` プロファイル。ローカルの `command` は任意で、`{file}` を非公開の一時WAVパスとして使用 |
-| `recorder` | 未設定 | 旧形式の単一Recorder設定。次に `/dictate-config` で保存すると移行 |
+| `recorders` | `{ "selected": "local" }` | ローカル録音またはBridge録音を選択し、必要に応じてローカル録音コマンドを設定 |
 | `transcribeCommand` | 未設定 | ローカル文字起こしコマンド |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI互換の文字起こしモデル |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI互換APIのベースURL |
 | `openaiApiKey` | 未設定 | 非公開の設定ファイルに平文で保存されるAPIキー。環境変数または認証情報管理コマンドを推奨 |
 | `openaiApiKeyCommand` | 未設定 | APIキーを出力するコマンド |
 | `timeoutMs` | `120000` | 文字起こしのタイムアウト。`1000`〜`3600000` ミリ秒 |
-| `maxRecordingMs` | `600000` | 正常終了を試みるまでの録音時間。`1000`〜`3600000` ミリ秒。Piが突然終了した場合も適用され、終了しないプロセスはさらに5秒以内に強制終了 |
+| `maxRecordingMs` | `600000` | 最大録音時間。`1000`〜`3600000` ミリ秒 |
 | `spinner` | `arc` | `cli-spinners` のアニメーション名 |
 
 Recorderの選択とプロファイルには環境変数による上書きがありません。それ以外の実行時設定には、次の環境変数も使えます。

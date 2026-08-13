@@ -121,23 +121,22 @@ The command must write only the transcription to standard output.
 
 ## Configuration
 
-Configuration lives at `~/.pi/agent/pi-dictation.json`. Run `/dictate-config` to choose the Local Recorder or one configured Bridge Recorder and to edit the shortcut, language, OpenAI model, duration limits, and spinner through Pi's TUI. Recorder selection is non-destructive: both profiles remain configured, no automatic fallback occurs, and Bridge installation or removal remains the responsibility of `pi-dictation bridge`. The settings screen never displays API keys, Bridge connection details, or custom command contents; it preserves fields it does not edit, identifies environment overrides, and saves atomically with `0600` permissions. Shortcut changes require `/reload` or a restart; other saved changes apply to the next recording.
+Run `/dictate-config` to choose Local or Bridge recording and edit the shortcut, language, OpenAI model, duration limits, and spinner. Shortcut changes require `/reload` or a restart; other changes apply to the next recording.
 
-You can also start from [`pi-dictation.example.json`](./pi-dictation.example.json); editors that support JSON Schema can use its `$schema` field for completion and validation. Unknown fields and invalid values are rejected before external work starts.
+For settings not available in `/dictate-config`, edit `~/.pi/agent/pi-dictation.json`. You can start from [`pi-dictation.example.json`](./pi-dictation.example.json), which includes a JSON Schema for editor completion and validation.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
 | `shortcut` | `insert` | Pi shortcut used to toggle dictation |
 | `language` | unset | Language passed to the OpenAI backend |
-| `recorders` | `{ "selected": "local" }` | Persisted Recorder selection plus optional `local` and installer-managed `bridge` profiles; local `command` is optional and uses `{file}` as the private staging WAV path |
-| `recorder` | unset | Legacy single-Recorder configuration, migrated when `/dictate-config` next saves settings |
+| `recorders` | `{ "selected": "local" }` | Select Local or Bridge recording and configure an optional Local Recorder command |
 | `transcribeCommand` | unset | Local transcription command |
 | `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI-compatible transcription model |
 | `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
 | `openaiApiKey` | unset | API key stored as plaintext in the private configuration file; prefer an environment variable or credential-manager command |
 | `openaiApiKeyCommand` | unset | Command that prints the API key |
 | `timeoutMs` | `120000` | Transcription timeout; accepts `1000`–`3600000` ms |
-| `maxRecordingMs` | `600000` | Graceful-stop threshold from `1000`–`3600000` ms, including after an abrupt Pi exit; stubborn processes are force-killed within 5 more seconds |
+| `maxRecordingMs` | `600000` | Maximum recording duration; accepts `1000`–`3600000` ms |
 | `spinner` | `arc` | `cli-spinners` animation name |
 
 Recorder selection and profiles have no environment override. The remaining runtime settings can also be set with environment variables:
