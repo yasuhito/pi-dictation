@@ -555,6 +555,20 @@ test("withStream times out after no stream progress", async () => {
   assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" });
 });
 
+test("withStream does not invoke its consumer after an expired stream deadline", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness();
+  let invocations = 0;
+  await harness.withStream({
+    timing: {
+      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
+      stream: { kind: "absolute", at: Date.now() - 1 }, end: { kind: "no-progress", timeoutMs: 100 },
+    },
+  }, async () => { invocations += 1; }).catch(() => {});
+  assert.equal(invocations, 0);
+});
+
 test("withStream closes the connection before settling after timeout", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ noStreamEnd: true });
