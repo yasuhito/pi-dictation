@@ -291,6 +291,14 @@ for (const [label, challengeBytes] of [
   });
 }
 
+test("the Bridge protocol rejects bytes coalesced after the challenge frame", async () => {
+  const { createRequestHarness, frame } = await loadFactory();
+  const challenge = frame({ type: "challenge", challenge: Buffer.alloc(32, 23).toString("base64") });
+  const error = await createRequestHarness({ challengeBytes: Buffer.concat([challenge, Buffer.from([0])]) })
+    .request().catch((value) => value);
+  assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "malformed", stage: "challenge" });
+});
+
 test("the Bridge protocol distinguishes early challenge EOF as transport failure", async () => {
   const { createRequestHarness } = await loadFactory();
   const error = await createRequestHarness({ challengeBytes: Buffer.from([0, 0]), challengeEof: true })
