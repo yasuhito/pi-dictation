@@ -473,47 +473,75 @@ test("authenticated-frame streams expose individually authenticated strict JSON 
   assert.deepEqual(response.value, payloads);
 });
 
-test("authenticated-frame streams permit only one iterator", async () => {
+test("authenticated-frame streams permit only one iterator", async (t) => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ streamPayloads: [{ value: 1 }] });
   const response = await harness.withStream({ kind: "authenticated-frames" }, async ({ frames }) => {
     const first = frames[Symbol.asyncIterator]();
     const duplicate = Promise.resolve().then(() => frames[Symbol.asyncIterator]()).then((iterator) => iterator.next());
-    const results = await Promise.allSettled([first.next(), duplicate]);
-    return results.map((result) => result.status === "fulfilled"
-      ? result
-      : { status: result.status, reason: { name: result.reason.name, message: result.reason.message } });
+    return Promise.allSettled([first.next(), duplicate]);
   });
-  assert.deepEqual(response.value, [
-    { status: "fulfilled", value: { value: { value: 1 }, done: false } },
-    { status: "rejected", reason: { name: "TypeError", message: "authenticated frames may be iterated once" } },
-  ]);
+  await t.test("the first iterator reads the authenticated frame", () => {
+    assert.deepEqual(response.value[0], { status: "fulfilled", value: { value: { value: 1 }, done: false } });
+  });
+  await t.test("a duplicate iterator is rejected", () => {
+    const result = response.value[1];
+    assert.deepEqual(
+      { status: result.status, name: result.reason.name, message: result.reason.message },
+      { status: "rejected", name: "TypeError", message: "authenticated frames may be iterated once" },
+    );
+  });
 });
 
-test("withStream settles an abandoned authenticated-frame read before returning", async () => {
+test("withStream settles an abandoned authenticated-frame read before returning", async (t) => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ noStreamEnd: true });
   let pending;
   let readSettled = false;
-  const timing = {
-    connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-    requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-    stream: { kind: "no-progress", timeoutMs: 10 }, end: { kind: "no-progress", timeoutMs: 100 },
-  };
-  const outcome = await harness.withStream({ kind: "authenticated-frames", timing }, async ({ frames }) => {
+  const response = await harness.withStream({ kind: "authenticated-frames" }, async ({ frames }) => {
     pending = frames[Symbol.asyncIterator]().next();
     pending.then(() => { readSettled = true; }, () => { readSettled = true; });
     return "done";
-  }).then((response) => ({ status: response.status }), (error) => failureShape(error));
+  });
   const settledBeforeReturn = readSettled;
   const readOutcome = await pending.then(
     () => ({ status: "fulfilled" }),
     (error) => failureShape(error),
   );
-  assert.deepEqual({ outcome, settledBeforeReturn, readOutcome }, {
-    outcome: { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" },
-    settledBeforeReturn: true,
-    readOutcome: { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" },
+  await t.test("preserves the completed consumer result", () => {
+    assert.equal(response.value, "done");
+  });
+  await t.test("settles the outstanding read before returning", () => {
+    assert.equal(settledBeforeReturn, true);
+  });
+  await t.test("releases the outstanding read by closing the transport", () => {
+    assert.deepEqual(readOutcome, { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" });
+  });
+});
+
+test("withStream settles an abandoned binary read before returning", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ noStreamEnd: true });
+  let pending;
+  let readSettled = false;
+  const outcome = await harness.withStream({}, async ({ bytes }) => {
+    pending = bytes.readExactly(1).next();
+    pending.then(() => { readSettled = true; }, () => { readSettled = true; });
+    return "done";
+  }).catch((error) => failureShape(error));
+  const settledBeforeReturn = readSettled;
+  const readOutcome = await pending.then(
+    () => ({ status: "fulfilled" }),
+    (error) => failureShape(error),
+  );
+  await t.test("rejects the incomplete declared read", () => {
+    assert.deepEqual(outcome, { name: "BridgeProtocolFailure", kind: "malformed", stage: "stream" });
+  });
+  await t.test("settles the outstanding read before returning", () => {
+    assert.equal(settledBeforeReturn, true);
+  });
+  await t.test("releases the outstanding read by closing the transport", () => {
+    assert.deepEqual(readOutcome, { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" });
   });
 });
 
@@ -610,6 +638,28 @@ test("withStream does not invoke its consumer after an expired stream deadline",
       stream: { kind: "absolute", at: Date.now() - 1 }, end: { kind: "no-progress", timeoutMs: 100 },
     },
   }, async () => { invocations += 1; }).catch(() => {});
+  assert.equal(invocations, 0);
+});
+
+test("withStream rechecks an absolute deadline before dispatching its consumer", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness();
+  const realNow = Date.now;
+  const deadline = realNow() + 1_000;
+  let clockReads = 0;
+  let invocations = 0;
+  Date.now = () => clockReads++ === 0 ? deadline - 1 : deadline;
+  try {
+    await harness.withStream({
+      timing: {
+        connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+        requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
+        stream: { kind: "absolute", at: deadline }, end: { kind: "no-progress", timeoutMs: 100 },
+      },
+    }, async () => { invocations += 1; }).catch(() => {});
+  } finally {
+    Date.now = realNow;
+  }
   assert.equal(invocations, 0);
 });
 
