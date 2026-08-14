@@ -56,6 +56,28 @@ async function harness(mode = "valid", credentialMetadata = {}) {
 
 runRecorderContract("bridge recording", () => harness());
 
+test("the Bridge Recorder routes ordinary exchanges through the shared request seam", async () => {
+  const instance = await harness();
+  const operations = [];
+  try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
+    const { checkBridgeRecorder, createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const protocol = {
+      request(options) {
+        operations.push(options.operation);
+        return sharedProtocol.request(options);
+      },
+    };
+    await checkBridgeRecorder(instance.config, 2000, protocol);
+    const recorder = createBridgeRecorder(instance.config, protocol);
+    const stopped = await recorder.start(instance.startOptions);
+    await stopped.stop();
+    const cancelled = await recorder.start(instance.startOptions);
+    await cancelled.cancel();
+    assert.deepEqual([...new Set(operations)].sort(), ["acknowledge", "cancel", "health", "start", "status", "stop"]);
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge health check reports an authenticated available input", async () => {
   const instance = await harness();
   try {

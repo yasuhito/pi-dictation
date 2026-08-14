@@ -3,6 +3,12 @@ import { constants } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import net, { type Socket } from "node:net";
+import {
+  BridgeProtocolFailure,
+  request as sharedRequest,
+  type BridgeProtocolRequest,
+  type JsonObject,
+} from "../lib/bridge-protocol.mjs";
 import type { BridgeRecorderConfig } from "./config.js";
 import type { LevelEvent, Recorder, RecorderStartOptions, Recording } from "./recorder.js";
 import { RecorderError, validatePcm16MonoWav } from "./recorder.js";
@@ -20,6 +26,9 @@ const FINALIZATION_POLL_MS = 25;
 
 type Credential = { id: string; secret: Buffer; createdAt?: string };
 type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
+type BridgeRequest = (options: BridgeProtocolRequest) => ReturnType<typeof sharedRequest>;
+type BridgeProtocol = { request: BridgeRequest };
+const productionBridgeProtocol: BridgeProtocol = { request: sharedRequest };
 type ResponseFrame = {
   status: ResponseStatus;
   payload: unknown;
@@ -41,10 +50,14 @@ class BridgeResponseError extends Error {
   constructor(readonly status: ResponseStatus, readonly payload: unknown) { super(status); }
 }
 
-function abortError(signal?: AbortSignal): Error {
-  if (signal?.reason instanceof BridgeOutcomeUnknownError || signal?.reason instanceof BridgeTransportError ||
-      signal?.reason instanceof RecorderError) return signal.reason;
+function abortReason(reason: unknown): Error {
+  if (reason instanceof BridgeOutcomeUnknownError || reason instanceof BridgeTransportError ||
+      reason instanceof RecorderError) return reason;
   return new RecorderError("cancelled");
+}
+
+function abortError(signal?: AbortSignal): Error {
+  return abortReason(signal?.reason);
 }
 
 function exactObject(value: unknown, keys: string[]): value is Record<string, unknown> {
@@ -370,40 +383,63 @@ async function withTransportRetries<T>(attempt: () => Promise<T>): Promise<T> {
   throw lastError;
 }
 
-async function requestJson(
+function recorderRequestFailure(error: unknown): unknown {
+  if (!(error instanceof BridgeProtocolFailure)) return error;
+  if (error.kind === "cancelled") return abortReason(error.cause);
+  if (error.kind === "malformed" || error.kind === "authentication") {
+    return new BridgeProtocolError(undefined, { cause: error });
+  }
+  if (error.kind === "transport" && error.stage === "connect" && error.cause instanceof Error) {
+    return error.cause;
+  }
+  return new BridgeTransportError(error.stage === "challenge" ? "authentication" : "operation", { cause: error });
+}
+
+async function sharedRequestJson(
   config: BridgeRecorderConfig,
   credential: Credential,
   operation: string,
-  payload: unknown,
-  signal?: AbortSignal,
-  requestId = randomUUID(),
-  timeoutMs = CONTROL_TIMEOUT_MS
+  payload: JsonObject,
+  signal: AbortSignal = new AbortController().signal,
+  requestId: string = randomUUID(),
+  timeoutMs = CONTROL_TIMEOUT_MS,
+  protocol: BridgeProtocol = productionBridgeProtocol
 ): Promise<unknown> {
   const deadline = Date.now() + timeoutMs;
-  const deadlineController = new AbortController();
-  const timer = setTimeout(() => deadlineController.abort(new BridgeTransportError()), timeoutMs);
-  timer.unref?.();
-  const requestSignal = signal ? AbortSignal.any([signal, deadlineController.signal]) : deadlineController.signal;
-  try {
-    return await withTransportRetries(async () => {
-      const remaining = Math.max(1, deadline - Date.now());
-      const response = await authenticatedRequest(config, credential, requestId, operation, payload, requestSignal, remaining);
-      try {
-        await response.reader.requireEnd();
-        if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
-        return response.payload;
-      } finally { response.socket.destroy(); }
-    });
-  } finally { clearTimeout(timer); }
+  return withTransportRetries(async () => {
+    try {
+      await inspectPrivateEndpoint(config);
+      const connectDeadline = Math.min(deadline, Date.now() + CONTROL_TIMEOUT_MS);
+      const response = await protocol.request({
+        endpoint: config.endpoint,
+        credential,
+        requestId,
+        operation,
+        payload,
+        timing: {
+          connect: { kind: "absolute", at: connectDeadline },
+          challenge: { kind: "absolute", at: deadline },
+          requestWrite: { kind: "absolute", at: deadline },
+          response: { kind: "absolute", at: deadline },
+        },
+        signal,
+      });
+      if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
+      return response.payload;
+    } catch (error) {
+      throw recorderRequestFailure(error);
+    }
+  });
 }
 
 export async function checkBridgeRecorder(
   config: BridgeRecorderConfig,
-  timeoutMs = 2000
+  timeoutMs = 2000,
+  protocol: BridgeProtocol = productionBridgeProtocol
 ): Promise<boolean> {
   try {
     const credential = await readCredential(config.credentialFile);
-    const payload = await requestJson(config, credential, "health", {}, undefined, randomUUID(), timeoutMs);
+    const payload = await sharedRequestJson(config, credential, "health", {}, undefined, randomUUID(), timeoutMs, protocol);
     return exactObject(payload, ["permission", "defaultInputAvailable"]) &&
       (payload as Record<string, unknown>).permission === "authorized" &&
       (payload as Record<string, unknown>).defaultInputAvailable === true;
@@ -572,7 +608,19 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
   });
 }
 
-export function createBridgeRecorder(config: BridgeRecorderConfig): Recorder {
+export function createBridgeRecorder(
+  config: BridgeRecorderConfig,
+  protocol: BridgeProtocol = productionBridgeProtocol
+): Recorder {
+  const requestJson = (
+    requestConfig: BridgeRecorderConfig,
+    credential: Credential,
+    operation: string,
+    payload: JsonObject,
+    signal?: AbortSignal,
+    requestId?: string,
+    timeoutMs?: number
+  ) => sharedRequestJson(requestConfig, credential, operation, payload, signal, requestId, timeoutMs, protocol);
   return {
     async start(options: RecorderStartOptions): Promise<Recording> {
       if (options.signal.aborted) throw new RecorderError("cancelled");
