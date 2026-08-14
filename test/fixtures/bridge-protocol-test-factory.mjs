@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { request } from "../../lib/bridge-protocol.mjs";
+import { request, withStream } from "../../lib/bridge-protocol.mjs";
 
 const TEST_ADAPTER = Symbol.for("pi-dictation.bridge-protocol.test-adapter");
 const VERSION = 3;
@@ -42,9 +42,21 @@ export function createRequestHarness(overrides = {}) {
       if (overrides.challengeEof) enqueue(null);
       const connection = {
         connected: overrides.connect ?? Promise.resolve(),
-        read() {
-          if (queue.length > 0) return Promise.resolve(queue.shift());
-          return new Promise((resolve) => waiters.push(resolve));
+        read(maxBytes) {
+          if (queue.length > 0) {
+            const chunk = queue.shift();
+            if (chunk !== null && maxBytes !== undefined && chunk.length > maxBytes) {
+              queue.unshift(chunk.subarray(maxBytes));
+              return Promise.resolve(chunk.subarray(0, maxBytes));
+            }
+            return Promise.resolve(chunk);
+          }
+          return new Promise((resolve) => waiters.push((chunk) => {
+            if (chunk !== null && maxBytes !== undefined && chunk.length > maxBytes) {
+              queue.unshift(chunk.subarray(maxBytes));
+              resolve(chunk.subarray(0, maxBytes));
+            } else resolve(chunk);
+          }));
         },
         write(bytes) {
           if (overrides.write) return overrides.write(bytes);
@@ -70,10 +82,29 @@ export function createRequestHarness(overrides = {}) {
             payload: overrides.responsePayloadEncoding ?? responsePayload.toString("base64"),
             hmac: overrides.responseHmac ?? responseTag.toString("hex"),
           });
-          const output = overrides.trailingBytes ? Buffer.concat([response, overrides.trailingBytes]) : response;
-          const chunks = overrides.fragmentResponse ? [...output].map((byte) => Buffer.from([byte])) : [output];
+          let streamBytes = overrides.binaryBytes ?? Buffer.alloc(0);
+          if (overrides.streamPayloads) {
+            streamBytes = Buffer.concat(overrides.streamPayloads.map((value, streamSequence) => {
+              const eventBytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+              const eventTag = tag(credential.secret, [
+                "stream", VERSION, responseVersion, challenge, credential.id,
+                requestMessage.requestId, streamSequence, eventBytes,
+              ]);
+              const message = {
+                type: "level-event", version: responseVersion, requestId: requestMessage.requestId,
+                streamSequence, payload: eventBytes.toString("base64"), hmac: eventTag.toString("hex"),
+              };
+              return frame(overrides.mutateStreamFrame?.(message, streamSequence) ?? message);
+            }));
+          }
+          if (overrides.streamBytes) streamBytes = overrides.streamBytes;
+          const trailing = overrides.trailingBytes ?? Buffer.alloc(0);
+          const output = Buffer.concat([response, streamBytes, trailing]);
+          const chunks = overrides.fragmentResponse || overrides.fragmentStream
+            ? [...output].map((byte) => Buffer.from([byte]))
+            : [output];
           for (const chunk of chunks) enqueue(chunk);
-          enqueue(null);
+          if (!overrides.noStreamEnd) enqueue(null);
           state.payloadBytes = payloadBytes;
         },
         destroy() {
@@ -90,6 +121,8 @@ export function createRequestHarness(overrides = {}) {
     challenge: { kind: "no-progress", timeoutMs: 100 },
     requestWrite: { kind: "no-progress", timeoutMs: 100 },
     response: { kind: "no-progress", timeoutMs: 100 },
+    stream: { kind: "no-progress", timeoutMs: 100 },
+    end: { kind: "no-progress", timeoutMs: 100 },
   };
   const defaults = {
     endpoint, credential, requestId: randomUUID(), operation: "health", payload: {}, timing,
@@ -98,7 +131,14 @@ export function createRequestHarness(overrides = {}) {
   return {
     state,
     credential,
-    request(options = {}) { return request({ ...defaults, ...options }); },
+    request(options = {}) {
+      const merged = { ...defaults, ...options };
+      const { stream: _stream, end: _end, ...requestTiming } = merged.timing;
+      return request({ ...merged, timing: requestTiming });
+    },
+    withStream(options = {}, consumer = async () => undefined) {
+      return withStream({ ...defaults, kind: "binary", ...options }, consumer);
+    },
   };
 }
 
