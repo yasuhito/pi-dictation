@@ -568,9 +568,9 @@ async function startHealthServer(home, mode = "ok") {
   const script = join(home, "health-server.cjs");
   writeFileSync(script, String.raw`
 const { createHmac, randomBytes, timingSafeEqual } = require("node:crypto");
-const { chmodSync, readFileSync, rmSync } = require("node:fs");
+const { appendFileSync, chmodSync, readFileSync, rmSync } = require("node:fs");
 const net = require("node:net");
-const [credentialPath, socketPath, mode, eventPath] = process.argv.slice(2);
+const [credentialPath, socketPath, mode] = process.argv.slice(2);
 const credential = JSON.parse(readFileSync(credentialPath, "utf8"));
 const secret = Buffer.from(credential.secret, "base64");
 function encode(fields) {
@@ -587,17 +587,17 @@ function frame(value) {
   return Buffer.concat([header, body]);
 }
 const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+  appendFileSync(socketPath + ".connections", "connection\n");
   const challenge = randomBytes(32);
-  const challengeFrame = frame({ type: "challenge", challenge: challenge.toString("base64") });
-  if (mode === "phase-delays") setTimeout(() => socket.write(challengeFrame), 2700);
-  else socket.write(challengeFrame);
+  const sendChallenge = () => socket.write(frame({ type: "challenge", challenge: challenge.toString("base64") }));
+  if (mode === "phase-reset") setTimeout(sendChallenge, 3200);
+  else if (mode !== "challenge-stall") sendChallenge();
   let buffered = Buffer.alloc(0);
   socket.on("data", (chunk) => {
     buffered = Buffer.concat([buffered, chunk]);
     if (buffered.length < 4) return;
     const length = buffered.readUInt32BE(0); if (buffered.length !== length + 4) return;
     const request = JSON.parse(buffered.subarray(4));
-    if (eventPath) require("node:fs").appendFileSync(eventPath, request.operation + ":" + request.requestId + "\n");
     const payload = Buffer.from(request.payload, "base64");
     const expected = tag(["request", 3, challenge, credential.id, request.requestId, "health", payload]);
     const actual = Buffer.from(request.hmac, "hex");
@@ -617,11 +617,15 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       ? Buffer.alloc(32)
       : tag(["response", 3, responseVersion, challenge, credential.id, request.requestId, "health:" + status, responsePayload]);
     const response = frame({ type: "response", version: responseVersion, requestId: request.requestId, status, payload: responsePayload.toString("base64"), hmac: responseTag.toString("hex") });
-    if (mode === "trailing-response") {
+    if (mode === "transport-drop") {
+      socket.destroy();
+    } else if (mode === "trailing-response") {
       socket.write(response);
       setTimeout(() => socket.end(Buffer.from("x")), 10);
-    } else if (mode === "phase-delays") {
-      setTimeout(() => socket.end(response), 2700);
+    } else if (mode === "response-stall") {
+      // The client owns the response-phase deadline.
+    } else if (mode === "phase-reset") {
+      setTimeout(() => socket.end(response), 3200);
     } else {
       socket.end(response);
     }
@@ -633,7 +637,7 @@ server.listen(socketPath, () => { chmodSync(socketPath, 0o600); process.stdout.w
 `);
   const root = join(home, "Library", "Application Support", "pi-dictation", "bridge");
   const socket = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
-  const child = spawn(process.execPath, [script, join(root, "credential.json"), socket, mode, join(home, "health-events.log")], {
+  const child = spawn(process.execPath, [script, join(root, "credential.json"), socket, mode], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   await once(child.stdout, "data");
@@ -662,54 +666,6 @@ test("bridge health authenticates an exact-version request and response over the
     });
     await t.test("reports permission without opening the microphone", () => {
       assert.match(result.stdout, /Microphone permission: authorized/);
-    });
-  } finally {
-    server?.kill();
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("bridge health resets its five-second deadline between authentication phases", async (t) => {
-  const home = temporaryHome();
-  const tools = fakeToolchain(home);
-  let server;
-  try {
-    const installed = runBridge(home, ["install"], { PATH: tools });
-    if (installed.status !== 0) throw new Error(installed.stderr);
-    markPreflightReady(home);
-    server = await startHealthServer(home, "phase-delays");
-    const startedAt = Date.now();
-    const result = runBridge(home, ["health"]);
-    const elapsed = Date.now() - startedAt;
-
-    await t.test("allows the combined challenge and response phases to exceed five seconds", () => {
-      assert.equal(result.status === 0 && elapsed >= 5200 && elapsed < 7000, true, result.stderr);
-    });
-    await t.test("performs one management request without retrying", () => {
-      assert.equal(readFileSync(join(home, "health-events.log"), "utf8").trim().split("\n").length, 1);
-    });
-  } finally {
-    server?.kill();
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("bridge health maps an authenticated non-success status without retrying", async (t) => {
-  const home = temporaryHome();
-  const tools = fakeToolchain(home);
-  let server;
-  try {
-    const installed = runBridge(home, ["install"], { PATH: tools });
-    if (installed.status !== 0) throw new Error(installed.stderr);
-    markPreflightReady(home);
-    server = await startHealthServer(home, "authenticated-busy");
-    const result = runBridge(home, ["health"]);
-
-    await t.test("preserves the existing user-facing status message", () => {
-      assert.match(result.stderr, /The companion rejected health with authenticated status busy\./);
-    });
-    await t.test("does not retry the rejected management request", () => {
-      assert.equal(readFileSync(join(home, "health-events.log"), "utf8").trim().split("\n").length, 1);
     });
   } finally {
     server?.kill();
@@ -794,6 +750,159 @@ test("bridge health rejects any other protocol version", () => {
       rmSync(home, { recursive: true, force: true });
     }
   })();
+});
+
+test("bridge health returns authenticated non-success status without retrying", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "authenticated-busy");
+    const result = runBridge(home, ["health"]);
+    const connectionLog = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock.connections");
+    await t.test("preserves the authenticated CLI status message", () => {
+      assert.match(result.stderr, /The companion rejected health with authenticated status busy\./);
+    });
+    await t.test("opens exactly one management connection", () => {
+      assert.equal(readFileSync(connectionLog, "utf8").trim().split("\n").length, 1);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health does not retry a transient transport failure", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "transport-drop");
+    const result = runBridge(home, ["health"]);
+    const connectionLog = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock.connections");
+    await t.test("preserves the incomplete-response message", () => {
+      assert.match(result.stderr, /closed an incomplete health response/);
+    });
+    await t.test("opens exactly one management connection", () => {
+      assert.equal(readFileSync(connectionLog, "utf8").trim().split("\n").length, 1);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health resets its five-second deadline between challenge and response phases", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "phase-reset");
+    const startedAt = Date.now();
+    const result = runBridge(home, ["health"]);
+    const elapsed = Date.now() - startedAt;
+    await t.test("succeeds when each phase stays within five seconds", () => {
+      assert.equal(result.status, 0, result.stderr);
+    });
+    await t.test("allows total operation time to exceed one phase budget", () => {
+      assert.equal(elapsed >= 6000, true);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health bounds a stalled challenge at its challenge-phase deadline", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "challenge-stall");
+    const startedAt = Date.now();
+    const result = runBridge(home, ["health"]);
+    const elapsed = Date.now() - startedAt;
+    await t.test("preserves the challenge timeout message", () => {
+      assert.equal(result.stderr.trim(), "Error: Authenticated health request timed out.");
+    });
+    await t.test("returns at the five-second challenge bound", () => {
+      assert.equal(elapsed >= 4500 && elapsed < 6000, true);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge health bounds a stalled authenticated response at its response-phase deadline", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  let server;
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    markPreflightReady(home);
+    server = await startHealthServer(home, "response-stall");
+    const startedAt = Date.now();
+    const result = runBridge(home, ["health"]);
+    const elapsed = Date.now() - startedAt;
+    await t.test("preserves the response timeout message", () => {
+      assert.equal(result.stderr.trim(), "Error: Authenticated health request timed out.");
+    });
+    await t.test("returns at the five-second response bound", () => {
+      assert.equal(elapsed >= 4500 && elapsed < 6000, true);
+    });
+  } finally {
+    server?.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the actual npm package loads in Pi extension and native CLI runtime regimes", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-package-load-"));
+  try {
+    const packed = spawnSync("npm", ["pack", "--json", "--pack-destination", directory], {
+      cwd: packageRoot, encoding: "utf8",
+    });
+    if (packed.status !== 0) throw new Error(packed.stderr);
+    const tarball = join(directory, JSON.parse(packed.stdout)[0].filename);
+    const extracted = join(directory, "extracted");
+    mkdirSync(extracted);
+    const unpacked = spawnSync("tar", ["-xzf", tarball, "-C", extracted], { encoding: "utf8" });
+    if (unpacked.status !== 0) throw new Error(unpacked.stderr);
+    const packagedRoot = join(extracted, "package");
+    const extensionSmoke = spawnSync(process.execPath, ["-e", `
+      const { createJiti } = require(${JSON.stringify(require.resolve("jiti"))});
+      createJiti(process.cwd(), { interopDefault: true })
+        .import(${JSON.stringify(join(packagedRoot, "extensions", "pi-dictation.ts"))}, { default: true })
+        .then((value) => process.exit(typeof value === "function" ? 0 : 1), (error) => { console.error(error); process.exit(1); });
+    `], {
+      cwd: packagedRoot, encoding: "utf8", env: { ...process.env, NODE_PATH: join(packageRoot, "node_modules") },
+    });
+    const cliSmoke = spawnSync(process.execPath, [join(packagedRoot, "bin", "pi-dictation.mjs")], {
+      cwd: directory, encoding: "utf8",
+    });
+    await t.test("loads the shipped TypeScript extension through Pi's Jiti regime", () => {
+      assert.equal(extensionSmoke.status, 0, extensionSmoke.stderr);
+    });
+    await t.test("loads the shipped management CLI as native ESM", () => {
+      assert.match(cliSmoke.stdout, /Usage: pi-dictation bridge/);
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("the npm tarball includes the bridge CLI and companion source", async (t) => {

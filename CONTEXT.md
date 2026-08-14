@@ -32,6 +32,10 @@ _Avoid_: Level polling, waveform stream
 A recording whose microphone is attached to a different host from the host running Pi.
 _Avoid_: Remote input, remote microphone
 
+**Bridge protocol**:
+The authenticated communication contract between Pi and the companion, covering message framing, versioning, and operation statuses.
+_Avoid_: Bridge communication, wire format
+
 **Recorder**:
 The module that starts a recording and returns a common handle for stopping it successfully or cancelling it, regardless of where the microphone is attached.
 _Avoid_: Recording command, capture service
