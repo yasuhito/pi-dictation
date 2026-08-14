@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { request } from "../../lib/bridge-protocol.mjs";
+import { request, withStream } from "../../lib/bridge-protocol.mjs";
 
 const TEST_ADAPTER = Symbol.for("pi-dictation.bridge-protocol.test-adapter");
 const VERSION = 3;
@@ -21,6 +21,22 @@ function frameBody(body) {
   return Buffer.concat([header, body]);
 }
 function frame(value) { return frameBody(Buffer.from(JSON.stringify(value))); }
+
+function authenticatedFrame(credential, challenge, requestId, sequence, payload, overrides = {}) {
+  const payloadBytes = overrides.payloadBytes ?? Buffer.from(JSON.stringify(payload));
+  const version = overrides.version ?? VERSION;
+  const streamTag = tag(credential.secret, [
+    "stream", VERSION, version, challenge, credential.id, requestId, sequence, payloadBytes,
+  ]);
+  return frame({
+    type: overrides.type ?? "level-event",
+    version,
+    requestId: overrides.requestId ?? requestId,
+    streamSequence: overrides.sequence ?? sequence,
+    payload: overrides.payloadEncoding ?? payloadBytes.toString("base64"),
+    hmac: overrides.hmac ?? streamTag.toString("hex"),
+  });
+}
 
 export function createRequestHarness(overrides = {}) {
   const credential = { id: randomUUID(), secret: Buffer.alloc(32, 19) };
@@ -70,10 +86,34 @@ export function createRequestHarness(overrides = {}) {
             payload: overrides.responsePayloadEncoding ?? responsePayload.toString("base64"),
             hmac: overrides.responseHmac ?? responseTag.toString("hex"),
           });
-          const output = overrides.trailingBytes ? Buffer.concat([response, overrides.trailingBytes]) : response;
-          const chunks = overrides.fragmentResponse ? [...output].map((byte) => Buffer.from([byte])) : [output];
-          for (const chunk of chunks) enqueue(chunk);
-          enqueue(null);
+          let streamBytes = overrides.streamBytes ?? Buffer.alloc(0);
+          if (overrides.framePayloads) {
+            streamBytes = Buffer.concat(overrides.framePayloads.map((payload, sequence) => authenticatedFrame(
+              credential, challenge, requestMessage.requestId, sequence, payload,
+              sequence === (overrides.frameOverrideSequence ?? -1) ? overrides.frameOverrides : undefined,
+            )));
+          }
+          const suffix = overrides.trailingBytes ?? streamBytes;
+          if (overrides.separateStreamChunks) {
+            enqueue(response);
+            const chunks = overrides.separateStreamChunks;
+            chunks.forEach((chunk, index) => setTimeout(
+              () => enqueue(chunk), overrides.streamDelayMs * (index + 1),
+            ));
+            if (!overrides.noStreamEof) setTimeout(
+              () => enqueue(null), overrides.streamDelayMs * (chunks.length + 1),
+            );
+          } else {
+            const output = suffix.length > 0 ? Buffer.concat([response, suffix]) : response;
+            const chunks = overrides.fragmentResponse ? [...output].map((byte) => Buffer.from([byte])) : [output];
+            if (overrides.streamDelayMs) {
+              chunks.forEach((chunk, index) => setTimeout(() => enqueue(chunk), overrides.streamDelayMs * index));
+              if (!overrides.noStreamEof) setTimeout(() => enqueue(null), overrides.streamDelayMs * chunks.length);
+            } else {
+              for (const chunk of chunks) enqueue(chunk);
+              if (!overrides.noStreamEof) enqueue(null);
+            }
+          }
           state.payloadBytes = payloadBytes;
         },
         destroy() {
@@ -99,7 +139,15 @@ export function createRequestHarness(overrides = {}) {
     state,
     credential,
     request(options = {}) { return request({ ...defaults, ...options }); },
+    withStream(kind, consumer, options = {}) {
+      const streamTiming = {
+        ...timing,
+        stream: { kind: "no-progress", timeoutMs: 100 },
+        end: { kind: "no-progress", timeoutMs: 100 },
+      };
+      return withStream({ ...defaults, kind, timing: streamTiming, ...options }, consumer);
+    },
   };
 }
 
-export { encode, frame, frameBody, tag };
+export { authenticatedFrame, encode, frame, frameBody, tag };
