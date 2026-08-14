@@ -148,6 +148,19 @@ test("the Recorder starts with an install or rotation credential containing crea
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge Recorder preserves the safe audio error for trailing ordinary response bytes", async (t) => {
+  const instance = await harness("extra-start-byte");
+  try {
+    const error = await instance.recorder.start(instance.startOptions).catch((value) => value);
+    await t.test("returns the prior Recorder classification", () => {
+      assert.equal(error.code, "invalid-audio");
+    });
+    await t.test("returns the prior safe message", () => {
+      assert.equal(error.message, "The recorder did not produce a complete PCM16 mono WAV.");
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge Recorder exposes storage reservation exhaustion safely", async () => {
   const instance = await harness("storage-full");
   try {

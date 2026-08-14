@@ -610,6 +610,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       }
       if (request.operation === "fetch" && mode === "extra-fetch-byte" && audio) {
         socket.end(Buffer.concat([response, audio, Buffer.from([1])]));
+      } else if (request.operation === "start" && mode === "extra-start-byte") {
+        socket.end(Buffer.concat([response, Buffer.from([1])]));
       } else socket.end(audio ? Buffer.concat([response, audio]) : response);
     } catch { socket.destroy(); }
   });

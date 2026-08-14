@@ -386,6 +386,10 @@ async function withTransportRetries<T>(attempt: () => Promise<T>): Promise<T> {
 function recorderRequestFailure(error: unknown): unknown {
   if (!(error instanceof BridgeProtocolFailure)) return error;
   if (error.kind === "cancelled") return abortReason(error.cause);
+  if (error.kind === "malformed" && error.stage === "response" &&
+      error.cause instanceof Error && "code" in error.cause && error.cause.code === "ERR_BRIDGE_TRAILING_BYTES") {
+    return new BridgeAudioError(undefined, { cause: error });
+  }
   if (error.kind === "malformed" || error.kind === "authentication") {
     return new BridgeProtocolError(undefined, { cause: error });
   }
