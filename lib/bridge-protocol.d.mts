@@ -30,6 +30,11 @@ export interface RequestTimingPolicy {
   response: TimingPolicy;
 }
 
+export interface StreamTimingPolicy extends RequestTimingPolicy {
+  stream: TimingPolicy;
+  end: TimingPolicy;
+}
+
 export interface BridgeProtocolRequest {
   endpoint: BridgeEndpoint;
   credential: BridgeCredential;
@@ -45,6 +50,29 @@ export interface BridgeProtocolResponse {
   payload: JsonValue;
 }
 
+export interface BridgeProtocolStreamRequest extends Omit<BridgeProtocolRequest, "timing"> {
+  kind: "binary" | "authenticated-frames";
+  timing: StreamTimingPolicy;
+}
+
+export interface BoundedByteSource {
+  readExactly(length: number): AsyncIterable<Uint8Array>;
+}
+
+export interface BinaryStream {
+  metadata: JsonValue;
+  bytes: BoundedByteSource;
+}
+
+export interface AuthenticatedFrameStream {
+  metadata: JsonValue;
+  frames: AsyncIterable<JsonValue>;
+}
+
+export type BridgeProtocolStreamResponse<T> =
+  | { status: Exclude<BridgeProtocolStatus, "ok">; payload: JsonValue }
+  | { status: "ok"; payload: JsonValue; value: T };
+
 export type BridgeProtocolFailureKind = "transport" | "deadline" | "cancelled" | "malformed" | "authentication";
 export type BridgeProtocolFailureStage = "connect" | "challenge" | "request-write" | "response" | "stream";
 
@@ -56,3 +84,11 @@ export class BridgeProtocolFailure extends Error {
 }
 
 export function request(options: BridgeProtocolRequest): Promise<BridgeProtocolResponse>;
+export function withStream<T>(
+  options: BridgeProtocolStreamRequest & { kind: "binary" },
+  consumer: (stream: BinaryStream) => T | Promise<T>,
+): Promise<BridgeProtocolStreamResponse<T>>;
+export function withStream<T>(
+  options: BridgeProtocolStreamRequest & { kind: "authenticated-frames" },
+  consumer: (stream: AuthenticatedFrameStream) => T | Promise<T>,
+): Promise<BridgeProtocolStreamResponse<T>>;
