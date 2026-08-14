@@ -29,6 +29,8 @@
   "files": [
     "bin",
     "extensions",
+    "lib/bridge-protocol.mjs",
+    "lib/bridge-protocol.d.mts",
     "native",
     "docs/bridge-recording-support.md",
     "docs/certification/bridge-recording-template.md",
