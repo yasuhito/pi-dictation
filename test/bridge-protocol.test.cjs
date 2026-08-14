@@ -473,6 +473,50 @@ test("authenticated-frame streams expose individually authenticated strict JSON 
   assert.deepEqual(response.value, payloads);
 });
 
+test("authenticated-frame streams permit only one iterator", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ streamPayloads: [{ value: 1 }] });
+  const response = await harness.withStream({ kind: "authenticated-frames" }, async ({ frames }) => {
+    const first = frames[Symbol.asyncIterator]();
+    const duplicate = Promise.resolve().then(() => frames[Symbol.asyncIterator]()).then((iterator) => iterator.next());
+    const results = await Promise.allSettled([first.next(), duplicate]);
+    return results.map((result) => result.status === "fulfilled"
+      ? result
+      : { status: result.status, reason: { name: result.reason.name, message: result.reason.message } });
+  });
+  assert.deepEqual(response.value, [
+    { status: "fulfilled", value: { value: { value: 1 }, done: false } },
+    { status: "rejected", reason: { name: "TypeError", message: "authenticated frames may be iterated once" } },
+  ]);
+});
+
+test("withStream settles an abandoned authenticated-frame read before returning", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ noStreamEnd: true });
+  let pending;
+  let readSettled = false;
+  const timing = {
+    connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+    requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
+    stream: { kind: "no-progress", timeoutMs: 10 }, end: { kind: "no-progress", timeoutMs: 100 },
+  };
+  const outcome = await harness.withStream({ kind: "authenticated-frames", timing }, async ({ frames }) => {
+    pending = frames[Symbol.asyncIterator]().next();
+    pending.then(() => { readSettled = true; }, () => { readSettled = true; });
+    return "done";
+  }).then((response) => ({ status: response.status }), (error) => failureShape(error));
+  const settledBeforeReturn = readSettled;
+  const readOutcome = await pending.then(
+    () => ({ status: "fulfilled" }),
+    (error) => failureShape(error),
+  );
+  assert.deepEqual({ outcome, settledBeforeReturn, readOutcome }, {
+    outcome: { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" },
+    settledBeforeReturn: true,
+    readOutcome: { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" },
+  });
+});
+
 test("authenticated-frame streams reject recursive duplicate payload keys", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ streamPayloads: [Buffer.from('{"outer":{"x":1,"x":2}}')] });
