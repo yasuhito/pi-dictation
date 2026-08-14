@@ -64,6 +64,31 @@ test("the Bridge health check reports an authenticated available input", async (
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge health deadline starts before authentication and spans transport retries", async (t) => {
+  const instance = await harness("health-slow-drop");
+  try {
+    const { checkBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const startedAt = Date.now();
+    const available = await checkBridgeRecorder(instance.config, 250);
+    const elapsed = Date.now() - startedAt;
+    const requestIds = instance.events()
+      .filter((event) => event.startsWith("health-request:"))
+      .map((event) => event.slice("health-request:".length));
+    await t.test("returns the existing unavailable outcome", () => {
+      assert.equal(available, false);
+    });
+    await t.test("retries within the shared request budget", () => {
+      assert.equal(instance.events().filter((event) => event === "health").length, 2);
+    });
+    await t.test("preserves the ambiguous health request identity", () => {
+      assert.equal(new Set(requestIds).size, 1);
+    });
+    await t.test("bounds authentication and retries from the operation start", () => {
+      assert.equal(elapsed >= 220 && elapsed < 450, true);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("Bridge fetch and SHA-256 buffers remain fixed as WAV length grows", async (t) => {
   const measure = async (mode) => {
     const instance = await harness(mode);
@@ -345,17 +370,90 @@ test("the Bridge recording adapter reapplies the same stop identity during final
 });
 
 for (const operation of ["start", "status", "stop", "acknowledge", "cancel"]) {
-  test(`the Bridge recording adapter retries the same ${operation} operation after a lost response`, async () => {
+  test(`the Bridge recording adapter retries an ambiguous ${operation} within one request budget`, async (t) => {
     const instance = await harness(`drop-${operation}-response`);
     try {
       const recording = await instance.recorder.start(instance.startOptions);
       if (operation === "cancel") await recording.cancel();
       else if (operation !== "start") await recording.stop();
       else await recording.cancel();
-      assert.equal(instance.events().filter((event) => event === operation).length >= 2, true);
+      const requestIds = instance.events()
+        .filter((event) => event.startsWith(`${operation}-request:`))
+        .map((event) => event.slice(`${operation}-request:`.length));
+      await t.test("retries the transport failure", () => {
+        assert.equal(requestIds.length >= 2, true);
+      });
+      await t.test("spans retries with one stable request identity", () => {
+        assert.equal(new Set(requestIds).size, 1);
+      });
     } finally { await instance.cleanup(); }
   });
 }
+
+test("each Bridge control operation keeps one deadline across transport retries", async (t) => {
+  const characterize = async (operation) => {
+    const instance = await harness(`budget-${operation}`);
+    try {
+      const startedAt = Date.now();
+      const recording = await instance.recorder.start(instance.startOptions);
+      if (operation === "start") await recording.cancel();
+      else if (operation === "cancel") await recording.cancel().catch(() => {});
+      else await recording.stop();
+      return Date.now() - startedAt;
+    } finally { await instance.cleanup(); }
+  };
+  const operations = ["start", "status", "stop", "acknowledge", "cancel"];
+  const elapsed = Object.fromEntries(await Promise.all(operations.map(async (operation) => [operation, await characterize(operation)])));
+  const expectedBounds = { start: [4500, 6000], status: [4500, 6000], stop: [7500, 9000], acknowledge: [4500, 6000], cancel: [4500, 6000] };
+  const policy = {
+    start: "start shares its five-second budget across retries",
+    status: "status shares its five-second budget across retries",
+    stop: "stop spans retries beyond five seconds inside the finalization budget",
+    acknowledge: "acknowledge shares its five-second budget across retries",
+    cancel: "cancel shares its five-second budget across retries",
+  };
+  for (const operation of operations) {
+    await t.test(policy[operation], () => {
+      const [minimum, maximum] = expectedBounds[operation];
+      assert.equal(elapsed[operation] >= minimum && elapsed[operation] < maximum, true);
+    });
+  }
+});
+
+for (const status of ["not-found", "request-conflict", "invalid-state", "failed", "busy"]) {
+  test(`the Bridge Recorder does not retry authenticated start status ${status}`, async (t) => {
+    const instance = await harness(`start-status-${status}`);
+    try {
+      const error = await instance.recorder.start(instance.startOptions).catch((value) => value);
+      await t.test("maps the authenticated status to the existing safe outcome", () => {
+        assert.equal(error.code, status === "busy" ? "recorder-busy" : "recording-failed");
+      });
+      await t.test("performs no caller retry", () => {
+        assert.equal(instance.events().filter((event) => event === "start").length, 1);
+      });
+    } finally { await instance.cleanup(); }
+  });
+}
+
+test("the Bridge Recorder does not retry an authenticated version mismatch", async () => {
+  const instance = await harness("version-mismatch");
+  try {
+    await instance.recorder.start(instance.startOptions).catch(() => {});
+    assert.equal(instance.events().filter((event) => event === "start").length, 1);
+  } finally { await instance.cleanup(); }
+});
+
+test("an AbortSignal reason retains the Recorder cancellation classification", async () => {
+  const instance = await harness();
+  const controller = new AbortController();
+  instance.startOptions.signal = controller.signal;
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    controller.abort(new Error("caller cancellation reason"));
+    const error = await recording.stop().catch((value) => value);
+    assert.equal(error.code, "cancelled");
+  } finally { await instance.cleanup(); }
+});
 
 test("a deterministic local fetch write failure does not enter transport recovery", async (t) => {
   const instance = await harness();
@@ -377,13 +475,34 @@ test("a deterministic local fetch write failure does not enter transport recover
   } finally { await instance.cleanup(); }
 });
 
-test("an interrupted Bridge fetch restarts from byte zero", async (t) => {
+test("the Bridge fetch deadline resets when audio transfer makes progress", async (t) => {
+  const instance = await harness("fetch-progress-reset");
+  try {
+    const recording = await instance.recorder.start(instance.startOptions);
+    const startedAt = Date.now();
+    await recording.stop();
+    await t.test("allows total transfer time to exceed one no-progress interval", () => {
+      assert.equal(Date.now() - startedAt >= 11000, true);
+    });
+    await t.test("commits the completed WAV", () => {
+      assert.equal(existsSync(instance.startOptions.destination), true);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("an interrupted Bridge fetch restarts from byte zero within one recovery budget", async (t) => {
   const instance = await harness("fetch-interrupted-once");
   try {
     const recording = await instance.recorder.start(instance.startOptions);
     await recording.stop();
+    const requestIds = instance.events()
+      .filter((event) => event.startsWith("fetch-request:"))
+      .map((event) => event.slice("fetch-request:".length));
     await t.test("retries the fetch operation", () => {
-      assert.equal(instance.events().filter((event) => event === "fetch").length, 2);
+      assert.equal(requestIds.length, 2);
+    });
+    await t.test("spans recovery with the ambiguous fetch identity", () => {
+      assert.equal(new Set(requestIds).size, 1);
     });
     await t.test("commits only the complete recovered WAV", () => {
       assert.equal(existsSync(instance.startOptions.destination), true);

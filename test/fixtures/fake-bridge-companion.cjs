@@ -23,6 +23,8 @@ const droppedResponses = new Set(persisted.droppedResponses || []);
 let activeId = persisted.activeId;
 let unappliedStopFailures = 0;
 let unappliedStopRequestId;
+let slowHealthFailures = 0;
+const budgetResponseCounts = new Map();
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
 const requestReceiptRetentionMs = retentionMs;
 const knownOperations = new Set(["health", "start", "levels", "subscribe-levels", "status", "stop", "fetch", "cancel", "acknowledge"]);
@@ -249,7 +251,11 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
   socket.on("error", () => {});
   socket.once("close", () => sockets.delete(socket));
   const challenge = randomBytes(32);
-  socket.write(frame({ type: "challenge", challenge: challenge.toString("base64") }));
+  const sendChallenge = () => socket.write(frame({ type: "challenge", challenge: challenge.toString("base64") }));
+  if (mode === "health-slow-drop") {
+    const challengeTimer = setTimeout(sendChallenge, 70);
+    challengeTimer.unref();
+  } else sendChallenge();
   let input = Buffer.alloc(0);
   socket.on("data", (chunk) => { input = Buffer.concat([input, chunk]); });
   socket.on("end", () => {
@@ -297,6 +303,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         status = "failed";
       } else if (previousContent && previousContent !== content) {
         status = "request-conflict";
+      } else if (request.operation === "start" && mode.startsWith("start-status-")) {
+        status = mode.slice("start-status-".length);
       } else if (request.version !== protocolVersion || mode === "version-mismatch") {
         status = "version-mismatch";
         responsePayload = { clientVersion: request.version, companionVersion: responseVersion };
@@ -525,6 +533,24 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         if (mode === "level-disconnect") socket.destroy();
         return;
       }
+      if (mode === `budget-${request.operation}`) {
+        const responseCount = (budgetResponseCounts.get(request.operation) ?? 0) + 1;
+        budgetResponseCounts.set(request.operation, responseCount);
+        if (responseCount <= 2) {
+          const budgetTimer = setTimeout(() => {
+            if (responseCount === 1) socket.destroy();
+            else socket.end(response);
+          }, 4000);
+          budgetTimer.unref();
+          return;
+        }
+      }
+      if (request.operation === "health" && mode === "health-slow-drop" && slowHealthFailures < 2) {
+        slowHealthFailures += 1;
+        const delayed = setTimeout(() => socket.destroy(), 70);
+        delayed.unref();
+        return;
+      }
       if (request.operation === "start" && ["lost-start-result-ready", "lost-start-null-status"].includes(mode)) {
         const recording = owned(credential.id, payload);
         if (recording && mode === "lost-start-result-ready") markResultReady(recording);
@@ -534,6 +560,15 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       if (request.operation === "fetch" && mode === "early-eof" && audio) audio = audio.subarray(0, audio.length - 1);
       if (request.operation === "fetch" && mode === "fetch-stall" && audio) {
         socket.write(Buffer.concat([response, audio.subarray(0, 100)]));
+        return;
+      }
+      if (request.operation === "fetch" && mode === "fetch-progress-reset" && audio) {
+        socket.write(response);
+        const midpoint = Math.floor(audio.length / 2);
+        const firstChunkTimer = setTimeout(() => socket.write(audio.subarray(0, midpoint)), 6000);
+        const finalChunkTimer = setTimeout(() => socket.end(audio.subarray(midpoint)), 12000);
+        firstChunkTimer.unref();
+        finalChunkTimer.unref();
         return;
       }
       if (request.operation === "start" && mode === "ambiguous-start-result-ready" && !previous) {
