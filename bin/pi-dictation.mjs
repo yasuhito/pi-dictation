@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHmac, randomBytes, randomUUID, timingSafeEqual, createHash } from "node:crypto";
+import { randomBytes, randomUUID, createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -20,8 +20,8 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import net from "node:net";
 import { fileURLToPath } from "node:url";
+import { BridgeManagementRequestError, companionRequestAt } from "./bridge-management-request.mjs";
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeHostError,
@@ -52,7 +52,6 @@ import {
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
 const APP_NAME = "PiDictationBridge";
-const MAX_FRAME_BYTES = 64 * 1024;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = join(packageRoot, "native", "macos-companion", "PiDictationBridge.swift");
 const watchdogSourcePath = join(packageRoot, "native", "macos-companion", "PiDictationDurationWatchdog.swift");
@@ -545,207 +544,9 @@ async function preflight() {
   }
 }
 
-function encodeAuthFields(fields) {
-  const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0", "utf8")];
-  for (const field of fields) {
-    const value = Buffer.isBuffer(field) ? field : Buffer.from(String(field), "utf8");
-    const length = Buffer.allocUnsafe(4);
-    length.writeUInt32BE(value.length);
-    pieces.push(length, value);
-  }
-  return Buffer.concat(pieces);
-}
-
-function hmac(secret, fields) {
-  return createHmac("sha256", secret).update(encodeAuthFields(fields)).digest();
-}
-
-function canonicalBase64(value, expectedBytes) {
-  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new CliError("The companion sent malformed authenticated protocol data.");
-  }
-  const decoded = Buffer.from(value, "base64");
-  if (decoded.toString("base64") !== value || (expectedBytes !== undefined && decoded.length !== expectedBytes)) {
-    throw new CliError("The companion sent malformed authenticated protocol data.");
-  }
-  return decoded;
-}
-
-function canonicalHex(value, expectedBytes) {
-  if (typeof value !== "string" || value.length !== expectedBytes * 2 || !/^[0-9a-f]+$/.test(value)) {
-    throw new CliError("The companion sent malformed authenticated protocol data.");
-  }
-  return Buffer.from(value, "hex");
-}
-
-function parseStrictJsonText(text) {
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch { throw new CliError("The companion sent malformed authenticated protocol data."); }
-  let index = 0;
-  const whitespace = () => { while (/\s/.test(text[index] || "")) index += 1; };
-  const string = () => {
-    const start = index++;
-    while (index < text.length) {
-      if (text[index] === "\\") index += 2;
-      else if (text[index++] === '"') return JSON.parse(text.slice(start, index));
-    }
-    throw new CliError("The companion sent malformed authenticated protocol data.");
-  };
-  const value = () => {
-    whitespace();
-    if (text[index] === "{") {
-      index += 1; whitespace();
-      const keys = new Set();
-      if (text[index] === "}") { index += 1; return; }
-      while (true) {
-        const key = string();
-        if (keys.has(key)) throw new CliError("The companion sent malformed authenticated protocol data.");
-        keys.add(key); whitespace();
-        if (text[index++] !== ":") throw new CliError("The companion sent malformed authenticated protocol data.");
-        value(); whitespace();
-        if (text[index] === "}") { index += 1; return; }
-        if (text[index++] !== ",") throw new CliError("The companion sent malformed authenticated protocol data.");
-        whitespace();
-      }
-    }
-    if (text[index] === "[") {
-      index += 1; whitespace();
-      if (text[index] === "]") { index += 1; return; }
-      while (true) {
-        value(); whitespace();
-        if (text[index] === "]") { index += 1; return; }
-        if (text[index++] !== ",") throw new CliError("The companion sent malformed authenticated protocol data.");
-      }
-    }
-    if (text[index] === '"') { string(); return; }
-    while (index < text.length && !/[\s,}\]]/.test(text[index])) index += 1;
-  };
-  value(); whitespace();
-  if (index !== text.length) throw new CliError("The companion sent malformed authenticated protocol data.");
-  return parsed;
-}
-
-function parseUtf8Json(bytes) {
-  try { return parseStrictJsonText(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
-  catch (error) {
-    if (error instanceof CliError) throw error;
-    throw new CliError("The companion sent malformed authenticated protocol data.");
-  }
-}
-
-function frame(value) {
-  const payload = Buffer.from(JSON.stringify(value), "utf8");
-  if (payload.length > MAX_FRAME_BYTES) throw new CliError("Bridge protocol frame exceeds its safe limit.");
-  const header = Buffer.allocUnsafe(4);
-  header.writeUInt32BE(payload.length);
-  return Buffer.concat([header, payload]);
-}
-
-function readFrame(socket, timeoutMs = 5000, requireEnd = false) {
-  return new Promise((resolveFrame, reject) => {
-    let buffered = Buffer.alloc(0);
-    let parsed;
-    const timeout = setTimeout(() => finish(new CliError("Authenticated health request timed out.")), timeoutMs);
-    const finish = (error, value) => {
-      clearTimeout(timeout);
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("end", onEnd);
-      socket.off("close", onEnd);
-      error ? reject(error) : resolveFrame(value);
-    };
-    const onError = () => finish(new CliError("The companion Unix socket is unavailable."));
-    const onEnd = () => {
-      if (requireEnd && parsed) return finish(undefined, parsed);
-      finish(new CliError("The companion closed an incomplete health response."));
-    };
-    const onData = (chunk) => {
-      buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.length < 4) return;
-      const length = buffered.readUInt32BE(0);
-      if (length < 2 || length > MAX_FRAME_BYTES) return finish(new CliError("The companion sent an invalid protocol frame."));
-      if (buffered.length < length + 4) return;
-      if (buffered.length !== length + 4) return finish(new CliError("The companion sent trailing protocol bytes."));
-      try {
-        parsed = { value: parseUtf8Json(buffered.subarray(4)), bytes: buffered.subarray(4) };
-        if (!requireEnd) finish(undefined, parsed);
-      } catch {
-        finish(new CliError("The companion sent malformed protocol data."));
-      }
-    };
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("end", onEnd);
-    socket.on("close", onEnd);
-  });
-}
-
 function exactObject(value, keys) {
   return value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
-}
-
-async function companionRequestAt(endpoint, credential, operation, fixedRequestId) {
-  let secret;
-  try {
-    secret = canonicalBase64(credential.secret, 32);
-  } catch {
-    throw new CliError("Refusing invalid bridge credential.");
-  }
-  const socket = endpoint.type === "unix"
-    ? net.createConnection({ path: endpoint.path })
-    : net.createConnection({ host: endpoint.host, port: endpoint.port });
-  try {
-    const challengeMessage = (await readFrame(socket)).value;
-    if (!exactObject(challengeMessage, ["type", "challenge"]) || challengeMessage.type !== "challenge") {
-      throw new CliError("The companion sent an invalid authentication challenge.");
-    }
-    const challenge = canonicalBase64(challengeMessage.challenge, 32);
-    const requestId = fixedRequestId || randomUUID();
-    const payload = Buffer.from("{}", "utf8");
-    const tag = hmac(secret, ["request", BRIDGE_PROTOCOL_VERSION, challenge, credential.id, requestId, operation, payload]);
-    socket.end(frame({
-      type: "request", version: BRIDGE_PROTOCOL_VERSION, credentialId: credential.id,
-      requestId, operation, payload: payload.toString("base64"), hmac: tag.toString("hex"),
-    }));
-    const response = (await readFrame(socket, 5000, true)).value;
-    const statuses = ["ok", "busy", "not-found", "request-conflict", "invalid-state", "failed", "version-mismatch"];
-    if (!exactObject(response, ["type", "version", "requestId", "status", "payload", "hmac"]) ||
-        response.type !== "response" || !Number.isSafeInteger(response.version) || response.version < 1 ||
-        response.requestId !== requestId || !statuses.includes(response.status)) {
-      throw new CliError("The companion returned an invalid authenticated response.");
-    }
-    const responsePayload = canonicalBase64(response.payload);
-    const expected = hmac(secret, ["response", BRIDGE_PROTOCOL_VERSION, response.version, challenge, credential.id,
-      requestId, `${operation}:${response.status}`, responsePayload]);
-    const actual = canonicalHex(response.hmac, expected.length);
-    if (!timingSafeEqual(actual, expected)) {
-      throw new CliError("The companion response could not be authenticated.");
-    }
-    const value = parseUtf8Json(responsePayload);
-    if (response.status === "version-mismatch") {
-      if (!exactObject(value, ["clientVersion", "companionVersion"]) ||
-          value.clientVersion !== BRIDGE_PROTOCOL_VERSION || value.companionVersion !== response.version ||
-          response.version === BRIDGE_PROTOCOL_VERSION) {
-        throw new CliError("The companion returned invalid authenticated version data.");
-      }
-      throw new CliError(`Authenticated protocol mismatch: Pi uses version ${value.clientVersion}; companion uses version ${value.companionVersion}.`);
-    }
-    if (response.version !== BRIDGE_PROTOCOL_VERSION) {
-      throw new CliError("The companion returned invalid authenticated version data.");
-    }
-    if (response.status !== "ok") {
-      const error = new CliError(`The companion rejected ${operation} with authenticated status ${response.status}.`);
-      error.status = response.status;
-      throw error;
-    }
-    return value;
-  } finally {
-    socket.end();
-    socket.destroy();
-  }
 }
 
 async function healthAt(endpoint, credential) {
@@ -1108,7 +909,9 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  const message = error instanceof CliError || error instanceof BridgeHostError ? error.message : "Pi Dictation Bridge failed unexpectedly.";
+  const message = error instanceof CliError || error instanceof BridgeHostError || error instanceof BridgeManagementRequestError
+    ? error.message
+    : "Pi Dictation Bridge failed unexpectedly.";
   console.error(`Error: ${message}`);
   process.exitCode = 1;
 }
