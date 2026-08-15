@@ -224,6 +224,7 @@ async function streamLevels(
   const confirmed = new Map<number, Extract<LevelEvent, { type: "observation" | "unavailable" }>>();
   while (!signal.aborted) {
     let established = false;
+    let terminal = false;
     try {
       await inspectPrivateEndpoint(config);
       const deadline = Date.now() + CONTROL_TIMEOUT_MS;
@@ -258,7 +259,10 @@ async function streamLevels(
         }
         for await (const event of frames) {
           if (!validLevelEvent(event)) throw new BridgeProtocolError();
-          if (event.type === "terminal") return;
+          if (event.type === "terminal") {
+            terminal = true;
+            return;
+          }
           retryDelay = 100;
           const sequence = event.sequence;
           if (sequence > afterSequence + 600) throw new BridgeProtocolError();
@@ -273,6 +277,7 @@ async function streamLevels(
           for (const retained of confirmed.keys()) if (retained < afterSequence - 599) confirmed.delete(retained);
         }
       });
+      if (terminal) return;
       if (response.status === "invalid-state" || response.status === "not-found") return;
       if (response.status !== "ok") throw new BridgeResponseError(response.status, response.payload);
     } catch (caught) {

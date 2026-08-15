@@ -24,6 +24,7 @@ let activeId = persisted.activeId;
 let unappliedStopFailures = 0;
 let unappliedStopRequestId;
 let slowHealthFailures = 0;
+let terminalLevelDelivered = false;
 const budgetResponseCounts = new Map();
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
 const requestReceiptRetentionMs = retentionMs;
@@ -277,6 +278,10 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         require("node:fs").appendFileSync(eventFile, `${request.operation}-at:${Date.now()}\n`);
       }
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
+      if (mode === "terminal-level" && request.operation === "subscribe-levels" && terminalLevelDelivered) {
+        socket.destroy();
+        return;
+      }
       if (mode === "unapplied-stop-retries" && request.operation === "stop") {
         unappliedStopRequestId ??= request.requestId;
         if (request.requestId !== unappliedStopRequestId) {
@@ -530,6 +535,12 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         recording.subscriber = subscriber;
         for (const event of recording.observations ?? []) {
           if (event.sequence > payload.afterSequence) streamEvent(subscriber, event);
+        }
+        if (mode === "terminal-level") {
+          terminalLevelDelivered = true;
+          streamEvent(subscriber, { type: "terminal", state: "finalizing" });
+          socket.end();
+          recording.subscriber = undefined;
         }
         if (mode === "level-disconnect") socket.destroy();
         return;

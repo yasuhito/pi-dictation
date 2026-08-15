@@ -278,6 +278,26 @@ test("the Bridge Level subscription reports observations lost beyond replay", as
   } finally { await instance.cleanup(); }
 });
 
+test("a terminal Level frame ends the subscription loop", async (t) => {
+  const instance = await harness("terminal-level");
+  const events = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => events.push(event) });
+    const deadline = Date.now() + 500;
+    while (!events.some(({ type, state }) => type === "transport" && state === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    const subscriptionCount = instance.events().filter((event) => event === "subscribe-levels").length;
+    await recording.cancel();
+    await t.test("does not resubscribe", () => {
+      assert.equal(subscriptionCount, 1);
+    });
+    await t.test("does not report the next connection as unavailable", () => {
+      assert.equal(events.some(({ type, state }) => type === "transport" && state === "unavailable"), false);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("Level transport failure does not change Bridge recording success", async () => {
   const instance = await harness("level-disconnect");
   try {
