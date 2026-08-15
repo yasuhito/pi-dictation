@@ -16,6 +16,17 @@ function failureShape(error) {
   return { name: error.name, kind: error.kind, stage: error.stage };
 }
 
+function streamTiming({ stream, end = { kind: "no-progress", timeoutMs: 100 } }) {
+  return {
+    connect: { kind: "no-progress", timeoutMs: 100 },
+    challenge: { kind: "no-progress", timeoutMs: 100 },
+    requestWrite: { kind: "no-progress", timeoutMs: 100 },
+    response: { kind: "no-progress", timeoutMs: 100 },
+    stream,
+    end,
+  };
+}
+
 test("the native ESM Bridge protocol request returns an authenticated JSON response", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ responsePayload: { ready: true } });
@@ -542,11 +553,7 @@ test("a stream no-progress deadline interrupts its consumer", async () => {
   const error = await harness.withStream("binary", async ({ bytes }) => {
     for await (const _chunk of bytes.readExactly(1)) { /* consume */ }
   }, {
-    timing: {
-      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-      stream: { kind: "no-progress", timeoutMs: 10 }, end: { kind: "no-progress", timeoutMs: 100 },
-    },
+    timing: streamTiming({ stream: { kind: "no-progress", timeoutMs: 10 } }),
   }).catch((value) => value);
   assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" });
 });
@@ -560,11 +567,7 @@ test("stream progress resets a no-progress deadline", async () => {
   await harness.withStream("binary", async ({ bytes }) => {
     for await (const chunk of bytes.readExactly(3)) received += chunk.toString();
   }, {
-    timing: {
-      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-      stream: { kind: "no-progress", timeoutMs: 50 }, end: { kind: "no-progress", timeoutMs: 100 },
-    },
+    timing: streamTiming({ stream: { kind: "no-progress", timeoutMs: 50 } }),
   });
   assert.equal(received, "abc");
 });
@@ -575,27 +578,24 @@ test("withStream cleans up after a stream deadline", async () => {
   await harness.withStream("binary", async ({ bytes }) => {
     for await (const _chunk of bytes.readExactly(1)) { /* consume */ }
   }, {
-    timing: {
-      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-      stream: { kind: "no-progress", timeoutMs: 10 }, end: { kind: "no-progress", timeoutMs: 100 },
-    },
+    timing: streamTiming({ stream: { kind: "no-progress", timeoutMs: 10 } }),
   }).catch(() => {});
   assert.equal(harness.state.destroyed, 1);
 });
 
-test("an expired absolute stream deadline prevents consumer invocation", async () => {
+test("an expired absolute stream deadline", async (t) => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness();
   let invoked = false;
   const error = await harness.withStream("binary", () => { invoked = true; }, {
-    timing: {
-      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-      stream: { kind: "absolute", at: 0 }, end: { kind: "no-progress", timeoutMs: 100 },
-    },
+    timing: streamTiming({ stream: { kind: "absolute", at: 0 } }),
   }).catch((value) => value);
-  assert.deepEqual({ kind: error.kind, stage: error.stage, invoked }, { kind: "deadline", stage: "stream", invoked: false });
+  await t.test("is classified as a stream deadline", () => {
+    assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" });
+  });
+  await t.test("prevents consumer invocation", () => {
+    assert.equal(invoked, false);
+  });
 });
 
 test("a binary stream applies a distinct end-of-stream deadline", async () => {
@@ -604,11 +604,10 @@ test("a binary stream applies a distinct end-of-stream deadline", async () => {
   const error = await harness.withStream("binary", async ({ bytes }) => {
     for await (const _chunk of bytes.readExactly(1)) { /* consume */ }
   }, {
-    timing: {
-      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
-      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "no-progress", timeoutMs: 100 },
-      stream: { kind: "no-progress", timeoutMs: 100 }, end: { kind: "no-progress", timeoutMs: 10 },
-    },
+    timing: streamTiming({
+      stream: { kind: "no-progress", timeoutMs: 100 },
+      end: { kind: "no-progress", timeoutMs: 10 },
+    }),
   }).catch((value) => value);
   assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" });
 });
