@@ -56,16 +56,21 @@ async function harness(mode = "valid", credentialMetadata = {}) {
 
 runRecorderContract("bridge recording", () => harness());
 
-test("the Bridge Recorder routes ordinary exchanges through the shared request seam", async () => {
+test("the Bridge Recorder routes all exchanges through the shared protocol seam", async (t) => {
   const instance = await harness();
-  const operations = [];
+  const requests = [];
+  const streams = [];
   try {
     const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
     const { checkBridgeRecorder, createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
     const protocol = {
       request(options) {
-        operations.push(options.operation);
+        requests.push(options.operation);
         return sharedProtocol.request(options);
+      },
+      withStream(options, consumer) {
+        streams.push([options.operation, options.kind]);
+        return sharedProtocol.withStream(options, consumer);
       },
     };
     await checkBridgeRecorder(instance.config, 2000, protocol);
@@ -74,7 +79,14 @@ test("the Bridge Recorder routes ordinary exchanges through the shared request s
     await stopped.stop();
     const cancelled = await recorder.start(instance.startOptions);
     await cancelled.cancel();
-    assert.deepEqual([...new Set(operations)].sort(), ["acknowledge", "cancel", "health", "start", "status", "stop"]);
+    await t.test("routes control exchanges through request", () => {
+      assert.deepEqual([...new Set(requests)].sort(), ["acknowledge", "cancel", "health", "start", "status", "stop"]);
+    });
+    await t.test("routes audio and Level streams through withStream", () => {
+      assert.deepEqual([...new Map(streams.map((value) => [value[0], value])).values()].sort(), [
+        ["fetch", "binary"], ["subscribe-levels", "authenticated-frames"],
+      ]);
+    });
   } finally { await instance.cleanup(); }
 });
 
@@ -216,6 +228,20 @@ test("the Bridge Level subscription accepts in-window out-of-order observations"
     }
     await recording.cancel();
     assert.deepEqual(observations.filter(({ type }) => type === "observation").slice(0, 2).map(({ sequence }) => sequence), [1, 0]);
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Level subscription rejects a malformed authenticated frame through the shared seam", async () => {
+  const instance = await harness("malformed-level-authentication");
+  const events = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => events.push(event) });
+    const deadline = Date.now() + 3000;
+    while (!events.some(({ type, state }) => type === "transport" && state === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.equal(events.some(({ type, state }) => type === "transport" && state === "unavailable"), true);
   } finally { await instance.cleanup(); }
 });
 

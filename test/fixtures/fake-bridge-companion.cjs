@@ -214,7 +214,8 @@ function streamEvent(subscriber, event) {
   ]);
   const output = frame({
     type: "level-event", version: protocolVersion, requestId: subscriber.requestId,
-    streamSequence: subscriber.streamSequence, payload: payload.toString("base64"), hmac: hmac.toString("hex"),
+    streamSequence: subscriber.streamSequence, payload: payload.toString("base64"),
+    hmac: mode === "malformed-level-authentication" ? "00".repeat(32) : hmac.toString("hex"),
   });
   subscriber.streamSequence += 1;
   if (!subscriber.socket.write(output)) subscriber.socket.destroy();
