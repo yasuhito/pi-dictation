@@ -94,12 +94,14 @@ for (const [name, kind, stage, code, message] of [
 test("management credentials are rejected before the shared seam connects", async (t) => {
   const { companionRequestAt } = await managementModule();
   let calls = 0;
-  await assert.rejects(
-    companionRequestAt(endpoint, { ...credential, secret: "not-a-secret" }, "health", undefined, async () => {
-      calls += 1;
-      return { status: "ok", payload: {} };
-    }),
-    { message: "Refusing invalid bridge credential." },
-  );
+  await t.test("rejects the invalid credential", async () => {
+    await assert.rejects(
+      companionRequestAt(endpoint, { ...credential, secret: "not-a-secret" }, "health", undefined, async () => {
+        calls += 1;
+        return { status: "ok", payload: {} };
+      }),
+      { message: "Refusing invalid bridge credential." },
+    );
+  });
   await t.test("does not enter the shared seam", () => assert.equal(calls, 0));
 });
