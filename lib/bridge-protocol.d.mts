@@ -21,7 +21,8 @@ export type BridgeProtocolStatus =
 
 export type TimingPolicy =
   | { kind: "absolute"; at: number }
-  | { kind: "no-progress"; timeoutMs: number };
+  | { kind: "no-progress"; timeoutMs: number }
+  | { kind: "phase"; timeoutMs: number };
 
 export interface RequestTimingPolicy {
   connect: TimingPolicy;

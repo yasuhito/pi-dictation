@@ -252,6 +252,37 @@ test("an expired absolute response deadline cannot accept a buffered response", 
   assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "response" });
 });
 
+test("a phase-scoped response deadline bounds the whole phase", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ fragmentResponse: true, streamDelayMs: 20, noStreamEof: true });
+  const startedAt = Date.now();
+  const error = await harness.request({
+    timing: {
+      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "phase", timeoutMs: 150 },
+    },
+  }).catch((value) => value);
+  const elapsed = Date.now() - startedAt;
+  await t.test("is not extended by response progress", () => {
+    assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "response" });
+  });
+  await t.test("expires at its phase budget", () => {
+    assert.equal(elapsed < 600, true);
+  });
+});
+
+test("a phase-scoped response deadline accepts a response within its budget", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness();
+  const response = await harness.request({
+    timing: {
+      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "phase", timeoutMs: 150 },
+    },
+  });
+  assert.deepEqual(response, { status: "ok", payload: { accepted: true } });
+});
+
 test("the Bridge protocol classifies a challenge deadline", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness({ challengeBytes: Buffer.alloc(0) });
