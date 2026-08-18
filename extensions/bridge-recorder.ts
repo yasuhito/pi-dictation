@@ -468,8 +468,10 @@ export function createBridgeRecorder(
               ensureNotCancelled();
               if (Date.now() >= finalizationDeadline) throw new BridgeOutcomeUnknownError();
               try {
+                // The ADR gives `stop` a control deadline inside the finalization budget so that a
+                // slow companion cannot consume the whole window before `status` reconciles the lease.
                 await requestJson(config, credential, "stop", owned, finalizationSignal, stopRequestId,
-                  Math.max(1, finalizationDeadline - Date.now()));
+                  Math.max(1, Math.min(CONTROL_TIMEOUT_MS, finalizationDeadline - Date.now())));
               } catch (error) {
                 if (error instanceof RecorderError || error instanceof BridgeProtocolError || error instanceof BridgeAudioError) throw error;
                 if (error instanceof BridgeResponseError && !["invalid-state", "not-found"].includes(error.status)) throw error;
