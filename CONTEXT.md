@@ -36,6 +36,10 @@ _Avoid_: Remote input, remote microphone
 The authenticated communication contract between Pi and the companion, covering message framing, versioning, and operation statuses.
 _Avoid_: Bridge communication, wire format
 
+**Command bound**:
+The promise that one Bridge management command always returns in finite time and reports every destination it was asked about, even when some destinations are slow or unreachable. It is stated as a property, not as a number of seconds.
+_Avoid_: Timeout, deadline, budget
+
 **Recorder**:
 The module that starts a recording and returns a common handle for stopping it successfully or cancelling it, regardless of where the microphone is attached.
 _Avoid_: Recording command, capture service
