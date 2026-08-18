@@ -545,8 +545,12 @@ test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", { ski
   writeFileSync(script, "const net=require('node:net');const server=net.createServer(s=>s.destroy());server.listen(0,'0.0.0.0',()=>console.log(server.address().port));\n");
   const server = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "inherit"] });
   try {
-    const [chunk] = await once(server.stdout, "data");
-    const endpoint = { type: "tcp", host: "127.0.0.1", port: Number(String(chunk).trim()) };
+    let announced = "";
+    for await (const chunk of server.stdout) {
+      announced += String(chunk);
+      if (announced.includes("\n")) break;
+    }
+    const endpoint = { type: "tcp", host: "127.0.0.1", port: Number(announced.trim()) };
     const credential = { id: "66666666-6666-4666-8666-666666666666", secret: Buffer.alloc(32, 12).toString("base64") };
     const prepared = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
       cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },

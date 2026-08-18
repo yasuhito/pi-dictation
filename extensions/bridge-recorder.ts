@@ -6,13 +6,14 @@ import {
   BridgeProtocolFailure,
   request as sharedRequest,
   withStream as sharedWithStream,
+  type BridgeProtocolStatus,
   type JsonObject,
 } from "../lib/bridge-protocol.mjs";
 import type { BridgeRecorderConfig } from "./config.js";
 import type { LevelEvent, Recorder, RecorderStartOptions, Recording } from "./recorder.js";
 import { RecorderError, validatePcm16MonoWav } from "./recorder.js";
 
-const MAX_FRAME_BYTES = 64 * 1024;
+const AUDIO_LENGTH_SLACK_BYTES = 64 * 1024;
 const CONTROL_TIMEOUT_MS = 5000;
 const FINALIZATION_TIMEOUT_MS = 30_000;
 const FETCH_NO_PROGRESS_TIMEOUT_MS = 10_000;
@@ -23,7 +24,6 @@ const RETRY_ATTEMPTS = 3;
 const FINALIZATION_POLL_MS = 25;
 
 type Credential = { id: string; secret: Buffer; createdAt?: string };
-type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
 type BridgeProtocol = { request: typeof sharedRequest; withStream: typeof sharedWithStream };
 const productionBridgeProtocol: BridgeProtocol = { request: sharedRequest, withStream: sharedWithStream };
 
@@ -36,7 +36,7 @@ class BridgeTransportError extends Error {
 class BridgeOutcomeUnknownError extends Error {}
 class BridgeAudioError extends Error {}
 class BridgeResponseError extends Error {
-  constructor(readonly status: ResponseStatus, readonly payload: unknown) { super(status); }
+  constructor(readonly status: BridgeProtocolStatus, readonly payload: unknown) { super(status); }
 }
 
 function abortReason(reason: unknown): Error {
@@ -396,7 +396,7 @@ export function createBridgeRecorder(
         ? startPayload as Record<string, unknown> : undefined;
       const startIsActive = exactObject(startPayload, ["recordingId", "state"]) &&
         ["recording", "finalizing"].includes(String(startShape?.state));
-      const maximumBytes = Math.ceil(options.maxDurationMs * 32) + MAX_FRAME_BYTES;
+      const maximumBytes = Math.ceil(options.maxDurationMs * 32) + AUDIO_LENGTH_SLACK_BYTES;
       const startIsResultReady = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
         startShape?.state === "result-ready" && Number.isSafeInteger(startShape.length) && Number(startShape.length) >= 44 &&
         Number(startShape.length) <= maximumBytes && typeof startShape.sha256 === "string" &&
@@ -532,7 +532,7 @@ export function createBridgeRecorder(
                   },
                   signal: recoverySignal,
                 }, async ({ metadata, bytes }) => {
-                  const maximumBytes = options.maxDurationMs * 32 + MAX_FRAME_BYTES;
+                  const maximumBytes = options.maxDurationMs * 32 + AUDIO_LENGTH_SLACK_BYTES;
                   if (!Number.isSafeInteger(maximumBytes) ||
                       !exactObject(metadata, ["recordingId", "length", "sha256", "completion"]) || metadata.recordingId !== recordingId ||
                       !Number.isSafeInteger(metadata.length) || Number(metadata.length) < 44 || Number(metadata.length) > maximumBytes ||
