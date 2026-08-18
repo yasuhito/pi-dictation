@@ -4,6 +4,8 @@ import { BridgeProtocolFailure, request as sharedRequest } from "../lib/bridge-p
 const MANAGEMENT_PHASE_TIMEOUT_MS = 5000;
 const PERMISSION_VALUES = ["authorized", "denied", "restricted", "not-determined", "unknown"];
 const productionBridgeProtocol = { request: sharedRequest };
+export const CREDENTIAL_REJECTION =
+  "Refusing invalid bridge credential. Run `pi-dictation bridge install` to generate one.";
 
 export class CliError extends Error {}
 
@@ -16,11 +18,11 @@ function managementSecret(credential) {
   const value = credential?.secret;
   if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0 ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new CliError("Refusing invalid bridge credential.");
+    throw new CliError(CREDENTIAL_REJECTION);
   }
   const decoded = Buffer.from(value, "base64");
   if (decoded.toString("base64") !== value || decoded.length !== 32) {
-    throw new CliError("Refusing invalid bridge credential.");
+    throw new CliError(CREDENTIAL_REJECTION);
   }
   return decoded;
 }
@@ -53,7 +55,7 @@ function managementFailure(error) {
       : "The companion closed an incomplete health response.");
   }
   if (error.stage === "connect") return new CliError("The companion Unix socket is unavailable.");
-  if (error.stage === "request-write") return new CliError("Refusing invalid bridge credential.");
+  if (error.stage === "request-write") return new CliError(CREDENTIAL_REJECTION);
   // Strict JSON and UTF-8 faults in a frame keep a native decoding cause; shape faults carry none.
   if (error.cause instanceof Error) return new CliError("The companion sent malformed protocol data.");
   return new CliError(error.stage === "challenge"

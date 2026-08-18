@@ -193,6 +193,29 @@ test("the Bridge protocol requires a canonical credential identity", async () =>
   assert.deepEqual({ kind: error.kind, connects: harness.state.connects }, { kind: "malformed", connects: 0 });
 });
 
+test("the Bridge protocol publishes one canonical identity form", async (t) => {
+  const { isCanonicalIdentity } = await import("../lib/bridge-protocol.mjs");
+  const generated = "abcdef01-2345-4678-89ab-cdef01234567";
+  await t.test("accepts a canonical identity", () => {
+    assert.equal(isCanonicalIdentity(generated), true);
+  });
+  await t.test("rejects the uppercase spelling of the same value", () => {
+    assert.equal(isCanonicalIdentity(generated.toUpperCase()), false);
+  });
+  await t.test("rejects hyphens padded to canonical length", () => {
+    assert.equal(isCanonicalIdentity("-".repeat(36)), false);
+  });
+  await t.test("rejects an unsupported version digit", () => {
+    assert.equal(isCanonicalIdentity("11111111-1111-6111-8111-111111111111"), false);
+  });
+  await t.test("rejects an unsupported variant digit", () => {
+    assert.equal(isCanonicalIdentity("11111111-1111-4111-c111-111111111111"), false);
+  });
+  await t.test("rejects a value that is not a string", () => {
+    assert.equal(isCanonicalIdentity(undefined), false);
+  });
+});
+
 test("the Bridge protocol rejects an invalid TCP port as malformed input", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness();

@@ -216,10 +216,34 @@ test("a management exchange rejects an invalid bridge credential before connecti
     const rejected = await seam.healthAt(server.endpoint, { id: credential.id, secret: "not-base64" }, seam.protocol)
       .then(() => undefined, (error) => error);
     await t.test("preserves the credential ownership message", () => {
-      assert.equal(rejected.message, "Refusing invalid bridge credential.");
+      assert.equal(
+        rejected.message,
+        "Refusing invalid bridge credential. Run `pi-dictation bridge install` to generate one.",
+      );
     });
     await t.test("never reaches the shared seam", () => {
       assert.deepEqual(seam.observed, []);
+    });
+    await t.test("never opens a management connection", () => {
+      assert.equal(server.connections.length, 0);
+    });
+  } finally {
+    server.close();
+  }
+});
+
+test("a management exchange rejects a non-canonical credential identity before connecting", async (t) => {
+  const seam = await managementSeam();
+  const server = await companion((exchange) => authenticated(exchange, { body: health }));
+  try {
+    const rejected = await seam
+      .healthAt(server.endpoint, { ...credential, id: "AAAAAAAA-3333-4333-8333-333333333333" }, seam.protocol)
+      .then(() => undefined, (error) => error);
+    await t.test("reports the credential rejection with its remediation", () => {
+      assert.equal(
+        rejected.message,
+        "Refusing invalid bridge credential. Run `pi-dictation bridge install` to generate one.",
+      );
     });
     await t.test("never opens a management connection", () => {
       assert.equal(server.connections.length, 0);

@@ -395,6 +395,31 @@ test("bridge install refuses a dangling symlink at a managed artifact", () => {
   }
 });
 
+test("bridge install refuses a credential whose identity is not canonical", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const path = join(home, "Library", "Application Support", "pi-dictation", "bridge", "credential.json");
+    const credential = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...credential, id: credential.id.toUpperCase() }), { mode: 0o600 });
+    const result = runBridge(home, ["install"], { PATH: tools });
+
+    await t.test("fails the command", () => {
+      assert.notEqual(result.status, 0);
+    });
+    await t.test("names the credential rejection", () => {
+      assert.match(result.stderr, /Refusing invalid bridge credential\./);
+    });
+    await t.test("directs the user to generate a credential", () => {
+      assert.match(result.stderr, /Run `pi-dictation bridge install` to generate one\./);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("bridge install refuses an existing app whose ownership cannot be proven", () => {
   const home = temporaryHome();
   const tools = fakeToolchain(home);

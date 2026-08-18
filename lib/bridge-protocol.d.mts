@@ -91,6 +91,8 @@ export class BridgeProtocolFailure extends Error {
   constructor(kind: BridgeProtocolFailureKind, stage: BridgeProtocolFailureStage, cause?: unknown);
 }
 
+export function isCanonicalIdentity(value: unknown): value is string;
+
 export function request(options: BridgeProtocolRequest): Promise<BridgeProtocolResponse>;
 export function withStream<T>(
   options: BinaryStreamRequest,

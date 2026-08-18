@@ -48,7 +48,8 @@ import {
   revokeHost,
   rotateHost,
 } from "./bridge-host.mjs";
-import { CliError, companionRequestAt, healthAt } from "./bridge-management.mjs";
+import { CREDENTIAL_REJECTION, CliError, companionRequestAt, healthAt } from "./bridge-management.mjs";
+import { isCanonicalIdentity } from "../lib/bridge-protocol.mjs";
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
 const APP_NAME = "PiDictationBridge";
@@ -312,10 +313,10 @@ function readJsonOwned(path, description, maximumBytes = 64 * 1024) {
 
 function validateCredential(path) {
   const credential = readJsonOwned(path, "bridge credential");
-  if (typeof credential.id !== "string" || !/^[0-9a-f-]{36}$/i.test(credential.id) ||
+  if (!isCanonicalIdentity(credential.id) ||
       typeof credential.secret !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(credential.secret) ||
       Buffer.from(credential.secret, "base64").length !== 32) {
-    throw new CliError("Refusing invalid bridge credential.");
+    throw new CliError(CREDENTIAL_REJECTION);
   }
   return credential;
 }
@@ -324,7 +325,7 @@ function existingInstallId(p) {
   if (!pathExists(p.root)) return randomUUID();
   inspectPath(p.root, "directory", 0o700, "bridge support directory");
   const receipt = readJsonOwned(p.receipt, "bridge ownership receipt");
-  if (receipt.product !== LABEL || typeof receipt.installId !== "string" || !/^[0-9a-f-]{36}$/i.test(receipt.installId)) {
+  if (receipt.product !== LABEL || !isCanonicalIdentity(receipt.installId)) {
     throw new CliError("Refusing bridge artifacts whose ownership cannot be proven.");
   }
   return receipt.installId;
@@ -437,7 +438,7 @@ function verifyInstallation() {
   const p = paths();
   inspectPath(p.root, "directory", 0o700, "bridge support directory");
   const receipt = readJsonOwned(p.receipt, "bridge ownership receipt");
-  if (receipt.product !== LABEL || typeof receipt.installId !== "string" || !/^[0-9a-f-]{36}$/i.test(receipt.installId)) {
+  if (receipt.product !== LABEL || !isCanonicalIdentity(receipt.installId)) {
     throw new CliError("Bridge ownership cannot be proven. Run `pi-dictation bridge install`.");
   }
   proveApp(p.app, receipt.installId);

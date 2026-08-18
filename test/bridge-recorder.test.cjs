@@ -160,6 +160,29 @@ test("the Recorder starts with an install or rotation credential containing crea
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge Recorder refuses a credential whose identity is not canonical", async (t) => {
+  const instance = await harness("valid", { id: "AAAAAAAA-7777-4777-8777-777777777777" });
+  const requests = [];
+  try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
+    const { createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const recorder = createBridgeRecorder(instance.config, {
+      request(options) {
+        requests.push(options.operation);
+        return sharedProtocol.request(options);
+      },
+      withStream: sharedProtocol.withStream,
+    });
+    const error = await recorder.start(instance.startOptions).catch((value) => value);
+    await t.test("returns the safe Recorder classification", () => {
+      assert.equal(error.code, "recording-failed");
+    });
+    await t.test("rejects the credential before reaching the shared seam", () => {
+      assert.deepEqual(requests, []);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge Recorder preserves the safe audio error for trailing ordinary response bytes", async (t) => {
   const instance = await harness("extra-start-byte");
   try {

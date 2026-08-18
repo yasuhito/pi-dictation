@@ -25,7 +25,7 @@ function fixture() {
   mkdirSync(tools, { mode: 0o700 });
   mkdirSync(bridge, { recursive: true, mode: 0o700 });
   mkdirSync(launchAgents, { recursive: true, mode: 0o700 });
-  writeFileSync(join(bridge, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId: "11111111-1111-1111-1111-111111111111" }), { mode: 0o600 });
+  writeFileSync(join(bridge, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId: "11111111-1111-4111-8111-111111111111" }), { mode: 0o600 });
   const sshLog = join(home, "ssh.log");
   executable(join(tools, "ssh"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$SSH_LOG"
@@ -853,7 +853,7 @@ test("uninstall reconciles a partial remote-cleanup failure", async (t) => {
 });
 
 function completeCompanionFixture(f) {
-  const installId = "11111111-1111-1111-1111-111111111111";
+  const installId = "11111111-1111-4111-8111-111111111111";
   const app = join(f.bridge, "PiDictationBridge.app");
   const runtime = join(f.home, "Library", "Caches", "pi-dictation", "bridge");
   for (const directory of [join(app, "Contents", "MacOS"), join(app, "Contents", "Resources"), runtime]) mkdirSync(directory, { recursive: true, mode: 0o700 });
