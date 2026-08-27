@@ -1,6 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/pi-dictation.schema.json",
   "language": "en",
+  "recorders": {
+    "selected": "local"
+  },
   "openaiModel": "gpt-4o-mini-transcribe",
   "timeoutMs": 120000,
   "maxRecordingMs": 600000

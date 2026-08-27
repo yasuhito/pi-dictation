@@ -81,7 +81,9 @@ function privateDirectory(path) {
 }
 function validateCredential(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      !/^[0-9a-f-]{36}$/i.test(value.id || "") ||
+      // The certification harness reimplements the protocol on purpose, so it keeps its own copy of
+      // the canonical identity form rather than importing the shared seam predicate.
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.id || "") ||
       !/^[A-Za-z0-9+/]{43}=$/.test(value.secret || "") || Buffer.from(value.secret, "base64").length !== 32) {
     fail("Refusing invalid certification credential.");
   }

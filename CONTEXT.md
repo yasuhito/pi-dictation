@@ -32,9 +32,29 @@ _Avoid_: Level polling, waveform stream
 A recording whose microphone is attached to a different host from the host running Pi.
 _Avoid_: Remote input, remote microphone
 
+**Bridge protocol**:
+The authenticated communication contract between Pi and the companion, covering message framing, versioning, and operation statuses.
+_Avoid_: Bridge communication, wire format
+
+**Bridge credential**:
+The long-lived secret that identifies one client to one companion, held by both sides for the lifetime of an installation and replaced as a unit. Distinct from the per-recording secret capability in Recording lease.
+_Avoid_: Token, API key, session key
+
+**Canonical identity**:
+The single valid textual form of a Bridge identity. Any other spelling of the same underlying value is a different identity, not the same identity written differently.
+_Avoid_: Case-insensitive id, normalised id
+
+**Command bound**:
+The promise that one Bridge management command always returns in finite time and reports every destination it was asked about, even when some destinations are slow or unreachable. It is stated as a property, not as a number of seconds.
+_Avoid_: Timeout, deadline, budget
+
 **Recorder**:
 The module that starts a recording and returns a common handle for stopping it successfully or cancelling it, regardless of where the microphone is attached.
 _Avoid_: Recording command, capture service
+
+**Recorder selection**:
+The persisted choice of the Local Recorder or configured Bridge Recorder to use for the next recording. Changing the selection preserves both Recorder configurations and does not install, remove, or automatically fall back between them.
+_Avoid_: Microphone setting, recording mode
 
 **Recording lease**:
 The exclusive, capability-owned right to control one active bridge recording. Only the client holding that recording's secret capability may stop, cancel, or retrieve it.

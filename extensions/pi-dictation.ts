@@ -8,17 +8,17 @@
 //   "shortcut": "insert",
 //   "language": "ja",
 //   "transcribeCommand": "whisper-cli -m ~/models/ggml-small.bin -f {file} -l ja -otxt -of -",
-//   "recorder": { "type": "local", "command": "pw-record --format s16 --rate 16000 --channels 1 {file}" },
+//   "recorders": { "selected": "local", "local": { "command": "pw-record --format s16 --rate 16000 --channels 1 {file}" } },
 //   "maxRecordingMs": 600000,
 //   "openaiModel": "gpt-4o-mini-transcribe"
 // }
 //
 // Transcription backend order:
-// 1. PI_DICTATION_TRANSCRIBE_CMD or config.transcribeCommand
-// 2. OpenAI audio transcription when OPENAI_API_KEY is set
+// 1. config.transcribeCommand
+// 2. OpenAI audio transcription when OPENAI_API_KEY or a configured credential is available
 //
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { openAsBlob } from "node:fs";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
@@ -27,6 +27,7 @@ import { join } from "node:path";
 import cliSpinners from "cli-spinners";
 import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
 import { showDictationConfig } from "./config-ui.js";
+import { diagnoseDictation } from "./doctor.js";
 import { levelForDb } from "./live-level.js";
 import { createRecorder, type LevelEvent, type LevelObservation, type Recording } from "./recorder.js";
 import { shellQuote } from "./shell.js";
@@ -380,7 +381,7 @@ class DictationStrip {
     else this.stopLiveLevels();
     this.frameIndex = 0;
     this.blinkOn = true;
-    if (this.animationMode === "blink") this.startedAt = Date.now();
+    if (this.animationMode !== "none") this.startedAt = Date.now();
     this.restartAnimationTimer();
     this.requestRender();
   }
@@ -520,7 +521,34 @@ class DictationStrip {
       return [`${left}${wave}${right}`];
     }
 
-    let indicator = this.animationMode === "spin" ? (this.spinner.frames[this.frameIndex] ?? "") : "";
+    if (this.animationMode === "spin") {
+      const indicator = this.spinner.frames[this.frameIndex] ?? "";
+      const prefix = `${indicator}${indicator ? " " : ""}${this.label}  `;
+      const elapsedSeconds = Math.floor((Date.now() - this.startedAt) / 1000);
+      const elapsed = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+      const suffix = `  ${elapsed}`;
+      const barWidth = safeWidth - visibleWidth(prefix) - visibleWidth(suffix);
+      if (barWidth > 0) {
+        const segmentWidth = barWidth >= 3 ? Math.min(5, barWidth - 2) : 1;
+        const margin = barWidth >= 3 ? 1 : 0;
+        const travel = barWidth - segmentWidth - margin * 2;
+        const step = Math.floor((Date.now() - this.startedAt) / Math.max(60, this.spinner.interval));
+        const cycle = Math.max(1, travel * 2);
+        const offset = step % cycle;
+        const segmentStart = margin + (offset <= travel ? offset : cycle - offset);
+        const before = "─".repeat(segmentStart);
+        const active = "━".repeat(segmentWidth);
+        const after = "─".repeat(barWidth - segmentStart - segmentWidth);
+        const styledPrefix = this.theme?.fg("warning", prefix) ?? prefix;
+        const styledBar = `${this.theme?.fg("dim", before) ?? before}${this.theme?.fg("accent", active) ?? active}${this.theme?.fg("dim", after) ?? after}`;
+        const styledElapsed = this.theme?.fg("muted", suffix) ?? suffix;
+        return [`${styledPrefix}${styledBar}${styledElapsed}`];
+      }
+      const compact = truncateToWidth(`${prefix}${elapsed}`, safeWidth, "");
+      return [this.theme?.fg("warning", compact) ?? compact];
+    }
+
+    let indicator = "";
     let color = "warning";
     if (this.label === "Dictation ready") {
       indicator = "✓";
@@ -705,7 +733,7 @@ export default function (pi: ExtensionAPI) {
 
     const config = active.config;
     recordingPhase = "stopping";
-    if (!shuttingDown) showStrip(ctx, "Processing recording…", { spin: true, spinner: config.spinner });
+    if (!shuttingDown) showStrip(ctx, "Processing…", { spin: true, spinner: config.spinner });
 
     active.stopPromise = (async () => {
       try {
@@ -778,7 +806,21 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("dictate-config", {
     description: "Configure Pi Dictation",
-    handler: async (_args, ctx) => showDictationConfig(ctx),
+    handler: async (_args, ctx) => {
+      if (recordingPhase !== "idle") {
+        ctx.ui.notify("Recorder selection cannot be changed during dictation.", "warning");
+        return;
+      }
+      await showDictationConfig(ctx);
+    },
+  });
+
+  pi.registerCommand("dictate-doctor", {
+    description: "Diagnose Pi Dictation setup without exposing secrets",
+    handler: async (_args, ctx) => {
+      const report = await diagnoseDictation(loadConfig());
+      ctx.ui.notify(report.text, report.ready ? "info" : "warning");
+    },
   });
 
   pi.registerCommand("dictate-help", {
@@ -791,7 +833,7 @@ export default function (pi: ExtensionAPI) {
           ? `OpenAI ${config.openaiModel}`
           : "not configured";
       ctx.ui.notify(
-        `Pi Dictation: shortcut=${config.shortcut}, recorder=${config.recorder.type}${config.recorder.type === "local" && config.recorder.command ? " (custom)" : ""}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
+        `Pi Dictation: shortcut=${config.shortcut}, Recorder selection=${config.recorderSelection}${config.recorder.type === "local" && config.recorder.command ? " (custom)" : ""}, transcriber=${backend}. Config: ${CONFIG_PATH}`,
         backend === "not configured" ? "warning" : "info"
       );
     },

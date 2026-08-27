@@ -43,6 +43,124 @@ function fakeContext({ mode = "tui", selections = [], edits = [] } = {}) {
 
 const detectRecorder = async () => "ffmpeg";
 
+const bridge = {
+  endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+  credentialFile: "/home/user/.config/pi-dictation/credential",
+};
+
+test("the settings UI persists Bridge Recorder selection without changing Recorder profiles", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-recorder-selection-"));
+  const path = join(directory, "pi-dictation.json");
+  const profiles = { selected: "local", local: { command: "PRIVATE_RECORDER" }, bridge };
+  writeFileSync(path, `${JSON.stringify({ recorders: profiles })}\n`);
+  const runtime = fakeContext({ selections: ["Recorder:", "Bridge recording", "Save changes"] });
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(runtime.ctx, {
+    path,
+    env: {},
+    detectRecorder,
+    checkBridge: async () => true,
+    acquireBridgeLock: async () => async () => {},
+  });
+  const saved = JSON.parse(readFileSync(path, "utf8"));
+  await t.test("selects the Bridge Recorder", () => {
+    assert.equal(saved.recorders.selected, "bridge");
+  });
+  await t.test("preserves both Recorder profiles", () => {
+    assert.deepEqual({ ...saved.recorders, selected: "local" }, profiles);
+  });
+});
+
+test("the settings UI does not select an unconfigured Bridge Recorder", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-no-bridge-"));
+  const path = join(directory, "pi-dictation.json");
+  const original = '{"recorders":{"selected":"local"}}\n';
+  writeFileSync(path, original);
+  const runtime = fakeContext({ selections: ["Recorder:", "Bridge recording", "Cancel"] });
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(runtime.ctx, { path, env: {}, detectRecorder, checkBridge: async () => false });
+  assert.equal(readFileSync(path, "utf8"), original);
+});
+
+test("the settings UI permits unavailable Local Recorder selection", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-unavailable-local-"));
+  const path = join(directory, "pi-dictation.json");
+  writeFileSync(path, `${JSON.stringify({ recorders: { selected: "bridge", bridge } })}\n`);
+  const runtime = fakeContext({ selections: ["Recorder:", "Local recording", "Save changes"] });
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(runtime.ctx, {
+    path,
+    env: {},
+    detectRecorder: async () => { throw new Error("unavailable"); },
+    checkBridge: async () => true,
+  });
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).recorders.selected, "local");
+});
+
+test("the settings UI warns after selecting an unavailable Bridge Recorder", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-unavailable-bridge-"));
+  const path = join(directory, "pi-dictation.json");
+  writeFileSync(path, `${JSON.stringify({ recorders: { selected: "local", bridge } })}\n`);
+  const runtime = fakeContext({ selections: ["Recorder:", "Bridge recording", "Save changes"] });
+  let checks = 0;
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(runtime.ctx, {
+    path,
+    env: {},
+    detectRecorder,
+    checkBridge: async () => ++checks === 1,
+    acquireBridgeLock: async () => async () => {},
+  });
+  assert.match(runtime.notifications.at(-1).message, /currently unavailable/);
+});
+
+test("the settings UI cannot select a Bridge reserved for removal", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-removal-lock-"));
+  const path = join(directory, "pi-dictation.json");
+  const lockedBridge = {
+    endpoint: { type: "unix", path: join(directory, "listener.sock") },
+    credentialFile: join(directory, "credential.json"),
+  };
+  writeFileSync(path, `${JSON.stringify({ recorders: { selected: "local", bridge: lockedBridge } })}\n`);
+  writeFileSync(join(directory, "recorder-selection.lock"), "{}\n", { mode: 0o600 });
+  const runtime = fakeContext({ selections: ["Recorder:", "Bridge recording", "Save changes"] });
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(runtime.ctx, { path, env: {}, detectRecorder, checkBridge: async () => false });
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).recorders.selected, "local");
+});
+
+test("the settings UI refuses Bridge selection when the profile is removed before save", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-removed-bridge-"));
+  const path = join(directory, "pi-dictation.json");
+  writeFileSync(path, `${JSON.stringify({ recorders: { selected: "local", bridge } })}\n`);
+  let selectionCount = 0;
+  const notifications = [];
+  const ctx = {
+    mode: "tui",
+    ui: {
+      async select(_title, options) {
+        selectionCount += 1;
+        if (selectionCount === 1) return options.find((option) => option.startsWith("Recorder:"));
+        if (selectionCount === 2) {
+          writeFileSync(path, '{"recorders":{"selected":"local"}}\n');
+          return options.find((option) => option.startsWith("Bridge recording"));
+        }
+        return "Save changes";
+      },
+      notify(message, level) { notifications.push({ message, level }); },
+    },
+  };
+  const { showDictationConfig } = await loadUi();
+  await showDictationConfig(ctx, {
+    path,
+    env: {},
+    detectRecorder,
+    checkBridge: async () => true,
+    acquireBridgeLock: async () => async () => {},
+  });
+  assert.match(notifications.at(-1).message, /no longer configured/);
+});
+
 test("the settings UI edits a safe field while preserving hidden configuration", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-ui-"));
   const path = join(directory, "pi-dictation.json");
@@ -62,8 +180,12 @@ test("the settings UI edits a safe field while preserving hidden configuration",
   await t.test("saves the edited language", () => {
     assert.equal(saved.language, "ja");
   });
-  await t.test("preserves all hidden fields", () => {
-    assert.deepEqual({ ...saved, language: "en" }, original);
+  await t.test("preserves hidden values while migrating the Recorder profile", () => {
+    const { recorder: _legacyRecorder, ...originalWithoutRecorder } = original;
+    assert.deepEqual({ ...saved, language: "en" }, {
+      ...originalWithoutRecorder,
+      recorders: { selected: "local", local: { command: "PRIVATE_RECORDER" } },
+    });
   });
   await t.test("never renders hidden values", () => {
     assert.doesNotMatch(rendered, /PRIVATE_/);
@@ -147,34 +269,6 @@ test("invalid configuration errors do not expose file contents", async () => {
   assert.doesNotMatch(runtime.notifications.at(-1).message, /PRIVATE_SECRET/);
 });
 
-test("environment overrides are identified without exposing hidden values", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-env-"));
-  const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Cancel"] });
-  const { showDictationConfig } = await loadUi();
-  await showDictationConfig(runtime.ctx, {
-    path,
-    env: { PI_DICTATION_LANGUAGE: "ja", PI_DICTATION_OPENAI_API_KEY: "PRIVATE_API_KEY" },
-    detectRecorder,
-  });
-  assert.match(runtime.dialogs[0].title, /PI_DICTATION_LANGUAGE/);
-});
-
-test("saving an overridden field warns which environment variable wins", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-override-"));
-  const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Language:", "Save changes"], edits: ["en"] });
-  const { showDictationConfig } = await loadUi();
-  await showDictationConfig(runtime.ctx, {
-    path,
-    env: { PI_DICTATION_LANGUAGE: "ja" },
-    detectRecorder,
-  });
-  assert.match(runtime.notifications.at(-1).message, /overridden by PI_DICTATION_LANGUAGE/);
-});
-
 test("invalid duration input does not change the configuration", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-duration-"));
   const path = join(directory, "pi-dictation.json");
@@ -201,11 +295,11 @@ test("shortcut changes save with the reload boundary", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-shortcut-"));
   const path = join(directory, "pi-dictation.json");
   writeFileSync(path, "{}\n");
-  const runtime = fakeContext({ selections: ["Shortcut:", "f8", "Save changes"] });
+  const runtime = fakeContext({ selections: ["Shortcut:", "f5", "Save changes"] });
   const { showDictationConfig } = await loadUi();
   await showDictationConfig(runtime.ctx, { path, env: {}, detectRecorder });
   await t.test("saves the selected shortcut", () => {
-    assert.equal(JSON.parse(readFileSync(path, "utf8")).shortcut, "f8");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).shortcut, "f5");
   });
   await t.test("explains the reload requirement", () => {
     assert.match(runtime.notifications.at(-1).message, /require \/reload or restart/);

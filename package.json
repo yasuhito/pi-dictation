@@ -24,18 +24,20 @@
   ],
   "bin": {
     "pi-dictation": "bin/pi-dictation.mjs",
-    "pi-dictation-bridge-certify": "bin/pi-dictation-bridge-certify.cjs",
-    "pi-dictation-doctor": "bin/pi-dictation-doctor.mjs"
+    "pi-dictation-bridge-certify": "bin/pi-dictation-bridge-certify.cjs"
   },
   "files": [
     "bin",
     "extensions",
+    "lib/bridge-protocol.mjs",
+    "lib/bridge-protocol.d.mts",
     "native",
     "docs/bridge-recording-support.md",
     "docs/certification/bridge-recording-template.md",
     "pi-dictation.schema.json",
     "pi-dictation.example.json",
     "README.md",
+    "README.ja.md",
     "TODO.md",
     "LICENSE"
   ],
@@ -47,7 +49,6 @@
     "test:assertions": "node scripts/check-test-assertions.mjs",
     "check": "npm run test:assertions && npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run",
-    "doctor": "node bin/pi-dictation-doctor.mjs",
     "demo:generate": "node scripts/generate-demo.mjs"
   },
   "pi": {

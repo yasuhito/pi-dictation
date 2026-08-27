@@ -14,6 +14,12 @@
 - For issues requiring macOS validation, use `ssh mac` and perform every automatable setup, build, test, and diagnostic step on the Mac yourself.
 - Ask the human only for actions that require physical presence or macOS UI interaction, such as speaking into the microphone or granting permission. Give the exact action and wait condition when requesting it.
 
+## Documentation translations
+
+- `README.md` is the authoritative README.
+- Whenever `README.md` changes, update `README.ja.md` in the same change so both versions remain semantically aligned.
+- Keep commands, configuration examples, links, and support boundaries aligned across both versions. Translate prose idiomatically rather than sentence by sentence.
+
 ## Agent skills
 
 ### Issue tracker

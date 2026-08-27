@@ -47,6 +47,23 @@ test("the schema rejects unknown configuration fields", () => {
   assert.equal(validate({ futureMetadata: true }), false);
 });
 
+test("the schema accepts persisted Local and Bridge Recorder profiles", () => {
+  const schema = readJson("pi-dictation.schema.json");
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema);
+  assert.equal(validate({
+    recorders: {
+      selected: "local",
+      local: { command: "capture {file}" },
+      bridge: {
+        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+        credentialFile: "/home/user/.config/pi-dictation/credential",
+      },
+    },
+  }), true, JSON.stringify(validate.errors));
+});
+
 for (const scenario of [
   { name: "an explicit local command", recorder: { type: "local", command: "capture {file}" }, valid: true },
   { name: "a Bridge Unix endpoint", recorder: { type: "bridge", endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" }, credentialFile: "/home/user/.config/pi-dictation/credential" }, valid: true },

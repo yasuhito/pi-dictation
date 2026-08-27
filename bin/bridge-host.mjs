@@ -8,6 +8,7 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+import { isCanonicalIdentity } from "../lib/bridge-protocol.mjs";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
 export const BRIDGE_PROTOCOL_VERSION = 3;
@@ -81,7 +82,7 @@ function readOwnedJson(path, description, maximumBytes = MAX_MANAGED_JSON_BYTES)
 }
 
 function validateCredential(credential, description) {
-  if (typeof credential?.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(credential.id) ||
+  if (!isCanonicalIdentity(credential?.id) ||
       typeof credential.secret !== "string" || Buffer.from(credential.secret, "base64").length !== 32 ||
       (credential.createdAt !== undefined && (typeof credential.createdAt !== "string" || credential.createdAt.length > 32 || Number.isNaN(Date.parse(credential.createdAt))))) {
     throw new BridgeHostError(`Refusing invalid ${description}.`);
@@ -371,7 +372,7 @@ export function installHost(alias, args = []) {
   const paths = localPaths(alias);
   inspect(paths.bridgeRoot, "directory", 0o700, "bridge support directory");
   const receipt = readOwnedJson(join(paths.bridgeRoot, "ownership.json"), "bridge ownership receipt");
-  if (receipt.product !== PRODUCT || typeof receipt.installId !== "string" || !/^[0-9a-f-]{36}$/i.test(receipt.installId)) {
+  if (receipt.product !== PRODUCT || !isCanonicalIdentity(receipt.installId)) {
     throw new BridgeHostError("Run `pi-dictation bridge install` to install the Mac companion first.");
   }
   ensureOwnedParent(dirname(paths.plist), "LaunchAgents directory");
@@ -740,8 +741,8 @@ function readRotation(paths) {
   if (!existsSync(paths.rotation)) return undefined;
   const rotation = readOwnedJson(paths.rotation, "credential rotation state");
   if (rotation.product !== PRODUCT || rotation.hostId !== paths.id ||
-      typeof rotation.oldCredentialId !== "string" || typeof rotation.nextCredentialId !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rotation.revokeRequestId) ||
+      !isCanonicalIdentity(rotation.oldCredentialId) || !isCanonicalIdentity(rotation.nextCredentialId) ||
+      !isCanonicalIdentity(rotation.revokeRequestId) ||
       rotation.oldCredentialId === rotation.nextCredentialId || !rotationPhases.has(rotation.phase)) {
     throw new BridgeHostError("Refusing invalid credential rotation state.");
   }
@@ -874,8 +875,8 @@ export async function revokeHost(alias, confirmed, companionRequestAt, deletionP
     if (revocation.product !== PRODUCT || revocation.hostId !== paths.id ||
         !["confirmed", "companion-revoked"].includes(revocation.phase) ||
         (revocation.operation !== undefined && !["credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active"].includes(revocation.operation)) ||
-        typeof revocation.credentialId !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(revocation.requestId)) {
+        !isCanonicalIdentity(revocation.credentialId) ||
+        !isCanonicalIdentity(revocation.requestId)) {
       throw new BridgeHostError("Refusing invalid credential revocation state.");
     }
   }
@@ -893,6 +894,9 @@ export async function revokeHost(alias, confirmed, companionRequestAt, deletionP
       console.log(`Preview only. Rerun with: pi-dictation bridge revoke ${alias} --confirm`);
       return;
     }
+    ssh(alias, ["pi-dictation", "bridge", "remote-recorder-removal-check", paths.id], {
+      failure: "Select Local recording with /dictate-config before removing the selected Bridge Recorder",
+    });
     const operation = deletionPolicy === "preserve-retained"
       ? "credential-revoke-if-idle"
       : deletionPolicy === "delete-retained-if-no-active"
@@ -917,6 +921,10 @@ export async function revokeHost(alias, confirmed, companionRequestAt, deletionP
     } catch (error) {
       if (error?.status === "invalid-state" && ["credential-revoke-if-idle", "credential-revoke-if-no-active"].includes(revocation.operation)) {
         rmSync(paths.revocation);
+        try { ssh(alias, ["pi-dictation", "bridge", "remote-recorder-removal-release", paths.id]); }
+        catch {
+          throw new BridgeHostError("Recording state changed before uninstall could revoke the credential. The remote Recorder selection lock could not be released; retry the confirmed removal to reconcile it.");
+        }
         throw new BridgeHostError("Recording state changed before uninstall could revoke the credential; no bridge was removed. Preview again and explicitly confirm the required deletion.");
       }
       throw new BridgeHostError(`${error instanceof Error ? error.message : "Credential revocation failed"} The confirmed revocation was preserved for a safe retry.`);
@@ -965,6 +973,58 @@ function configDigest(config) {
   return createHash("sha256").update(JSON.stringify(config)).digest("hex");
 }
 
+function withRemoteRecorderProfile(current, recorder) {
+  const next = { ...current };
+  let recorders;
+  if (current.recorders) {
+    recorders = { ...current.recorders };
+  } else if (current.recorder?.type === "local") {
+    recorders = {
+      selected: "local",
+      local: current.recorder.command ? { command: current.recorder.command } : undefined,
+    };
+  } else if (current.recorder?.type === "bridge") {
+    recorders = {
+      selected: "bridge",
+      bridge: { endpoint: current.recorder.endpoint, credentialFile: current.recorder.credentialFile },
+    };
+  } else {
+    recorders = { selected: "local" };
+  }
+  delete next.recorder;
+  if (recorder.type === "bridge") {
+    recorders.bridge = { endpoint: recorder.endpoint, credentialFile: recorder.credentialFile };
+  } else {
+    if (recorders.selected === "bridge") {
+      throw new BridgeHostError("Select Local recording with /dictate-config before removing the selected Bridge Recorder.");
+    }
+    delete recorders.bridge;
+  }
+  next.recorders = recorders;
+  return next;
+}
+
+function managedRecorder(config) {
+  if (config?.recorders?.bridge) return { ...config.recorders.bridge, type: "bridge" };
+  return config?.recorder?.type === "bridge" ? config.recorder : null;
+}
+
+function managedRecorderDigest(config) {
+  return config ? configDigest(managedRecorder(config)) : null;
+}
+
+function readyRecorderReceipt(id, config) {
+  return { product: PRODUCT, hostId: id, phase: "ready", recorderSha256: managedRecorderDigest(config) };
+}
+
+function legacyReceiptCanMigrate(id, receipt, current) {
+  if (receipt.sha256 === configDigest(current)) return true;
+  const endpointPath = join(remoteRoot(id), "endpoint.json");
+  if (!existsSync(endpointPath)) return false;
+  const endpoint = readOwnedJson(endpointPath, "remote Recorder endpoint configuration");
+  return JSON.stringify(endpoint) === JSON.stringify(managedRecorder(current));
+}
+
 function reconcileRemoteRecorder(id, recorder) {
   const paths = remoteConfigPaths(id);
   const staged = join(paths.configDirectory, "pi-dictation.bridge-next.json");
@@ -978,27 +1038,41 @@ function reconcileRemoteRecorder(id, recorder) {
     }
     if (receipt.phase === "preparing") {
       const current = existsSync(paths.config) ? readOwnedJson(paths.config, "remote Pi Dictation configuration") : undefined;
-      const currentHash = current ? configDigest(current) : null;
-      if (currentHash !== receipt.previousSha256) {
+      const currentHash = receipt.previousRecorderSha256 === undefined
+        ? (current ? configDigest(current) : null)
+        : managedRecorderDigest(current);
+      const expected = receipt.previousRecorderSha256 !== undefined
+        ? receipt.previousRecorderSha256
+        : receipt.previousSha256;
+      if (currentHash !== expected) {
         throw new BridgeHostError("Refusing an interrupted remote Pi Dictation configuration with unproven contents.");
       }
       if (existsSync(staged)) { inspect(staged, "file", 0o600, "staged remote Pi Dictation configuration"); rmSync(staged); }
-      if (current) atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "ready", sha256: currentHash })}\n`);
+      if (current) atomicWrite(paths.receipt, `${JSON.stringify(readyRecorderReceipt(id, current))}\n`);
       else rmSync(paths.receipt);
     } else if (receipt.phase === "pending") {
       const current = existsSync(paths.config) ? readOwnedJson(paths.config, "remote Pi Dictation configuration") : undefined;
-      const currentHash = current ? configDigest(current) : null;
-      if (currentHash === receipt.previousSha256) {
+      const managedTransaction = receipt.nextRecorderSha256 !== undefined;
+      const currentHash = managedTransaction ? managedRecorderDigest(current) : (current ? configDigest(current) : null);
+      const previousHash = managedTransaction ? receipt.previousRecorderSha256 : receipt.previousSha256;
+      const nextHash = managedTransaction ? receipt.nextRecorderSha256 : receipt.nextSha256;
+      if (currentHash === previousHash) {
         inspect(staged, "file", 0o600, "staged remote Pi Dictation configuration");
-        const next = readOwnedJson(staged, "staged remote Pi Dictation configuration");
-        if (configDigest(next) !== receipt.nextSha256) throw new BridgeHostError("Refusing an invalid staged remote Pi Dictation configuration.");
-        renameSync(staged, paths.config);
-      } else if (currentHash === receipt.nextSha256) {
+        const stagedConfig = readOwnedJson(staged, "staged remote Pi Dictation configuration");
+        const stagedHash = managedTransaction ? managedRecorderDigest(stagedConfig) : configDigest(stagedConfig);
+        if (stagedHash !== nextHash) throw new BridgeHostError("Refusing an invalid staged remote Pi Dictation configuration.");
+        const next = managedTransaction
+          ? withRemoteRecorderProfile(current || {}, managedRecorder(stagedConfig) || { type: "local" })
+          : stagedConfig;
+        atomicWrite(paths.config, `${JSON.stringify(next, null, 2)}\n`);
+        rmSync(staged);
+      } else if (currentHash === nextHash) {
         if (existsSync(staged)) { inspect(staged, "file", 0o600, "staged remote Pi Dictation configuration"); rmSync(staged); }
       } else {
         throw new BridgeHostError("Refusing an interrupted remote Pi Dictation configuration with unproven contents.");
       }
-      atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "ready", sha256: receipt.nextSha256 })}\n`);
+      const recovered = readOwnedJson(paths.config, "remote Pi Dictation configuration");
+      atomicWrite(paths.receipt, `${JSON.stringify(readyRecorderReceipt(id, recovered))}\n`);
     }
   }
 
@@ -1008,20 +1082,27 @@ function reconcileRemoteRecorder(id, recorder) {
   const current = existsSync(paths.config) ? readOwnedJson(paths.config, "remote Pi Dictation configuration") : {};
   if (existsSync(paths.receipt)) {
     const receipt = readOwnedJson(paths.receipt, "remote Pi Dictation configuration ownership receipt");
-    if (receipt.phase !== "ready" || receipt.sha256 !== configDigest(current)) {
-      throw new BridgeHostError("Refusing to overwrite a remote Pi Dictation configuration changed outside bridge setup.");
+    const owned = receipt.phase === "ready" && (
+      receipt.recorderSha256 === managedRecorderDigest(current) ||
+      (receipt.recorderSha256 === undefined && legacyReceiptCanMigrate(id, receipt, current))
+    );
+    if (!owned) {
+      throw new BridgeHostError("Refusing to overwrite a remote Pi Dictation Bridge Recorder changed outside bridge setup.");
+    }
+    if (receipt.recorderSha256 === undefined) {
+      atomicWrite(paths.receipt, `${JSON.stringify(readyRecorderReceipt(id, current))}\n`);
     }
   }
-  const next = { ...current, recorder };
+  const next = withRemoteRecorderProfile(current, recorder);
   if (JSON.stringify(next) === JSON.stringify(current)) return;
   if (existsSync(staged)) throw new BridgeHostError("Refusing an unexpected staged remote Pi Dictation configuration.");
-  const previousSha256 = existsSync(paths.config) ? configDigest(current) : null;
-  const nextSha256 = configDigest(next);
-  atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "preparing", previousSha256 })}\n`);
+  const previousRecorderSha256 = existsSync(paths.config) ? managedRecorderDigest(current) : null;
+  const nextRecorderSha256 = managedRecorderDigest(next);
+  atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "preparing", previousRecorderSha256 })}\n`);
   atomicWrite(staged, `${JSON.stringify(next, null, 2)}\n`);
-  atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "pending", previousSha256, nextSha256 })}\n`);
+  atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "pending", previousRecorderSha256, nextRecorderSha256 })}\n`);
   renameSync(staged, paths.config);
-  atomicWrite(paths.receipt, `${JSON.stringify({ product: PRODUCT, hostId: id, phase: "ready", sha256: nextSha256 })}\n`);
+  atomicWrite(paths.receipt, `${JSON.stringify(readyRecorderReceipt(id, next))}\n`);
 }
 
 function readBoundedStandardInput(maximumBytes) {
@@ -1092,8 +1173,8 @@ export function remotePrepare(id, encodedEndpoint) {
 }
 
 export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
-  if (typeof oldCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(oldCredentialId) ||
-      typeof nextCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(nextCredentialId) || oldCredentialId === nextCredentialId) {
+  if (!isCanonicalIdentity(oldCredentialId) || !isCanonicalIdentity(nextCredentialId) ||
+      oldCredentialId === nextCredentialId) {
     throw new BridgeHostError("Invalid credential rotation identities.");
   }
   const root = remoteRoot(id);
@@ -1125,6 +1206,65 @@ export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
   console.log(JSON.stringify({ committed: true }));
 }
 
+function recorderSelectionLockPath(root) {
+  return join(root, "recorder-selection.lock");
+}
+
+function acquireRemoteRemovalLock(root, id) {
+  const path = recorderSelectionLockPath(root);
+  const value = { product: PRODUCT, hostId: id, purpose: "removal" };
+  try {
+    const descriptor = openSync(path, "wx", 0o600);
+    try { writeFileSync(descriptor, `${JSON.stringify(value)}\n`); fsyncSync(descriptor); }
+    finally { closeSync(descriptor); }
+    chmodSync(path, 0o600);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = readOwnedJson(path, "remote Recorder selection lock");
+    if (JSON.stringify(existing) !== JSON.stringify(value)) {
+      throw new BridgeHostError("Recorder selection is being saved; retry Bridge removal.");
+    }
+  }
+}
+
+export function remoteRecorderRemovalCheck(id) {
+  const root = remoteRoot(id);
+  if (!existsSync(root)) {
+    console.log(JSON.stringify({ removable: true }));
+    return;
+  }
+  inspect(root, "directory", 0o700, "remote host bridge directory");
+  const ownership = readOwnedJson(join(root, "ownership.json"), "remote bridge ownership receipt");
+  if (ownership.product !== PRODUCT || ownership.hostId !== id) {
+    throw new BridgeHostError("Refusing unowned remote bridge artifacts.");
+  }
+  acquireRemoteRemovalLock(root, id);
+  const paths = remoteConfigPaths(id);
+  if (existsSync(paths.config)) {
+    const current = readOwnedJson(paths.config, "remote Pi Dictation configuration");
+    const selected = current.recorders?.selected || current.recorder?.type || "local";
+    const configured = managedRecorder(current);
+    if (selected === "bridge" && JSON.stringify(configured ?? {}).includes(root)) {
+      rmSync(recorderSelectionLockPath(root));
+      throw new BridgeHostError("Select Local recording with /dictate-config before removing the selected Bridge Recorder.");
+    }
+  }
+  console.log(JSON.stringify({ removable: true }));
+}
+
+export function remoteRecorderRemovalRelease(id) {
+  const root = remoteRoot(id);
+  if (!existsSync(root)) return;
+  const path = recorderSelectionLockPath(root);
+  if (!existsSync(path)) return;
+  const lock = readOwnedJson(path, "remote Recorder selection lock");
+  if (lock.product !== PRODUCT || lock.hostId !== id || lock.purpose !== "removal") {
+    throw new BridgeHostError("Refusing an unowned remote Recorder selection lock.");
+  }
+  rmSync(path);
+  console.log(JSON.stringify({ released: true }));
+}
+
 export function remoteCredentialRevoke(id) {
   const root = remoteRoot(id);
   if (!existsSync(root)) {
@@ -1134,7 +1274,21 @@ export function remoteCredentialRevoke(id) {
   inspect(root, "directory", 0o700, "remote host bridge directory");
   const ownership = readOwnedJson(join(root, "ownership.json"), "remote bridge ownership receipt");
   if (ownership.product !== PRODUCT || ownership.hostId !== id) throw new BridgeHostError("Refusing unowned remote bridge artifacts.");
-  const allowed = new Set(["ownership.json", "credential.json", "credential.next.json", "endpoint.json", "listener.sock"]);
+  const configPaths = remoteConfigPaths(id);
+  if (existsSync(configPaths.receipt)) {
+    const receipt = readOwnedJson(configPaths.receipt, "remote Pi Dictation configuration ownership receipt");
+    if (receipt.hostId === id) {
+      const lockPath = recorderSelectionLockPath(root);
+      if (!existsSync(lockPath)) {
+        throw new BridgeHostError("Bridge removal requires an owned Recorder selection lock.");
+      }
+      const lock = readOwnedJson(lockPath, "remote Recorder selection lock");
+      if (lock.product !== PRODUCT || lock.hostId !== id || lock.purpose !== "removal") {
+        throw new BridgeHostError("Refusing an invalid remote Recorder selection lock.");
+      }
+    }
+  }
+  const allowed = new Set(["ownership.json", "credential.json", "credential.next.json", "endpoint.json", "recorder-selection.lock", "listener.sock"]);
   for (const name of readdirSync(root)) {
     if (!allowed.has(name)) throw new BridgeHostError("Refusing unexpected remote bridge artifact whose ownership cannot be proven.");
     if (name === "listener.sock") {
@@ -1146,6 +1300,10 @@ export function remoteCredentialRevoke(id) {
       inspect(join(root, name), "file", 0o600, `remote bridge ${name}`);
       const value = readOwnedJson(join(root, name), `remote bridge ${name}`);
       if (["credential.json", "credential.next.json"].includes(name)) validateCredential(value, `remote bridge ${name}`);
+      if (name === "recorder-selection.lock" &&
+          (value.product !== PRODUCT || value.hostId !== id || value.purpose !== "removal")) {
+        throw new BridgeHostError("Refusing an invalid remote Recorder selection lock.");
+      }
       if (name === "endpoint.json") {
         const endpoint = value?.endpoint;
         const validEndpoint = endpoint?.type === "unix"
@@ -1159,7 +1317,6 @@ export function remoteCredentialRevoke(id) {
       }
     }
   }
-  const configPaths = remoteConfigPaths(id);
   if (existsSync(configPaths.receipt)) {
     const receipt = readOwnedJson(configPaths.receipt, "remote Pi Dictation configuration ownership receipt");
     if (receipt.product !== PRODUCT || !/^[0-9a-f]{16}$/.test(receipt.hostId) ||
@@ -1171,10 +1328,12 @@ export function remoteCredentialRevoke(id) {
     } else {
       const current = existsSync(configPaths.config)
         ? readOwnedJson(configPaths.config, "remote Pi Dictation configuration") : {};
-      if (receipt.sha256 !== configDigest(current)) {
+      const owned = receipt.recorderSha256 === managedRecorderDigest(current) ||
+        (receipt.recorderSha256 === undefined && legacyReceiptCanMigrate(receipt.hostId, receipt, current));
+      if (!owned) {
         throw new BridgeHostError("Refusing an unowned remote Pi Dictation configuration.");
       }
-      const encodedRecorder = JSON.stringify(current.recorder ?? {});
+      const encodedRecorder = JSON.stringify(managedRecorder(current) ?? {});
       if (encodedRecorder.includes(root)) {
         throw new BridgeHostError("Refusing to remove a host still referenced by remote Pi Dictation configuration.");
       }

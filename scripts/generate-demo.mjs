@@ -9,14 +9,30 @@ import { fileURLToPath } from "node:url";
 const WIDTH = 960;
 const HEIGHT = 420;
 const FPS = 15;
-const DURATION = 10;
+const DURATION = 11;
 const FRAMES = FPS * DURATION;
-const RECORDING_START = 0.9;
-const RECORDING_END = 5.15;
-const PROCESSING_END = 5.85;
-const TRANSCRIBING_END = 6.85;
-const READY_END = 7.95;
-const FADE_START = 9.35;
+
+/* ─────────────────────────────────────────────────────────
+ * ANIMATION STORYBOARD
+ *
+ *   0.00s   Pi waits for input
+ *   1.20s   Insert key overlay appears
+ *   1.80s   recording starts and the overlay fades
+ *   5.62s   Insert key overlay appears again
+ *   6.05s   recording stops; processing starts
+ *   6.75s   transcription starts
+ *   8.25s   dictated text appears
+ *   9.35s   ready state clears
+ *  10.35s   demo fades out before looping
+ * ───────────────────────────────────────────────────────── */
+const RECORDING_START = 1.8;
+const RECORDING_END = 6.05;
+const PROCESSING_END = 6.75;
+const TRANSCRIBING_END = 8.25;
+const READY_END = 9.35;
+const FADE_START = 10.35;
+const FIRST_KEY_PRESS = { appear: 1.2, fade: 1.8, hide: 2.12 };
+const SECOND_KEY_PRESS = { appear: 5.62, fade: 6.05, hide: 6.32 };
 const BARS = "▁▂▃▄▅▆▇█";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = join(repoRoot, "assets");
@@ -61,11 +77,38 @@ function waveformSpans(time, columns = 73) {
   ].join("");
 }
 
+function activityBar(time, phaseStart, columns) {
+  const segmentWidth = 5;
+  const travel = columns - segmentWidth - 1;
+  const step = Math.floor((time - phaseStart) * 10);
+  const cycle = travel * 2;
+  const offset = ((step % cycle) + cycle) % cycle;
+  const segmentStart = 1 + (offset <= travel ? offset : cycle - offset);
+  return [
+    `<tspan fill="#53606f">${"─".repeat(segmentStart)}</tspan>`,
+    `<tspan fill="#58d6ff">${"━".repeat(segmentWidth)}</tspan>`,
+    `<tspan fill="#53606f">${"─".repeat(columns - segmentStart - segmentWidth)}</tspan>`,
+  ].join("");
+}
+
+function phaseElapsed(time, phaseStart) {
+  const elapsed = Math.max(0, Math.floor(time - phaseStart));
+  return `00:${String(elapsed).padStart(2, "0")}`;
+}
+
+function keyPressOpacity(time, timing) {
+  if (time < timing.appear || time > timing.hide) return 0;
+  if (time < timing.fade) return smoothstep(timing.appear, timing.appear + 0.12, time);
+  return 1 - smoothstep(timing.fade, timing.hide, time);
+}
+
 function keyBadge(label, opacity) {
   if (opacity <= 0) return "";
   return `<g opacity="${opacity.toFixed(3)}">
-    <rect x="756" y="70" width="132" height="38" rx="9" fill="#20252e" stroke="#566170"/>
-    <text x="822" y="95" text-anchor="middle" class="small" fill="#e8edf3">${escapeXml(label)}</text>
+    <rect x="748" y="61" width="148" height="54" rx="14" fill="#05070a" opacity="0.72"/>
+    <rect x="752" y="57" width="140" height="54" rx="13" fill="#f4f7fb" stroke="#ffffff" stroke-width="2"/>
+    <rect x="759" y="64" width="126" height="40" rx="9" fill="#dfe5ec" stroke="#aeb9c5"/>
+    <text x="822" y="90" text-anchor="middle" class="key" fill="#17202a">${escapeXml(label)}</text>
   </g>`;
 }
 
@@ -81,8 +124,8 @@ function frameSvg(frame) {
   const elapsed = `00:${String(elapsedSeconds).padStart(2, "0")}`;
   const fadeOpacity = 1 - smoothstep(FADE_START, DURATION, time);
   const overallOpacity = fadeOpacity;
-  const insertStartOpacity = 1 - smoothstep(0.72, 1.0, time) * smoothstep(0.72, 1.0, time);
-  const insertStopOpacity = time < 4.72 || time > 5.25 ? 0 : 1 - Math.abs(time - 4.98) / 0.27;
+  const insertStartOpacity = keyPressOpacity(time, FIRST_KEY_PRESS);
+  const insertStopOpacity = keyPressOpacity(time, SECOND_KEY_PRESS);
 
   let strip = "";
   if (recording) {
@@ -90,21 +133,26 @@ function frameSvg(frame) {
       <tspan fill="${blinkOn ? "#ff5263" : "#11151b"}">●</tspan><tspan fill="#e8edf3"> REC  </tspan>${waveformSpans(time)}<tspan fill="#7f8a98">  ${elapsed}</tspan>
     </text>`;
   } else if (processing || transcribing) {
-    const frames = ["◌", "◒", "◐", "◓"];
+    const frames = ["◜", "◠", "◝", "◞", "◡", "◟"];
     const spinner = frames[Math.floor(time * 10) % frames.length];
-    const label = processing ? "Processing recording…" : "Transcribing…";
-    strip = `<text x="64" y="252" class="mono strip" fill="#ffca67">${spinner} ${label}</text>`;
+    const label = processing ? "Processing…" : "Transcribing…";
+    const phaseStart = processing ? RECORDING_END : PROCESSING_END;
+    const columns = 82 - Array.from(`${spinner} ${label}  `).length - 7;
+    strip = `<text x="64" y="252" class="mono strip"><tspan fill="#ffca67">${spinner} ${label}  </tspan>${activityBar(time, phaseStart, columns)}<tspan fill="#7f8a98">  ${phaseElapsed(time, phaseStart)}</tspan></text>`;
   } else if (ready) {
     strip = `<text x="64" y="252" class="mono strip" fill="#62d394">✓ Dictation ready</text>`;
   }
 
   const editorText = pasted ? "Let’s make the command line feel a little more human." : "";
-  const cursorX = pasted ? 64 + 18 + editorText.length * 10.15 : 82;
+  const editorTextX = 82;
+  const editorCharacterWidth = 9.64;
+  const cursorX = editorTextX + editorText.length * editorCharacterWidth;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
   <style>
     .mono { font-family: "JetBrains Mono", "Noto Sans Mono", monospace; }
     .small { font: 14px "JetBrains Mono", monospace; }
+    .key { font: 700 15px "JetBrains Mono", monospace; letter-spacing: 0.4px; }
     .strip { font-size: 17px; }
   </style>
   <rect width="960" height="420" rx="16" fill="#0b0e13"/>
@@ -124,8 +172,8 @@ function frameSvg(frame) {
     ${strip}
 
     <rect x="54" y="272" width="852" height="68" rx="8" fill="#12171e" stroke="#3b4655"/>
-    <text x="82" y="312" class="mono" font-size="16" fill="#edf2f7">${escapeXml(editorText)}</text>
-    <rect x="${cursorX}" y="292" width="2" height="24" fill="#58d6ff" opacity="${pasted ? 0.8 : 1}"/>
+    <text x="${editorTextX}" y="312" class="mono" font-size="16" fill="#edf2f7">${escapeXml(editorText)}</text>
+    <rect x="${cursorX}" y="291" width="10" height="25" rx="1" fill="#58d6ff" opacity="${pasted ? 0.72 : 0.9}"/>
 
     <line x1="54" y1="359" x2="906" y2="359" stroke="#252c36"/>
     <text x="64" y="388" class="mono" font-size="13" fill="#657181">~/Work/pi-dictation</text>

@@ -75,22 +75,29 @@ async function createRuntime({
   const widgetCalls = [];
   let renderRequests = 0;
 
-  delete process.env.PI_DICTATION_RECORD_CMD;
   const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
   try {
     const persisted = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-    persisted.recorder = recorderConfig || {
+    const selectedRecorder = recorderConfig || {
       type: "local",
       command: `${process.execPath} ${recorderPath} {file} ${recorderArgs}`.trim(),
     };
+    if (persisted.recorders) {
+      persisted.recorders.selected = selectedRecorder.type;
+      persisted.recorders[selectedRecorder.type] = selectedRecorder.type === "local"
+        ? { command: selectedRecorder.command }
+        : { endpoint: selectedRecorder.endpoint, credentialFile: selectedRecorder.credentialFile };
+    } else {
+      persisted.recorder = selectedRecorder;
+    }
+    if (transcribeCommand === null) delete persisted.transcribeCommand;
+    else persisted.transcribeCommand = transcribeCommand;
+    persisted.maxRecordingMs = maxRecordingMs;
+    if (timeoutMs === undefined) delete persisted.timeoutMs;
+    else persisted.timeoutMs = timeoutMs;
     writeFileSync(configPath, JSON.stringify(persisted));
   } catch {}
-  if (transcribeCommand === null) delete process.env.PI_DICTATION_TRANSCRIBE_CMD;
-  else process.env.PI_DICTATION_TRANSCRIBE_CMD = transcribeCommand;
-  process.env.PI_DICTATION_MAX_RECORDING_MS = String(maxRecordingMs);
-  if (timeoutMs === undefined) delete process.env.PI_DICTATION_TIMEOUT_MS;
-  else process.env.PI_DICTATION_TIMEOUT_MS = String(timeoutMs);
 
   const pi = {
     registerShortcut(_key, definition) {
@@ -170,6 +177,81 @@ test("the extension registers the focused settings command", async () => {
   assert.equal(typeof runtime.commands["dictate-config"], "function");
 });
 
+test("the settings command refuses Recorder changes during recording", async () => {
+  const paths = testPaths("config-during-recording");
+  process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
+  const runtime = await createRuntime();
+  try {
+    await runtime.shortcut(runtime.ctx);
+    await waitFor(() => readPids(paths.pidFile).length === 1);
+    await runtime.commands["dictate-config"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /cannot be changed during dictation/i);
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("dictation help reports the Recorder selection", async () => {
+  const runtime = await createRuntime();
+  try {
+    await runtime.commands["dictate-help"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /Recorder selection=local/);
+  } finally {
+    await runtime.shutdown();
+  }
+});
+
+test("the extension registers the doctor command", async () => {
+  const runtime = await createRuntime();
+  assert.equal(typeof runtime.commands["dictate-doctor"], "function");
+});
+
+test("dictation doctor reports a privacy-safe ready setup", async (t) => {
+  const paths = testPaths("doctor-key-command");
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  const runtime = await createRuntime({
+    recorderArgs: "--token doctor-recorder-secret",
+    transcribeCommand: "printf doctor-transcriber-secret",
+  });
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  config.openaiApiKey = "doctor-openai-secret";
+  config.openaiApiKeyCommand = `touch ${paths.marker}`;
+  writeFileSync(configPath, JSON.stringify(config));
+  try {
+    await runtime.commands["dictate-doctor"]("", runtime.ctx);
+    const report = runtime.notifications.at(-1).message;
+    await t.test("identifies the report", () => assert.match(report, /Pi Dictation doctor/));
+    await t.test("reports readiness", () => assert.match(report, /Result: ready/));
+    await t.test("does not expose secrets or commands", () => {
+      assert.doesNotMatch(report, /doctor-(?:openai|recorder|transcriber)-secret|touch|--token/);
+    });
+    await t.test("does not execute the API-key command", () => assert.equal(existsSync(paths.marker), false));
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("dictation doctor reports an unavailable Bridge Recorder", async () => {
+  const paths = testPaths("doctor-bridge");
+  writeFileSync(paths.marker, "credential-secret");
+  const runtime = await createRuntime({
+    recorderConfig: {
+      type: "bridge",
+      endpoint: { type: "unix", path: join(paths.dir, "missing.sock") },
+      credentialFile: paths.marker,
+    },
+  });
+  try {
+    await runtime.commands["dictate-doctor"]("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1).message, /Recorder: unavailable \(Bridge recording health check failed\)/);
+  } finally {
+    await runtime.shutdown();
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
 test("recording appears as a responsive above-editor Dictation strip", async (t) => {
   const paths = testPaths("recording-strip");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
@@ -223,8 +305,11 @@ test("theme styling does not break the responsive Dictation strip width", async 
 test("multi-column spinner frames never exceed the terminal width", async () => {
   const paths = testPaths("spinner-width");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
-  process.env.PI_DICTATION_SPINNER = "fistBump";
   const runtime = await createRuntime();
+  const configPath = join(testHome, ".pi", "agent", "pi-dictation.json");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  config.spinner = "fistBump";
+  writeFileSync(configPath, JSON.stringify(config));
   try {
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
@@ -234,7 +319,9 @@ test("multi-column spinner frames never exceed the terminal width", async () => 
     await stopping;
   } finally {
     await runtime.shutdown();
-    delete process.env.PI_DICTATION_SPINNER;
+    const latest = JSON.parse(readFileSync(configPath, "utf8"));
+    delete latest.spinner;
+    writeFileSync(configPath, JSON.stringify(latest));
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
@@ -295,10 +382,16 @@ test("the Dictation strip renders actual appended PCM as live level history", as
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
     await waitFor(() => /[▂▃▄▅▆▇█]/.test(runtime.widget().render(32)[0]));
+    const stalledUntil = Date.now() + 250;
+    while (Date.now() < stalledUntil) { /* simulate a busy Pi event loop */ }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
     const fullWidth = runtime.widget().render(32)[0];
     const [minimumWidth] = runtime.widget().render(14);
     await t.test("shows measured levels at full width", () => {
       assert.match(fullWidth, /^[● ] REC  .+  \d\d:\d\d$/);
+    });
+    await t.test("keeps the newest measured level at the right edge", () => {
+      assert.match(fullWidth, /[▂▃▄▅▆▇█]  \d\d:\d\d$/);
     });
     await t.test("fits the minimum width", () => {
       assert.equal(visibleWidth(minimumWidth), 14);
@@ -388,12 +481,29 @@ test("one Dictation strip transitions through processing, transcribing, ready, a
     const strip = runtime.widget();
 
     const stopping = runtime.shortcut(runtime.ctx);
-    await t.test("shows processing", () => {
-      assert.match(strip.render(32)[0], /Processing recording…/);
+    const processing = strip.render(48)[0];
+    await t.test("shows processing across the available width", () => {
+      assert.equal(visibleWidth(processing), 48);
+    });
+    await t.test("labels the processing phase", () => {
+      assert.match(processing, /Processing…/);
+    });
+    await t.test("shows indeterminate processing activity", () => {
+      assert.match(processing, /─+━+─+/);
     });
     await waitFor(() => existsSync(paths.marker));
-    await t.test("shows transcription", () => {
-      assert.match(strip.render(32)[0], /Transcribing…/);
+    const transcribing = strip.render(48)[0];
+    await t.test("shows transcription across the available width", () => {
+      assert.equal(visibleWidth(transcribing), 48);
+    });
+    await t.test("labels the transcription phase", () => {
+      assert.match(transcribing, /Transcribing…/);
+    });
+    await t.test("shows transcription elapsed time", () => {
+      assert.match(transcribing, /\d\d:\d\d$/);
+    });
+    await t.test("keeps the longer transcription phase full-width at the narrow boundary", () => {
+      assert.equal(visibleWidth(strip.render(28)[0]), 28);
     });
     await stopping;
     await t.test("shows completion", () => {
@@ -591,7 +701,7 @@ test("configuration changes during recording apply to the next recording", async
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   require("node:fs").mkdirSync(resolve(configPath, ".."), { recursive: true });
   writeFileSync(configPath, JSON.stringify({ transcribeCommand: "printf voice-ok" }));
-  const runtime = await createRuntime({ transcribeCommand: null });
+  const runtime = await createRuntime();
   try {
     await runtime.shortcut(runtime.ctx);
     await waitFor(() => readPids(paths.pidFile).length === 1);
@@ -639,11 +749,10 @@ test("configuration fields with the wrong type are rejected before registration"
   }
 });
 
-test("transcription timeouts below the schema minimum fall back to the default", async () => {
-  const paths = testPaths("invalid-timeout");
+test("an omitted transcription timeout uses the default", async () => {
+  const paths = testPaths("default-timeout");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({
-    timeoutMs: 500,
     transcribeCommand: "cat {file} >/dev/null; sleep 0.6; printf voice-ok",
   });
   try {
@@ -660,7 +769,7 @@ test("transcription timeouts below the schema minimum fall back to the default",
 test("OpenAI transcription pastes the returned text", async (t) => {
   const paths = testPaths("openai");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
-  process.env.PI_DICTATION_OPENAI_API_KEY = "test-key";
+  process.env.OPENAI_API_KEY = "test-key";
   const originalFetch = global.fetch;
   let request;
   global.fetch = async (url, options) => {
@@ -687,7 +796,7 @@ test("OpenAI transcription pastes the returned text", async (t) => {
   } finally {
     await runtime.shutdown();
     global.fetch = originalFetch;
-    delete process.env.PI_DICTATION_OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
@@ -695,7 +804,7 @@ test("OpenAI transcription pastes the returned text", async (t) => {
 test("OpenAI transcription accepts a bounded response above the diagnostic limit", async () => {
   const paths = testPaths("openai-large-response");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
-  process.env.PI_DICTATION_OPENAI_API_KEY = "test-key";
+  process.env.OPENAI_API_KEY = "test-key";
   const originalFetch = global.fetch;
   const transcript = "voice ".repeat(3000).trim();
   global.fetch = async () => new Response(JSON.stringify({ text: transcript }), {
@@ -710,7 +819,7 @@ test("OpenAI transcription accepts a bounded response above the diagnostic limit
   } finally {
     await runtime.shutdown();
     global.fetch = originalFetch;
-    delete process.env.PI_DICTATION_OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     rmSync(paths.dir, { recursive: true, force: true });
   }
 });
@@ -766,6 +875,8 @@ test("the external watchdog survives an abrupt Pi exit", async (t) => {
   require("node:fs").mkdirSync(join(abruptHome, ".pi", "agent"), { recursive: true });
   writeFileSync(join(abruptHome, ".pi", "agent", "pi-dictation.json"), JSON.stringify({
     recorder: { type: "local", command: `${process.execPath} ${recorderPath} {file} --ignore-int --spawn-child` },
+    transcribeCommand: "printf unused",
+    maxRecordingMs: 1000,
   }));
   const harness = spawn(process.execPath, [abruptPiPath], {
     cwd: packageRoot,
@@ -773,8 +884,6 @@ test("the external watchdog survives an abrupt Pi exit", async (t) => {
     env: {
       ...process.env,
       HOME: abruptHome,
-      PI_DICTATION_TRANSCRIBE_CMD: "printf unused",
-      PI_DICTATION_MAX_RECORDING_MS: "1000",
       PI_DICTATION_TEST_PID_FILE: paths.pidFile,
       PI_DICTATION_TEST_CHILD_PID_FILE: childPidFile,
     },
@@ -868,13 +977,9 @@ test("shutdown kills a recorder that ignores SIGINT", async () => {
 });
 
 test.after(() => {
-  delete process.env.PI_DICTATION_RECORD_CMD;
-  delete process.env.PI_DICTATION_TRANSCRIBE_CMD;
-  delete process.env.PI_DICTATION_MAX_RECORDING_MS;
-  delete process.env.PI_DICTATION_TIMEOUT_MS;
   delete process.env.PI_DICTATION_TEST_PID_FILE;
   delete process.env.PI_DICTATION_TEST_RECORDING_PATH_FILE;
   delete process.env.PI_DICTATION_TEST_CHILD_PID_FILE;
-  delete process.env.PI_DICTATION_OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   rmSync(testHome, { recursive: true, force: true });
 });
