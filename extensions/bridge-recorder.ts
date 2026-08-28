@@ -4,15 +4,17 @@ import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   BridgeProtocolFailure,
+  isCanonicalIdentity,
   request as sharedRequest,
   withStream as sharedWithStream,
+  type BridgeProtocolStatus,
   type JsonObject,
 } from "../lib/bridge-protocol.mjs";
 import type { BridgeRecorderConfig } from "./config.js";
 import type { LevelEvent, Recorder, RecorderStartOptions, Recording } from "./recorder.js";
 import { RecorderError, validatePcm16MonoWav } from "./recorder.js";
 
-const MAX_FRAME_BYTES = 64 * 1024;
+const AUDIO_LENGTH_SLACK_BYTES = 64 * 1024;
 const CONTROL_TIMEOUT_MS = 5000;
 const FINALIZATION_TIMEOUT_MS = 30_000;
 const FETCH_NO_PROGRESS_TIMEOUT_MS = 10_000;
@@ -23,7 +25,6 @@ const RETRY_ATTEMPTS = 3;
 const FINALIZATION_POLL_MS = 25;
 
 type Credential = { id: string; secret: Buffer; createdAt?: string };
-type ResponseStatus = "ok" | "busy" | "not-found" | "request-conflict" | "invalid-state" | "failed" | "version-mismatch";
 type BridgeProtocol = { request: typeof sharedRequest; withStream: typeof sharedWithStream };
 const productionBridgeProtocol: BridgeProtocol = { request: sharedRequest, withStream: sharedWithStream };
 
@@ -36,7 +37,7 @@ class BridgeTransportError extends Error {
 class BridgeOutcomeUnknownError extends Error {}
 class BridgeAudioError extends Error {}
 class BridgeResponseError extends Error {
-  constructor(readonly status: ResponseStatus, readonly payload: unknown) { super(status); }
+  constructor(readonly status: BridgeProtocolStatus, readonly payload: unknown) { super(status); }
 }
 
 function abortReason(reason: unknown): Error {
@@ -89,8 +90,7 @@ async function readCredential(path: string): Promise<Credential> {
     }
     const value = JSON.parse(await handle.readFile("utf8"));
     const credentialKeys = exactObject(value, ["id", "secret"]) || exactObject(value, ["id", "secret", "createdAt"]);
-    if (!credentialKeys || typeof value.id !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id) ||
+    if (!credentialKeys || !isCanonicalIdentity(value.id) ||
         typeof value.secret !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value.secret) ||
         (value.createdAt !== undefined && (typeof value.createdAt !== "string" || value.createdAt.length > 32 || Number.isNaN(Date.parse(value.createdAt))))) {
       throw new BridgeProtocolError();
@@ -396,7 +396,7 @@ export function createBridgeRecorder(
         ? startPayload as Record<string, unknown> : undefined;
       const startIsActive = exactObject(startPayload, ["recordingId", "state"]) &&
         ["recording", "finalizing"].includes(String(startShape?.state));
-      const maximumBytes = Math.ceil(options.maxDurationMs * 32) + MAX_FRAME_BYTES;
+      const maximumBytes = Math.ceil(options.maxDurationMs * 32) + AUDIO_LENGTH_SLACK_BYTES;
       const startIsResultReady = exactObject(startPayload, ["recordingId", "state", "length", "sha256", "completion"]) &&
         startShape?.state === "result-ready" && Number.isSafeInteger(startShape.length) && Number(startShape.length) >= 44 &&
         Number(startShape.length) <= maximumBytes && typeof startShape.sha256 === "string" &&
@@ -468,8 +468,10 @@ export function createBridgeRecorder(
               ensureNotCancelled();
               if (Date.now() >= finalizationDeadline) throw new BridgeOutcomeUnknownError();
               try {
+                // The ADR gives `stop` a control deadline inside the finalization budget so that a
+                // slow companion cannot consume the whole window before `status` reconciles the lease.
                 await requestJson(config, credential, "stop", owned, finalizationSignal, stopRequestId,
-                  Math.max(1, finalizationDeadline - Date.now()));
+                  Math.max(1, Math.min(CONTROL_TIMEOUT_MS, finalizationDeadline - Date.now())));
               } catch (error) {
                 if (error instanceof RecorderError || error instanceof BridgeProtocolError || error instanceof BridgeAudioError) throw error;
                 if (error instanceof BridgeResponseError && !["invalid-state", "not-found"].includes(error.status)) throw error;
@@ -532,7 +534,7 @@ export function createBridgeRecorder(
                   },
                   signal: recoverySignal,
                 }, async ({ metadata, bytes }) => {
-                  const maximumBytes = options.maxDurationMs * 32 + MAX_FRAME_BYTES;
+                  const maximumBytes = options.maxDurationMs * 32 + AUDIO_LENGTH_SLACK_BYTES;
                   if (!Number.isSafeInteger(maximumBytes) ||
                       !exactObject(metadata, ["recordingId", "length", "sha256", "completion"]) || metadata.recordingId !== recordingId ||
                       !Number.isSafeInteger(metadata.length) || Number(metadata.length) < 44 || Number(metadata.length) > maximumBytes ||

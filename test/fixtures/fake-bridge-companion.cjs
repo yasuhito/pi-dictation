@@ -545,6 +545,7 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         if (mode === "level-disconnect") socket.destroy();
         return;
       }
+      if (mode === "stop-response-stalled" && request.operation === "stop") return;
       if (mode === `budget-${request.operation}`) {
         const responseCount = (budgetResponseCounts.get(request.operation) ?? 0) + 1;
         budgetResponseCounts.set(request.operation, responseCount);

@@ -21,7 +21,8 @@ export type BridgeProtocolStatus =
 
 export type TimingPolicy =
   | { kind: "absolute"; at: number }
-  | { kind: "no-progress"; timeoutMs: number };
+  | { kind: "no-progress"; timeoutMs: number }
+  | { kind: "phase"; timeoutMs: number };
 
 export interface RequestTimingPolicy {
   connect: TimingPolicy;
@@ -89,6 +90,8 @@ export class BridgeProtocolFailure extends Error {
   readonly cause?: unknown;
   constructor(kind: BridgeProtocolFailureKind, stage: BridgeProtocolFailureStage, cause?: unknown);
 }
+
+export function isCanonicalIdentity(value: unknown): value is string;
 
 export function request(options: BridgeProtocolRequest): Promise<BridgeProtocolResponse>;
 export function withStream<T>(

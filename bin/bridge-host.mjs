@@ -8,6 +8,7 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+import { isCanonicalIdentity } from "../lib/bridge-protocol.mjs";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
 export const BRIDGE_PROTOCOL_VERSION = 3;
@@ -81,7 +82,7 @@ function readOwnedJson(path, description, maximumBytes = MAX_MANAGED_JSON_BYTES)
 }
 
 function validateCredential(credential, description) {
-  if (typeof credential?.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(credential.id) ||
+  if (!isCanonicalIdentity(credential?.id) ||
       typeof credential.secret !== "string" || Buffer.from(credential.secret, "base64").length !== 32 ||
       (credential.createdAt !== undefined && (typeof credential.createdAt !== "string" || credential.createdAt.length > 32 || Number.isNaN(Date.parse(credential.createdAt))))) {
     throw new BridgeHostError(`Refusing invalid ${description}.`);
@@ -371,7 +372,7 @@ export function installHost(alias, args = []) {
   const paths = localPaths(alias);
   inspect(paths.bridgeRoot, "directory", 0o700, "bridge support directory");
   const receipt = readOwnedJson(join(paths.bridgeRoot, "ownership.json"), "bridge ownership receipt");
-  if (receipt.product !== PRODUCT || typeof receipt.installId !== "string" || !/^[0-9a-f-]{36}$/i.test(receipt.installId)) {
+  if (receipt.product !== PRODUCT || !isCanonicalIdentity(receipt.installId)) {
     throw new BridgeHostError("Run `pi-dictation bridge install` to install the Mac companion first.");
   }
   ensureOwnedParent(dirname(paths.plist), "LaunchAgents directory");
@@ -740,8 +741,8 @@ function readRotation(paths) {
   if (!existsSync(paths.rotation)) return undefined;
   const rotation = readOwnedJson(paths.rotation, "credential rotation state");
   if (rotation.product !== PRODUCT || rotation.hostId !== paths.id ||
-      typeof rotation.oldCredentialId !== "string" || typeof rotation.nextCredentialId !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rotation.revokeRequestId) ||
+      !isCanonicalIdentity(rotation.oldCredentialId) || !isCanonicalIdentity(rotation.nextCredentialId) ||
+      !isCanonicalIdentity(rotation.revokeRequestId) ||
       rotation.oldCredentialId === rotation.nextCredentialId || !rotationPhases.has(rotation.phase)) {
     throw new BridgeHostError("Refusing invalid credential rotation state.");
   }
@@ -874,8 +875,8 @@ export async function revokeHost(alias, confirmed, companionRequestAt, deletionP
     if (revocation.product !== PRODUCT || revocation.hostId !== paths.id ||
         !["confirmed", "companion-revoked"].includes(revocation.phase) ||
         (revocation.operation !== undefined && !["credential-revoke", "credential-revoke-if-idle", "credential-revoke-if-no-active"].includes(revocation.operation)) ||
-        typeof revocation.credentialId !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(revocation.requestId)) {
+        !isCanonicalIdentity(revocation.credentialId) ||
+        !isCanonicalIdentity(revocation.requestId)) {
       throw new BridgeHostError("Refusing invalid credential revocation state.");
     }
   }
@@ -1172,8 +1173,8 @@ export function remotePrepare(id, encodedEndpoint) {
 }
 
 export function remoteCredentialCommit(id, oldCredentialId, nextCredentialId) {
-  if (typeof oldCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(oldCredentialId) ||
-      typeof nextCredentialId !== "string" || !/^[0-9a-f-]{36}$/i.test(nextCredentialId) || oldCredentialId === nextCredentialId) {
+  if (!isCanonicalIdentity(oldCredentialId) || !isCanonicalIdentity(nextCredentialId) ||
+      oldCredentialId === nextCredentialId) {
     throw new BridgeHostError("Invalid credential rotation identities.");
   }
   const root = remoteRoot(id);

@@ -193,6 +193,29 @@ test("the Bridge protocol requires a canonical credential identity", async () =>
   assert.deepEqual({ kind: error.kind, connects: harness.state.connects }, { kind: "malformed", connects: 0 });
 });
 
+test("the Bridge protocol publishes one canonical identity form", async (t) => {
+  const { isCanonicalIdentity } = await import("../lib/bridge-protocol.mjs");
+  const generated = "abcdef01-2345-4678-89ab-cdef01234567";
+  await t.test("accepts a canonical identity", () => {
+    assert.equal(isCanonicalIdentity(generated), true);
+  });
+  await t.test("rejects the uppercase spelling of the same value", () => {
+    assert.equal(isCanonicalIdentity(generated.toUpperCase()), false);
+  });
+  await t.test("rejects hyphens padded to canonical length", () => {
+    assert.equal(isCanonicalIdentity("-".repeat(36)), false);
+  });
+  await t.test("rejects an unsupported version digit", () => {
+    assert.equal(isCanonicalIdentity("11111111-1111-6111-8111-111111111111"), false);
+  });
+  await t.test("rejects an unsupported variant digit", () => {
+    assert.equal(isCanonicalIdentity("11111111-1111-4111-c111-111111111111"), false);
+  });
+  await t.test("rejects a value that is not a string", () => {
+    assert.equal(isCanonicalIdentity(undefined), false);
+  });
+});
+
 test("the Bridge protocol rejects an invalid TCP port as malformed input", async () => {
   const { createRequestHarness } = await loadFactory();
   const harness = createRequestHarness();
@@ -250,6 +273,37 @@ test("an expired absolute response deadline cannot accept a buffered response", 
     },
   }).catch((value) => value);
   assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "response" });
+});
+
+test("a phase-scoped response deadline bounds the whole phase", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ fragmentResponse: true, streamDelayMs: 20, noStreamEof: true });
+  const startedAt = Date.now();
+  const error = await harness.request({
+    timing: {
+      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "phase", timeoutMs: 150 },
+    },
+  }).catch((value) => value);
+  const elapsed = Date.now() - startedAt;
+  await t.test("is not extended by response progress", () => {
+    assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "response" });
+  });
+  await t.test("expires at its phase budget", () => {
+    assert.equal(elapsed < 600, true);
+  });
+});
+
+test("a phase-scoped response deadline accepts a response within its budget", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness();
+  const response = await harness.request({
+    timing: {
+      connect: { kind: "no-progress", timeoutMs: 100 }, challenge: { kind: "no-progress", timeoutMs: 100 },
+      requestWrite: { kind: "no-progress", timeoutMs: 100 }, response: { kind: "phase", timeoutMs: 150 },
+    },
+  });
+  assert.deepEqual(response, { status: "ok", payload: { accepted: true } });
 });
 
 test("the Bridge protocol classifies a challenge deadline", async () => {

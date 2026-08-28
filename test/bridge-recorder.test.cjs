@@ -160,6 +160,29 @@ test("the Recorder starts with an install or rotation credential containing crea
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge Recorder refuses a credential whose identity is not canonical", async (t) => {
+  const instance = await harness("valid", { id: "AAAAAAAA-7777-4777-8777-777777777777" });
+  const requests = [];
+  try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
+    const { createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const recorder = createBridgeRecorder(instance.config, {
+      request(options) {
+        requests.push(options.operation);
+        return sharedProtocol.request(options);
+      },
+      withStream: sharedProtocol.withStream,
+    });
+    const error = await recorder.start(instance.startOptions).catch((value) => value);
+    await t.test("returns the safe Recorder classification", () => {
+      assert.equal(error.code, "recording-failed");
+    });
+    await t.test("rejects the credential before reaching the shared seam", () => {
+      assert.deepEqual(requests, []);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge Recorder preserves the safe audio error for trailing ordinary response bytes", async (t) => {
   const instance = await harness("extra-start-byte");
   try {
@@ -485,11 +508,11 @@ test("each Bridge control operation keeps one deadline across transport retries"
   };
   const operations = ["start", "status", "stop", "acknowledge", "cancel"];
   const elapsed = Object.fromEntries(await Promise.all(operations.map(async (operation) => [operation, await characterize(operation)])));
-  const expectedBounds = { start: [4500, 6000], status: [4500, 6000], stop: [7500, 9000], acknowledge: [4500, 6000], cancel: [4500, 6000] };
+  const expectedBounds = { start: [4500, 6000], status: [4500, 6000], stop: [4500, 6000], acknowledge: [4500, 6000], cancel: [4500, 6000] };
   const policy = {
     start: "start shares its five-second budget across retries",
     status: "status shares its five-second budget across retries",
-    stop: "stop spans retries beyond five seconds inside the finalization budget",
+    stop: "stop shares its five-second budget across retries inside the finalization budget",
     acknowledge: "acknowledge shares its five-second budget across retries",
     cancel: "cancel shares its five-second budget across retries",
   };
@@ -499,6 +522,22 @@ test("each Bridge control operation keeps one deadline across transport retries"
       assert.equal(elapsed[operation] >= minimum && elapsed[operation] < maximum, true);
     });
   }
+});
+
+test("a stalled stop response cannot consume the finalization budget before status reconciles", async (t) => {
+  const instance = await harness("stop-response-stalled");
+  try {
+    const startedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    const elapsed = Date.now() - startedAt;
+    await t.test("commits the reconciled result", () => {
+      assert.equal(existsSync(instance.startOptions.destination), true);
+    });
+    await t.test("leaves the finalization budget for reconciliation", () => {
+      assert.equal(elapsed < 15000, true);
+    });
+  } finally { await instance.cleanup(); }
 });
 
 for (const status of ["not-found", "request-conflict", "invalid-state", "failed", "busy"]) {
