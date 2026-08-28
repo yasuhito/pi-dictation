@@ -24,6 +24,7 @@ let activeId = persisted.activeId;
 let unappliedStopFailures = 0;
 let unappliedStopRequestId;
 let slowHealthFailures = 0;
+let terminalLevelDelivered = false;
 const budgetResponseCounts = new Map();
 const retentionMs = mode === "short-retention" ? 300 : 10 * 60 * 1000;
 const requestReceiptRetentionMs = retentionMs;
@@ -214,7 +215,8 @@ function streamEvent(subscriber, event) {
   ]);
   const output = frame({
     type: "level-event", version: protocolVersion, requestId: subscriber.requestId,
-    streamSequence: subscriber.streamSequence, payload: payload.toString("base64"), hmac: hmac.toString("hex"),
+    streamSequence: subscriber.streamSequence, payload: payload.toString("base64"),
+    hmac: mode === "malformed-level-authentication" ? "00".repeat(32) : hmac.toString("hex"),
   });
   subscriber.streamSequence += 1;
   if (!subscriber.socket.write(output)) subscriber.socket.destroy();
@@ -276,6 +278,10 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         require("node:fs").appendFileSync(eventFile, `${request.operation}-at:${Date.now()}\n`);
       }
       if (mode === "cancel-unconfirmed" && request.operation === "cancel") return;
+      if (mode === "terminal-level" && request.operation === "subscribe-levels" && terminalLevelDelivered) {
+        socket.destroy();
+        return;
+      }
       if (mode === "unapplied-stop-retries" && request.operation === "stop") {
         unappliedStopRequestId ??= request.requestId;
         if (request.requestId !== unappliedStopRequestId) {
@@ -530,9 +536,16 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
         for (const event of recording.observations ?? []) {
           if (event.sequence > payload.afterSequence) streamEvent(subscriber, event);
         }
+        if (mode === "terminal-level") {
+          terminalLevelDelivered = true;
+          streamEvent(subscriber, { type: "terminal", state: "finalizing" });
+          socket.end();
+          recording.subscriber = undefined;
+        }
         if (mode === "level-disconnect") socket.destroy();
         return;
       }
+      if (mode === "stop-response-stalled" && request.operation === "stop") return;
       if (mode === `budget-${request.operation}`) {
         const responseCount = (budgetResponseCounts.get(request.operation) ?? 0) + 1;
         budgetResponseCounts.set(request.operation, responseCount);
@@ -610,6 +623,8 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       }
       if (request.operation === "fetch" && mode === "extra-fetch-byte" && audio) {
         socket.end(Buffer.concat([response, audio, Buffer.from([1])]));
+      } else if (request.operation === "start" && mode === "extra-start-byte") {
+        socket.end(Buffer.concat([response, Buffer.from([1])]));
       } else socket.end(audio ? Buffer.concat([response, audio]) : response);
     } catch { socket.destroy(); }
   });

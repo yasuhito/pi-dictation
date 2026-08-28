@@ -22,6 +22,22 @@ function frameBody(body) {
 }
 function frame(value) { return frameBody(Buffer.from(JSON.stringify(value))); }
 
+function authenticatedFrame(credential, challenge, requestId, sequence, payload, overrides = {}) {
+  const payloadBytes = overrides.payloadBytes ?? Buffer.from(JSON.stringify(payload));
+  const version = overrides.version ?? VERSION;
+  const streamTag = tag(credential.secret, [
+    "stream", VERSION, version, challenge, credential.id, requestId, sequence, payloadBytes,
+  ]);
+  return frame({
+    type: overrides.type ?? "level-event",
+    version,
+    requestId: overrides.requestId ?? requestId,
+    streamSequence: overrides.sequence ?? sequence,
+    payload: overrides.payloadEncoding ?? payloadBytes.toString("base64"),
+    hmac: overrides.hmac ?? streamTag.toString("hex"),
+  });
+}
+
 export function createRequestHarness(overrides = {}) {
   const credential = { id: randomUUID(), secret: Buffer.alloc(32, 19) };
   const challenge = Buffer.alloc(32, 23);
@@ -82,29 +98,34 @@ export function createRequestHarness(overrides = {}) {
             payload: overrides.responsePayloadEncoding ?? responsePayload.toString("base64"),
             hmac: overrides.responseHmac ?? responseTag.toString("hex"),
           });
-          let streamBytes = overrides.binaryBytes ?? Buffer.alloc(0);
-          if (overrides.streamPayloads) {
-            streamBytes = Buffer.concat(overrides.streamPayloads.map((value, streamSequence) => {
-              const eventBytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
-              const eventTag = tag(credential.secret, [
-                "stream", VERSION, responseVersion, challenge, credential.id,
-                requestMessage.requestId, streamSequence, eventBytes,
-              ]);
-              const message = {
-                type: "level-event", version: responseVersion, requestId: requestMessage.requestId,
-                streamSequence, payload: eventBytes.toString("base64"), hmac: eventTag.toString("hex"),
-              };
-              return frame(overrides.mutateStreamFrame?.(message, streamSequence) ?? message);
-            }));
+          let streamBytes = overrides.streamBytes ?? Buffer.alloc(0);
+          if (overrides.framePayloads) {
+            streamBytes = Buffer.concat(overrides.framePayloads.map((payload, sequence) => authenticatedFrame(
+              credential, challenge, requestMessage.requestId, sequence, payload,
+              sequence === (overrides.frameOverrideSequence ?? -1) ? overrides.frameOverrides : undefined,
+            )));
           }
-          if (overrides.streamBytes) streamBytes = overrides.streamBytes;
-          const trailing = overrides.trailingBytes ?? Buffer.alloc(0);
-          const output = Buffer.concat([response, streamBytes, trailing]);
-          const chunks = overrides.fragmentResponse || overrides.fragmentStream
-            ? [...output].map((byte) => Buffer.from([byte]))
-            : [output];
-          for (const chunk of chunks) enqueue(chunk);
-          if (!overrides.noStreamEnd) enqueue(null);
+          const suffix = overrides.trailingBytes ?? streamBytes;
+          if (overrides.separateStreamChunks) {
+            enqueue(response);
+            const chunks = overrides.separateStreamChunks;
+            chunks.forEach((chunk, index) => setTimeout(
+              () => enqueue(chunk), overrides.streamDelayMs * (index + 1),
+            ));
+            if (!overrides.noStreamEof) setTimeout(
+              () => enqueue(null), overrides.streamDelayMs * (chunks.length + 1),
+            );
+          } else {
+            const output = suffix.length > 0 ? Buffer.concat([response, suffix]) : response;
+            const chunks = overrides.fragmentResponse ? [...output].map((byte) => Buffer.from([byte])) : [output];
+            if (overrides.streamDelayMs) {
+              chunks.forEach((chunk, index) => setTimeout(() => enqueue(chunk), overrides.streamDelayMs * index));
+              if (!overrides.noStreamEof) setTimeout(() => enqueue(null), overrides.streamDelayMs * chunks.length);
+            } else {
+              for (const chunk of chunks) enqueue(chunk);
+              if (!overrides.noStreamEof) enqueue(null);
+            }
+          }
           state.payloadBytes = payloadBytes;
         },
         destroy() {
@@ -121,8 +142,6 @@ export function createRequestHarness(overrides = {}) {
     challenge: { kind: "no-progress", timeoutMs: 100 },
     requestWrite: { kind: "no-progress", timeoutMs: 100 },
     response: { kind: "no-progress", timeoutMs: 100 },
-    stream: { kind: "no-progress", timeoutMs: 100 },
-    end: { kind: "no-progress", timeoutMs: 100 },
   };
   const defaults = {
     endpoint, credential, requestId: randomUUID(), operation: "health", payload: {}, timing,
@@ -131,15 +150,16 @@ export function createRequestHarness(overrides = {}) {
   return {
     state,
     credential,
-    request(options = {}) {
-      const merged = { ...defaults, ...options };
-      const { stream: _stream, end: _end, ...requestTiming } = merged.timing;
-      return request({ ...merged, timing: requestTiming });
-    },
-    withStream(options = {}, consumer = async () => undefined) {
-      return withStream({ ...defaults, kind: "binary", ...options }, consumer);
+    request(options = {}) { return request({ ...defaults, ...options }); },
+    withStream(kind, consumer, options = {}) {
+      const streamTiming = {
+        ...timing,
+        stream: { kind: "no-progress", timeoutMs: 100 },
+        end: { kind: "no-progress", timeoutMs: 100 },
+      };
+      return withStream({ ...defaults, kind, timing: streamTiming, ...options }, consumer);
     },
   };
 }
 
-export { encode, frame, frameBody, tag };
+export { authenticatedFrame, encode, frame, frameBody, tag };

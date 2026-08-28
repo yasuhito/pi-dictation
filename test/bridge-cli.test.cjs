@@ -395,6 +395,31 @@ test("bridge install refuses a dangling symlink at a managed artifact", () => {
   }
 });
 
+test("bridge install refuses a credential whose identity is not canonical", async (t) => {
+  const home = temporaryHome();
+  const tools = fakeToolchain(home);
+  try {
+    const installed = runBridge(home, ["install"], { PATH: tools });
+    if (installed.status !== 0) throw new Error(installed.stderr);
+    const path = join(home, "Library", "Application Support", "pi-dictation", "bridge", "credential.json");
+    const credential = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...credential, id: credential.id.toUpperCase() }), { mode: 0o600 });
+    const result = runBridge(home, ["install"], { PATH: tools });
+
+    await t.test("fails the command", () => {
+      assert.notEqual(result.status, 0);
+    });
+    await t.test("names the credential rejection", () => {
+      assert.match(result.stderr, /Refusing invalid bridge credential\./);
+    });
+    await t.test("directs the user to generate a credential", () => {
+      assert.match(result.stderr, /Run `pi-dictation bridge install` to generate one\./);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("bridge install refuses an existing app whose ownership cannot be proven", () => {
   const home = temporaryHome();
   const tools = fakeToolchain(home);
@@ -894,11 +919,29 @@ test("the actual npm package loads in Pi extension and native CLI runtime regime
     const cliSmoke = spawnSync(process.execPath, [join(packagedRoot, "bin", "pi-dictation.mjs")], {
       cwd: directory, encoding: "utf8",
     });
+    const packedRuntime = join(packagedRoot, "lib", "bridge-protocol.mjs");
+    const packedDeclaration = join(packagedRoot, "lib", "bridge-protocol.d.mts");
+    const runtimeSmoke = spawnSync(process.execPath, [
+      "--input-type=module", "--eval",
+      `import * as protocol from ${JSON.stringify(packedRuntime)};
+       console.log(JSON.stringify(Object.entries(protocol).map(([name, value]) => [name, typeof value]).sort()));`,
+    ], { cwd: directory, encoding: "utf8" });
+    // Callable declarations are the whole shared interface; a value export of any other kind
+    // must fail this comparison so the agreement is reconsidered deliberately.
+    const declaredExports = [...new Set([...readFileSync(packedDeclaration, "utf8")
+      .matchAll(/^export (?:declare )?(?:function|class) (\w+)/gm)]
+      .map(([, name]) => name))].sort().map((name) => [name, "function"]);
     await t.test("loads the shipped TypeScript extension through Pi's Jiti regime", () => {
       assert.equal(extensionSmoke.status, 0, extensionSmoke.stderr);
     });
     await t.test("loads the shipped management CLI as native ESM", () => {
       assert.match(cliSmoke.stdout, /Usage: pi-dictation bridge/);
+    });
+    await t.test("imports the shipped Bridge protocol runtime as a JavaScript caller", () => {
+      assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
+    });
+    await t.test("agrees between the shipped native ESM exports and its NodeNext declaration", () => {
+      assert.deepEqual(JSON.parse(runtimeSmoke.stdout), declaredExports);
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -915,6 +958,12 @@ test("the npm tarball includes the bridge CLI and companion source", async (t) =
   });
   await t.test("includes the self-contained real-device certification command", () => {
     assert.ok(files.includes("bin/pi-dictation-bridge-certify.cjs"));
+  });
+  await t.test("includes the shared Bridge protocol runtime", () => {
+    assert.ok(files.includes("lib/bridge-protocol.mjs"));
+  });
+  await t.test("includes the shared Bridge protocol declaration", () => {
+    assert.ok(files.includes("lib/bridge-protocol.d.mts"));
   });
   await t.test("includes the companion Swift source", () => {
     assert.ok(files.includes("native/macos-companion/PiDictationBridge.swift"));

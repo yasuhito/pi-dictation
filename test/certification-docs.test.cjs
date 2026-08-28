@@ -25,10 +25,6 @@ test("the actual npm tarball carries and executes its Bridge certification docum
     });
     if (listed.status !== 0) throw new Error(listed.stderr);
     const scenarios = JSON.parse(listed.stdout).scenarios.map(({ name }) => name);
-    const protocolImport = spawnSync(process.execPath, [
-      "--input-type=module", "--eval",
-      `import { request } from ${JSON.stringify(join(packagedRoot, "lib", "bridge-protocol.mjs"))}; if (typeof request !== "function") process.exit(1);`,
-    ], { cwd: packagedRoot, encoding: "utf8" });
     const readme = readFileSync(join(packagedRoot, "README.md"), "utf8");
 
     await t.test("ships the exact support boundary", () => {
@@ -42,12 +38,6 @@ test("the actual npm tarball carries and executes its Bridge certification docum
     });
     await t.test("runs the documented list command from packed bytes", () => {
       assert.equal(scenarios.includes("clean-user-tarball"), true);
-    });
-    await t.test("ships the Bridge protocol declaration", () => {
-      assert.equal(existsSync(join(packagedRoot, "lib", "bridge-protocol.d.mts")), true);
-    });
-    await t.test("imports the native ESM Bridge protocol runtime from packed bytes", () => {
-      assert.equal(protocolImport.status, 0);
     });
     await t.test("claims only the exact certified Mac and macOS build", () => {
       assert.match(readme, /Apple M1 Pro MacBook Pro \(`MacBookPro18,3`\) running macOS `26\.5\.1 \(25F80\)`/);

@@ -25,7 +25,7 @@ function fixture() {
   mkdirSync(tools, { mode: 0o700 });
   mkdirSync(bridge, { recursive: true, mode: 0o700 });
   mkdirSync(launchAgents, { recursive: true, mode: 0o700 });
-  writeFileSync(join(bridge, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId: "11111111-1111-1111-1111-111111111111" }), { mode: 0o600 });
+  writeFileSync(join(bridge, "ownership.json"), JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId: "11111111-1111-4111-8111-111111111111" }), { mode: 0o600 });
   const sshLog = join(home, "ssh.log");
   executable(join(tools, "ssh"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$SSH_LOG"
@@ -545,8 +545,12 @@ test("remote listener rejects an SSH TCP forward exposed by GatewayPorts", { ski
   writeFileSync(script, "const net=require('node:net');const server=net.createServer(s=>s.destroy());server.listen(0,'0.0.0.0',()=>console.log(server.address().port));\n");
   const server = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "inherit"] });
   try {
-    const [chunk] = await once(server.stdout, "data");
-    const endpoint = { type: "tcp", host: "127.0.0.1", port: Number(String(chunk).trim()) };
+    let announced = "";
+    for await (const chunk of server.stdout) {
+      announced += String(chunk);
+      if (announced.includes("\n")) break;
+    }
+    const endpoint = { type: "tcp", host: "127.0.0.1", port: Number(announced.trim()) };
     const credential = { id: "66666666-6666-4666-8666-666666666666", secret: Buffer.alloc(32, 12).toString("base64") };
     const prepared = spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id, Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
       cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
@@ -849,7 +853,7 @@ test("uninstall reconciles a partial remote-cleanup failure", async (t) => {
 });
 
 function completeCompanionFixture(f) {
-  const installId = "11111111-1111-1111-1111-111111111111";
+  const installId = "11111111-1111-4111-8111-111111111111";
   const app = join(f.bridge, "PiDictationBridge.app");
   const runtime = join(f.home, "Library", "Caches", "pi-dictation", "bridge");
   for (const directory of [join(app, "Contents", "MacOS"), join(app, "Contents", "Resources"), runtime]) mkdirSync(directory, { recursive: true, mode: 0o700 });

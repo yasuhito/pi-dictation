@@ -56,6 +56,40 @@ async function harness(mode = "valid", credentialMetadata = {}) {
 
 runRecorderContract("bridge recording", () => harness());
 
+test("the Bridge Recorder routes all exchanges through the shared protocol seam", async (t) => {
+  const instance = await harness();
+  const requests = [];
+  const streams = [];
+  try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
+    const { checkBridgeRecorder, createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const protocol = {
+      request(options) {
+        requests.push(options.operation);
+        return sharedProtocol.request(options);
+      },
+      withStream(options, consumer) {
+        streams.push([options.operation, options.kind]);
+        return sharedProtocol.withStream(options, consumer);
+      },
+    };
+    await checkBridgeRecorder(instance.config, 2000, protocol);
+    const recorder = createBridgeRecorder(instance.config, protocol);
+    const stopped = await recorder.start(instance.startOptions);
+    await stopped.stop();
+    const cancelled = await recorder.start(instance.startOptions);
+    await cancelled.cancel();
+    await t.test("routes control exchanges through request", () => {
+      assert.deepEqual([...new Set(requests)].sort(), ["acknowledge", "cancel", "health", "start", "status", "stop"]);
+    });
+    await t.test("routes audio and Level streams through withStream", () => {
+      assert.deepEqual([...new Map(streams.map((value) => [value[0], value])).values()].sort(), [
+        ["fetch", "binary"], ["subscribe-levels", "authenticated-frames"],
+      ]);
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge health check reports an authenticated available input", async () => {
   const instance = await harness();
   try {
@@ -126,6 +160,42 @@ test("the Recorder starts with an install or rotation credential containing crea
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge Recorder refuses a credential whose identity is not canonical", async (t) => {
+  const instance = await harness("valid", { id: "AAAAAAAA-7777-4777-8777-777777777777" });
+  const requests = [];
+  try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
+    const { createBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
+    const recorder = createBridgeRecorder(instance.config, {
+      request(options) {
+        requests.push(options.operation);
+        return sharedProtocol.request(options);
+      },
+      withStream: sharedProtocol.withStream,
+    });
+    const error = await recorder.start(instance.startOptions).catch((value) => value);
+    await t.test("returns the safe Recorder classification", () => {
+      assert.equal(error.code, "recording-failed");
+    });
+    await t.test("rejects the credential before reaching the shared seam", () => {
+      assert.deepEqual(requests, []);
+    });
+  } finally { await instance.cleanup(); }
+});
+
+test("the Bridge Recorder preserves the safe audio error for trailing ordinary response bytes", async (t) => {
+  const instance = await harness("extra-start-byte");
+  try {
+    const error = await instance.recorder.start(instance.startOptions).catch((value) => value);
+    await t.test("returns the prior Recorder classification", () => {
+      assert.equal(error.code, "invalid-audio");
+    });
+    await t.test("returns the prior safe message", () => {
+      assert.equal(error.message, "The recorder did not produce a complete PCM16 mono WAV.");
+    });
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge Recorder exposes storage reservation exhaustion safely", async () => {
   const instance = await harness("storage-full");
   try {
@@ -184,6 +254,20 @@ test("the Bridge Level subscription accepts in-window out-of-order observations"
   } finally { await instance.cleanup(); }
 });
 
+test("the Bridge Level subscription rejects a malformed authenticated frame through the shared seam", async () => {
+  const instance = await harness("malformed-level-authentication");
+  const events = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => events.push(event) });
+    const deadline = Date.now() + 3000;
+    while (!events.some(({ type, state }) => type === "transport" && state === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    await recording.cancel();
+    assert.equal(events.some(({ type, state }) => type === "transport" && state === "unavailable"), true);
+  } finally { await instance.cleanup(); }
+});
+
 test("the Bridge rejects conflicting duplicate Level observations", async (t) => {
   const instance = await harness("conflicting-duplicate");
   const events = [];
@@ -214,6 +298,26 @@ test("the Bridge Level subscription reports observations lost beyond replay", as
     }
     await recording.cancel();
     assert.deepEqual(observations.find(({ type }) => type === "gap"), { type: "gap", fromSequence: 0, toSequence: 4 });
+  } finally { await instance.cleanup(); }
+});
+
+test("a terminal Level frame ends the subscription loop", async (t) => {
+  const instance = await harness("terminal-level");
+  const events = [];
+  try {
+    const recording = await instance.recorder.start({ ...instance.startOptions, onLevel: (event) => events.push(event) });
+    const deadline = Date.now() + 500;
+    while (!events.some(({ type, state }) => type === "transport" && state === "unavailable") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    const subscriptionCount = instance.events().filter((event) => event === "subscribe-levels").length;
+    await recording.cancel();
+    await t.test("does not resubscribe", () => {
+      assert.equal(subscriptionCount, 1);
+    });
+    await t.test("does not report the next connection as unavailable", () => {
+      assert.equal(events.some(({ type, state }) => type === "transport" && state === "unavailable"), false);
+    });
   } finally { await instance.cleanup(); }
 });
 
@@ -404,11 +508,11 @@ test("each Bridge control operation keeps one deadline across transport retries"
   };
   const operations = ["start", "status", "stop", "acknowledge", "cancel"];
   const elapsed = Object.fromEntries(await Promise.all(operations.map(async (operation) => [operation, await characterize(operation)])));
-  const expectedBounds = { start: [4500, 6000], status: [4500, 6000], stop: [7500, 9000], acknowledge: [4500, 6000], cancel: [4500, 6000] };
+  const expectedBounds = { start: [4500, 6000], status: [4500, 6000], stop: [4500, 6000], acknowledge: [4500, 6000], cancel: [4500, 6000] };
   const policy = {
     start: "start shares its five-second budget across retries",
     status: "status shares its five-second budget across retries",
-    stop: "stop spans retries beyond five seconds inside the finalization budget",
+    stop: "stop shares its five-second budget across retries inside the finalization budget",
     acknowledge: "acknowledge shares its five-second budget across retries",
     cancel: "cancel shares its five-second budget across retries",
   };
@@ -418,6 +522,22 @@ test("each Bridge control operation keeps one deadline across transport retries"
       assert.equal(elapsed[operation] >= minimum && elapsed[operation] < maximum, true);
     });
   }
+});
+
+test("a stalled stop response cannot consume the finalization budget before status reconciles", async (t) => {
+  const instance = await harness("stop-response-stalled");
+  try {
+    const startedAt = Date.now();
+    const recording = await instance.recorder.start(instance.startOptions);
+    await recording.stop();
+    const elapsed = Date.now() - startedAt;
+    await t.test("commits the reconciled result", () => {
+      assert.equal(existsSync(instance.startOptions.destination), true);
+    });
+    await t.test("leaves the finalization budget for reconciliation", () => {
+      assert.equal(elapsed < 15000, true);
+    });
+  } finally { await instance.cleanup(); }
 });
 
 for (const status of ["not-found", "request-conflict", "invalid-state", "failed", "busy"]) {
