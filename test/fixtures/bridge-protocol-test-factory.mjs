@@ -58,9 +58,21 @@ export function createRequestHarness(overrides = {}) {
       if (overrides.challengeEof) enqueue(null);
       const connection = {
         connected: overrides.connect ?? Promise.resolve(),
-        read() {
-          if (queue.length > 0) return Promise.resolve(queue.shift());
-          return new Promise((resolve) => waiters.push(resolve));
+        read(maxBytes) {
+          if (queue.length > 0) {
+            const chunk = queue.shift();
+            if (chunk !== null && maxBytes !== undefined && chunk.length > maxBytes) {
+              queue.unshift(chunk.subarray(maxBytes));
+              return Promise.resolve(chunk.subarray(0, maxBytes));
+            }
+            return Promise.resolve(chunk);
+          }
+          return new Promise((resolve) => waiters.push((chunk) => {
+            if (chunk !== null && maxBytes !== undefined && chunk.length > maxBytes) {
+              queue.unshift(chunk.subarray(maxBytes));
+              resolve(chunk.subarray(0, maxBytes));
+            } else resolve(chunk);
+          }));
         },
         write(bytes) {
           if (overrides.write) return overrides.write(bytes);

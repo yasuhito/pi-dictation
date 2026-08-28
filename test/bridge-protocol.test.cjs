@@ -703,3 +703,98 @@ test("withStream destroys the connection before successful settlement", async ()
   await harness.withStream("authenticated-frames", () => {});
   assert.equal(harness.state.destroyed, 1);
 });
+
+test("withStream settles an abandoned authenticated-frame read before returning", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ noStreamEof: true });
+  let pending;
+  let readSettled = false;
+  const response = await harness.withStream("authenticated-frames", async ({ frames }) => {
+    pending = frames[Symbol.asyncIterator]().next();
+    pending.then(() => { readSettled = true; }, () => { readSettled = true; });
+    return "done";
+  });
+  const settledBeforeReturn = readSettled;
+  const readOutcome = await pending.then(
+    () => ({ status: "fulfilled" }),
+    (error) => failureShape(error),
+  );
+  await t.test("preserves the completed consumer result", () => {
+    assert.equal(response.value, "done");
+  });
+  await t.test("settles the outstanding read before returning", () => {
+    assert.equal(settledBeforeReturn, true);
+  });
+  await t.test("releases the outstanding read by closing the transport", () => {
+    assert.deepEqual(readOutcome, { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" });
+  });
+});
+
+test("withStream settles an abandoned binary read before returning", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ noStreamEof: true });
+  let pending;
+  let readSettled = false;
+  const outcome = await harness.withStream("binary", async ({ bytes }) => {
+    pending = bytes.readExactly(1).next();
+    pending.then(() => { readSettled = true; }, () => { readSettled = true; });
+    return "done";
+  }).catch((error) => failureShape(error));
+  const settledBeforeReturn = readSettled;
+  const readOutcome = await pending.then(
+    () => ({ status: "fulfilled" }),
+    (error) => failureShape(error),
+  );
+  await t.test("rejects the incomplete declared read", () => {
+    assert.deepEqual(outcome, { name: "BridgeProtocolFailure", kind: "malformed", stage: "stream" });
+  });
+  await t.test("settles the outstanding read before returning", () => {
+    assert.equal(settledBeforeReturn, true);
+  });
+  await t.test("releases the outstanding read by closing the transport", () => {
+    assert.deepEqual(readOutcome, { name: "BridgeProtocolFailure", kind: "transport", stage: "stream" });
+  });
+});
+
+test("authenticated-frame streams permit only one iterator", async (t) => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ framePayloads: [{ value: 1 }] });
+  const response = await harness.withStream("authenticated-frames", async ({ frames }) => {
+    const first = frames[Symbol.asyncIterator]();
+    const duplicate = Promise.resolve().then(() => frames[Symbol.asyncIterator]()).then((iterator) => iterator.next());
+    return Promise.allSettled([first.next(), duplicate]);
+  });
+  await t.test("the first iterator reads the authenticated frame", () => {
+    assert.deepEqual(response.value[0], { status: "fulfilled", value: { value: { value: 1 }, done: false } });
+  });
+  await t.test("a duplicate iterator is rejected", () => {
+    const result = response.value[1];
+    assert.deepEqual(
+      { status: result.status, name: result.reason.name, message: result.reason.message },
+      { status: "rejected", name: "TypeError", message: "authenticated frames may be iterated once" },
+    );
+  });
+});
+
+test("the binary stream survives byte-by-byte fragmentation", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const harness = createRequestHarness({ streamBytes: Buffer.from("fragmented"), fragmentResponse: true });
+  const response = await harness.withStream("binary", async ({ bytes }) => {
+    const chunks = [];
+    for await (const chunk of bytes.readExactly(10)) chunks.push(chunk);
+    return Buffer.concat(chunks).toString();
+  });
+  assert.equal(response.value, "fragmented");
+});
+
+test("withStream keeps an absolute stream deadline fixed despite progress", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const payloads = Array.from({ length: 20 }, (_, value) => ({ value }));
+  const harness = createRequestHarness({ framePayloads: payloads, fragmentResponse: true, noStreamEof: true });
+  const error = await harness.withStream("authenticated-frames", async ({ frames }) => {
+    for await (const _value of frames) await new Promise((resolve) => setTimeout(resolve, 2));
+  }, {
+    timing: streamTiming({ stream: { kind: "absolute", at: Date.now() + 15 } }),
+  }).catch((value) => value);
+  assert.deepEqual(failureShape(error), { name: "BridgeProtocolFailure", kind: "deadline", stage: "stream" });
+});
