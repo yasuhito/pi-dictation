@@ -30,9 +30,16 @@ function managementSecret(credential) {
 const MALFORMED_CAUSE_MESSAGES = {
   ERR_BRIDGE_TRAILING_BYTES: "The companion sent trailing protocol bytes.",
   ERR_BRIDGE_FRAME_LENGTH: "The companion sent an invalid protocol frame.",
+  ERR_BRIDGE_INVALID_FRAME: "The companion sent an invalid protocol frame.",
+  ERR_BRIDGE_MALFORMED_PROTOCOL_DATA: "The companion sent malformed protocol data.",
   ERR_BRIDGE_ENCODING: "The companion sent malformed authenticated protocol data.",
+  ERR_BRIDGE_MALFORMED_AUTHENTICATED_DATA: "The companion sent malformed authenticated protocol data.",
+  ERR_BRIDGE_NONCANONICAL_AUTHENTICATION: "The companion sent malformed authenticated protocol data.",
   ERR_BRIDGE_PAYLOAD: "The companion sent malformed authenticated protocol data.",
   ERR_BRIDGE_VERSION_DATA: "The companion returned invalid authenticated version data.",
+  ERR_BRIDGE_INVALID_VERSION_DATA: "The companion returned invalid authenticated version data.",
+  ERR_BRIDGE_INVALID_CHALLENGE: "The companion sent an invalid authentication challenge.",
+  ERR_BRIDGE_INVALID_RESPONSE: "The companion returned an invalid authenticated response.",
 };
 
 function causeMessage(failure) {

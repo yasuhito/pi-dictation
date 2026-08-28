@@ -21,6 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { BridgeManagementRequestError, companionRequestAt } from "./bridge-management-request.mjs";
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeHostError,
@@ -48,7 +49,7 @@ import {
   revokeHost,
   rotateHost,
 } from "./bridge-host.mjs";
-import { CREDENTIAL_REJECTION, CliError, companionRequestAt, healthAt } from "./bridge-management.mjs";
+import { CREDENTIAL_REJECTION, CliError } from "./bridge-management.mjs";
 import { isCanonicalIdentity } from "../lib/bridge-protocol.mjs";
 
 const LABEL = "com.yasuhito.pi-dictation.bridge";
@@ -543,6 +544,22 @@ async function preflight() {
   }
 }
 
+function exactObject(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+async function healthAt(endpoint, credential) {
+  const health = await companionRequestAt(endpoint, credential, "health");
+  const permissionValues = ["authorized", "denied", "restricted", "not-determined", "unknown"];
+  if (!exactObject(health, ["permission", "defaultInputAvailable"]) ||
+      !permissionValues.includes(health.permission) ||
+      typeof health.defaultInputAvailable !== "boolean") {
+    throw new CliError("The companion returned invalid health data.");
+  }
+  return health;
+}
+
 async function authenticatedHealth() {
   const { p, receipt } = verifyInstallation();
   if (pathExists(join(p.root, "upgrade.json"))) {
@@ -892,7 +909,9 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  const message = error instanceof CliError || error instanceof BridgeHostError ? error.message : "Pi Dictation Bridge failed unexpectedly.";
+  const message = error instanceof CliError || error instanceof BridgeHostError || error instanceof BridgeManagementRequestError
+    ? error.message
+    : "Pi Dictation Bridge failed unexpectedly.";
   console.error(`Error: ${message}`);
   process.exitCode = 1;
 }
