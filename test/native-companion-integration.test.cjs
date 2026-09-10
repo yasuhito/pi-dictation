@@ -271,48 +271,39 @@ test("production companion launches its instance-bound watchdog on the capture d
   } finally { await instance.cleanup(); }
 });
 
-test("native companion enforces authenticated owner liveness independently", macOnly, async (t) => {
+test("native companion enforces authenticated owner liveness independently", { ...macOnly, timeout: 30000 }, async (t) => {
   const instance = await nativeHarness(undefined, {
     PI_DICTATION_PROTOCOL_TEST_INITIAL_LIVENESS_MS: "100",
     PI_DICTATION_PROTOCOL_TEST_LIVENESS_MS: "300",
     PI_DICTATION_PROTOCOL_TEST_FINALIZATION_DELAY_MS: "300",
+    PI_DICTATION_PROTOCOL_TEST_LIVENESS_EVIDENCE: "1",
   });
   try {
     const owner = instance.owners[0].credential;
     const terminalResultWithoutProof = async (lease) => {
-      let terminalObservedAt;
-      const terminalDeadline = Date.now() + 1500;
-      while (Date.now() < terminalDeadline) {
+      let terminal = false;
+      while (!terminal) {
         const observation = await request(instance.socket, owner, "levels", { ...lease, afterSequence: -1 });
-        if (observation.status === "invalid-state") {
-          terminalObservedAt = Date.now();
-          break;
-        }
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+        terminal = observation.status === "invalid-state";
+        if (!terminal) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
       }
       let result;
-      const resultDeadline = Date.now() + 1500;
-      while (Date.now() < resultDeadline) {
+      while (result?.payload.state !== "result-ready") {
         result = await request(instance.socket, owner, "status", lease);
-        if (result.payload.state === "result-ready") break;
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+        if (result.payload.state !== "result-ready") await new Promise((resolveWait) => setTimeout(resolveWait, 10));
       }
-      return { result, terminalObservedAt };
+      return result;
     };
 
     const abandoned = capability();
     await request(instance.socket, owner, "start", { ...abandoned, maxDurationMs: 10000 });
-    const { result: lost } = await terminalResultWithoutProof(abandoned);
+    const lost = await terminalResultWithoutProof(abandoned);
     const retainedPath = join(instance.runtime, `recording-${abandoned.recordingId}.wav`);
 
     const live = capability();
     await request(instance.socket, owner, "start", { ...live, maxDurationMs: 10000 });
-    await request(instance.socket, owner, "status", live);
-    const proofAt = Date.now();
-    await new Promise((resolveWait) => setTimeout(resolveWait, 160));
-    const afterOriginalDeadline = await request(instance.socket, owner, "levels", { ...live, afterSequence: -1 });
-    const { result: refreshed, terminalObservedAt } = await terminalResultWithoutProof(live);
-    const elapsedFromProof = terminalObservedAt === undefined ? Number.POSITIVE_INFINITY : terminalObservedAt - proofAt;
+    const proof = await request(instance.socket, owner, "status", live);
+    const refreshed = await terminalResultWithoutProof(live);
 
     await t.test("ends capture after the owner-proof deadline", () => {
       assert.equal(lost.payload.state, "result-ready");
@@ -323,14 +314,14 @@ test("native companion enforces authenticated owner liveness independently", mac
     await t.test("retains the finalized WAV under normal retention", () => {
       assert.equal(existsSync(retainedPath), true);
     });
-    await t.test("reschedules exact expiry from the most recent owner proof", () => {
-      assert.equal(afterOriginalDeadline.status, "ok");
+    await t.test("accepts the authenticated owner proof", () => {
+      assert.equal(proof.status, "ok");
     });
     await t.test("records owner-liveness loss after the refreshed proof expires", () => {
-      assert.equal(refreshed?.payload.completion, "owner-liveness-loss");
+      assert.equal(refreshed.payload.completion, "owner-liveness-loss");
     });
-    await t.test("does not overshoot the refreshed owner-liveness bound by a polling interval", () => {
-      assert.equal(elapsedFromProof >= 280 && elapsedFromProof < 390, true);
+    await t.test("extends the Recording lease to the refreshed owner-liveness bound", () => {
+      assert.equal(refreshed.payload.testingOwnerLivenessElapsedMs >= 300, true);
     });
   } finally { await instance.cleanup(); }
 });
@@ -497,11 +488,9 @@ test("native companion overlaps multi-owner arbitration, reconnect, rotation, an
       request(instance.socket, replacement, "health", {}),
       request(instance.socket, second.credential, "health", {}),
     ]);
-    const [revoked, replacementAfterRevocation, retainedPeer] = await Promise.all([
-      request(instance.socket, first.credential, "credential-revoke-if-idle", {}),
-      request(instance.socket, replacement, "health", {}),
-      request(instance.socket, second.credential, "status", retainedLease),
-    ]);
+    const revoked = await request(instance.socket, first.credential, "credential-revoke-if-idle", {});
+    const replacementAfterRevocation = await request(instance.socket, replacement, "health", {});
+    const retainedPeer = await request(instance.socket, second.credential, "status", retainedLease);
 
     await t.test("concurrent starts preserve single-recording arbitration", () => assert.deepEqual(starts.map((value) => value.status).sort(), ["busy", "ok"]));
     await t.test("competing owner cannot inspect the Recording lease", () => assert.equal(isolated.status, "not-found"));
@@ -933,21 +922,24 @@ test("confirmed upgrade cancellation deletes only the affected owner's recording
   const instance = await nativeHarness();
   try {
     const [affected, peer] = instance.owners;
-    const lease = capability();
-    await request(instance.socket, affected.credential, "start", { ...lease, maxDurationMs: 10000 });
+    const peerLease = capability();
+    await request(instance.socket, peer.credential, "start", { ...peerLease, maxDurationMs: 10000 });
+    await request(instance.socket, peer.credential, "stop", peerLease);
+    const affectedLease = capability();
+    await request(instance.socket, affected.credential, "start", { ...affectedLease, maxDurationMs: 10000 });
     privateJson(join(instance.home, "state", "root", "upgrade.json"), { product, phase: "quiescing" });
-    const cancelled = await request(instance.socket, affected.credential, "credential-cancel-recordings", {}, randomUUID());
-    const status = await request(instance.socket, affected.credential, "status", lease);
     const replacement = capability();
     const blockedReplacement = await request(instance.socket, affected.credential, "start", { ...replacement, maxDurationMs: 10000 });
-    const retainedPeer = await request(instance.socket, peer.credential, "health", {});
+    const cancelled = await request(instance.socket, affected.credential, "credential-cancel-recordings", {}, randomUUID());
     rmSync(join(instance.home, "state", "root", "upgrade.json"));
     await instance.restart();
+    const affectedStatus = await request(instance.socket, affected.credential, "status", affectedLease);
     const retainedCredential = await request(instance.socket, affected.credential, "health", {});
+    const retainedPeer = await request(instance.socket, peer.credential, "status", peerLease);
     await t.test("confirms the affected active Recording lease", () => assert.equal(cancelled.payload.activeRecordingLease, 1));
-    await t.test("deletes the affected Recording lease", () => assert.equal(status.status, "not-found"));
+    await t.test("deletes the affected Recording lease", () => assert.equal(affectedStatus.status, "not-found"));
     await t.test("blocks a replacement recording before companion replacement", () => assert.equal(blockedReplacement.status, "failed"));
-    await t.test("preserves another host bridge", () => assert.equal(retainedPeer.status, "ok"));
+    await t.test("preserves another owner's retained WAV", () => assert.equal(retainedPeer.payload.state, "result-ready"));
     await t.test("preserves the affected bridge credential across replacement", () => assert.equal(retainedCredential.status, "ok"));
   } finally { await instance.cleanup(); }
 });

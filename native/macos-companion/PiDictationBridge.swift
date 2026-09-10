@@ -893,6 +893,9 @@ private final class BridgeRecording {
     var failureReason: String?
     var terminalAt: TimeInterval?
     var lastOwnerProofUptimeNanoseconds: UInt64
+#if PROTOCOL_TESTING
+    var ownerLivenessElapsedMilliseconds: Int?
+#endif
     var observations: [[String: Any]] = []
     var sequence = 0
     let levelReader: PcmLevelReader
@@ -1582,6 +1585,9 @@ private final class RecordingManager {
             lock.unlock()
             return
         }
+#if PROTOCOL_TESTING
+        current.ownerLivenessElapsedMilliseconds = Int(elapsedNanoseconds / 1_000_000)
+#endif
         lock.unlock()
         finalize(current, completion: "owner-liveness-loss")
     }
@@ -1794,6 +1800,12 @@ private final class RecordingManager {
         var payload: [String: Any] = ["recordingId": current.id, "state": current.state]
         if current.state == "result-ready", let length = current.length, let sha256 = current.sha256 {
             payload["length"] = length; payload["sha256"] = sha256; payload["completion"] = current.completion
+#if PROTOCOL_TESTING
+            if ProcessInfo.processInfo.environment["PI_DICTATION_PROTOCOL_TEST_LIVENESS_EVIDENCE"] == "1",
+               let elapsed = current.ownerLivenessElapsedMilliseconds {
+                payload["testingOwnerLivenessElapsedMs"] = elapsed
+            }
+#endif
         } else if current.state == "failed", let reason = current.failureReason {
             payload["reason"] = reason
         }

@@ -68,6 +68,7 @@ async function createRuntime({
   const extension = await loadExtension();
   const commands = {};
   const notifications = [];
+  const notificationWaiters = new Set();
   let shortcut;
   let shutdown;
   let pasted = "";
@@ -119,7 +120,13 @@ async function createRuntime({
         return Promise.resolve();
       },
       notify(message, level) {
-        notifications.push({ message, level });
+        const notification = { message, level };
+        notifications.push(notification);
+        for (const waiter of notificationWaiters) {
+          if (!waiter.predicate(notification)) continue;
+          notificationWaiters.delete(waiter);
+          waiter.resolve(notification);
+        }
       },
       pasteToEditor(text) {
         pasted = text;
@@ -150,6 +157,13 @@ async function createRuntime({
     commands,
     ctx,
     notifications,
+    waitForNotification(predicate) {
+      const existing = notifications.find(predicate);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolveNotification) => {
+        notificationWaiters.add({ predicate, resolve: resolveNotification });
+      });
+    },
     shortcut,
     shutdown: () => shutdown({}, ctx),
     pasted: () => pasted,
@@ -824,18 +838,22 @@ test("OpenAI transcription accepts a bounded response above the diagnostic limit
   }
 });
 
-test("an unexpected recorder exit is reported and cleaned up", async (t) => {
+test("an unexpected recorder exit is reported and cleaned up", { timeout: 30000 }, async (t) => {
   const paths = testPaths("recorder-exit");
   process.env.PI_DICTATION_TEST_PID_FILE = paths.pidFile;
   const runtime = await createRuntime({ recorderArgs: "--exit-immediately" });
   try {
+    const failure = runtime.waitForNotification(({ message }) => /stopped unexpectedly/.test(message));
     await runtime.shortcut(runtime.ctx);
-    await waitFor(() => runtime.notifications.some(({ message }) => /stopped unexpectedly/.test(message)));
+    await failure;
     await t.test("shows failure in the strip", () => {
       assert.match(runtime.widget().render(32)[0], /× Dictation failed/);
     });
     await t.test("does not paste a transcript", () => {
       assert.equal(runtime.pasted(), "");
+    });
+    await t.test("does not leave the Recorder running", () => {
+      assert.deepEqual(readPids(paths.pidFile).map(isRunning), [false]);
     });
   } finally {
     await runtime.shutdown();

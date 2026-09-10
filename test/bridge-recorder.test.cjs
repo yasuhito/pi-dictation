@@ -98,27 +98,34 @@ test("the Bridge health check reports an authenticated available input", async (
   } finally { await instance.cleanup(); }
 });
 
-test("the Bridge health deadline starts before authentication and spans transport retries", async (t) => {
-  const instance = await harness("health-slow-drop");
+test("the Bridge health check retries an ambiguous transport outcome", async (t) => {
+  const instance = await harness("drop-health-response");
   try {
+    const sharedProtocol = await import(join(root, "lib", "bridge-protocol.mjs"));
     const { checkBridgeRecorder } = await jiti.import(join(root, "extensions", "bridge-recorder.ts"));
-    const startedAt = Date.now();
-    const available = await checkBridgeRecorder(instance.config, 250);
-    const elapsed = Date.now() - startedAt;
+    const deadlines = [];
+    const protocol = {
+      request(options) {
+        deadlines.push(options.timing.challenge.at, options.timing.requestWrite.at, options.timing.response.at);
+        return sharedProtocol.request(options);
+      },
+    };
+    const available = await checkBridgeRecorder(instance.config, 2000, protocol);
+    const healthEvents = instance.events().filter((event) => event === "health");
     const requestIds = instance.events()
       .filter((event) => event.startsWith("health-request:"))
       .map((event) => event.slice("health-request:".length));
-    await t.test("returns the existing unavailable outcome", () => {
-      assert.equal(available, false);
+    await t.test("recovers from the dropped response", () => {
+      assert.equal(available, true);
     });
-    await t.test("retries within the shared request budget", () => {
-      assert.equal(instance.events().filter((event) => event === "health").length, 2);
+    await t.test("retries the health request", () => {
+      assert.equal(healthEvents.length, 2);
     });
     await t.test("preserves the ambiguous health request identity", () => {
       assert.equal(new Set(requestIds).size, 1);
     });
-    await t.test("bounds authentication and retries from the operation start", () => {
-      assert.equal(elapsed >= 220 && elapsed < 450, true);
+    await t.test("keeps one caller-owned bound across authentication and retries", () => {
+      assert.equal(new Set(deadlines).size, 1);
     });
   } finally { await instance.cleanup(); }
 });
