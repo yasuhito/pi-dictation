@@ -8,10 +8,10 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
-import { isCanonicalIdentity } from "../lib/bridge-protocol.mjs";
+import { isCanonicalIdentity, protocolVersion } from "../lib/bridge-protocol.mjs";
 
 const PRODUCT = "com.yasuhito.pi-dictation.bridge";
-export const BRIDGE_PROTOCOL_VERSION = 3;
+export const BRIDGE_PROTOCOL_VERSION = protocolVersion;
 const packageRoot = new URL("..", import.meta.url);
 const supervisorPath = fileURLToPath(new URL("./pi-dictation-tunnel.mjs", import.meta.url));
 const MAX_MANAGED_JSON_BYTES = 64 * 1024;

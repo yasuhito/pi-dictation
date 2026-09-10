@@ -193,6 +193,11 @@ test("the Bridge protocol requires a canonical credential identity", async () =>
   assert.deepEqual({ kind: error.kind, connects: harness.state.connects }, { kind: "malformed", connects: 0 });
 });
 
+test("the Bridge protocol publishes its exact version", async () => {
+  const { protocolVersion } = await import("../lib/bridge-protocol.mjs");
+  assert.equal(protocolVersion, 3);
+});
+
 test("the Bridge protocol publishes one canonical identity form", async (t) => {
   const { isCanonicalIdentity } = await import("../lib/bridge-protocol.mjs");
   const generated = "abcdef01-2345-4678-89ab-cdef01234567";

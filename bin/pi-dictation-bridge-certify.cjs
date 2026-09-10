@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
+const { createHash, randomBytes, randomUUID } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
-const net = require("node:net");
 const { commitProvenLifecycle, recoverLifecycleOrRethrow, recoversLifecycleInlineAfterError } = require("./certification-recovery.cjs");
 const { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { join, resolve } = require("node:path");
 
-const protocolVersion = 3;
+const sharedProtocol = import("../lib/bridge-protocol.mjs");
 const product = "com.yasuhito.pi-dictation.bridge";
 const root = join(homedir(), "Library", "Application Support", "pi-dictation", "bridge");
 const runtime = join(homedir(), "Library", "Caches", "pi-dictation", "bridge");
@@ -81,8 +80,6 @@ function privateDirectory(path) {
 }
 function validateCredential(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      // The certification harness reimplements the protocol on purpose, so it keeps its own copy of
-      // the canonical identity form rather than importing the shared seam predicate.
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.id || "") ||
       !/^[A-Za-z0-9+/]{43}=$/.test(value.secret || "") || Buffer.from(value.secret, "base64").length !== 32) {
     fail("Refusing invalid certification credential.");
@@ -114,63 +111,24 @@ function clearState() {
     if (readdirSync(certificationRuntime).length === 0) rmdirSync(certificationRuntime);
   }
 }
-function encode(fields) {
-  const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
-  for (const field of fields) {
-    const value = Buffer.isBuffer(field) ? field : Buffer.from(String(field));
-    const length = Buffer.alloc(4); length.writeUInt32BE(value.length); pieces.push(length, value);
-  }
-  return Buffer.concat(pieces);
-}
-function tag(secret, fields) { return createHmac("sha256", Buffer.from(secret, "base64")).update(encode(fields)).digest(); }
-function frame(value) {
-  const body = Buffer.from(JSON.stringify(value));
-  if (body.length > 64 * 1024) fail("Certification request exceeded the protocol bound.");
-  const header = Buffer.alloc(4); header.writeUInt32BE(body.length);
-  return Buffer.concat([header, body]);
-}
-async function readFrame(iterator, buffered) {
-  while (buffered.value.length < 4) {
-    const next = await iterator.next(); if (next.done) fail("Bridge connection ended before a complete frame.");
-    buffered.value = Buffer.concat([buffered.value, next.value]);
-  }
-  const length = buffered.value.readUInt32BE(0);
-  if (length > 64 * 1024) fail("Bridge response exceeded the protocol bound.");
-  while (buffered.value.length < length + 4) {
-    const next = await iterator.next(); if (next.done) fail("Bridge connection ended before a complete frame.");
-    buffered.value = Buffer.concat([buffered.value, next.value]);
-  }
-  const body = buffered.value.subarray(4, length + 4);
-  buffered.value = buffered.value.subarray(length + 4);
-  return JSON.parse(body);
-}
 async function request(credential, operation, payload, requestId = randomUUID()) {
-  const connection = net.createConnection({ path: socket, allowHalfOpen: true });
-  connection.setTimeout(controlDeadlineMilliseconds, () => {
-    connection.destroy(new Error("Bridge certification control deadline exceeded."));
-  });
+  const { BridgeProtocolFailure, request: sharedRequest } = await sharedProtocol;
+  const phase = () => ({ kind: "phase", timeoutMs: controlDeadlineMilliseconds });
   try {
-    await new Promise((resolve, reject) => {
-      connection.once("connect", resolve);
-      connection.once("error", reject);
+    return await sharedRequest({
+      endpoint: { type: "unix", path: socket },
+      credential: { id: credential.id, secret: Buffer.from(credential.secret, "base64") },
+      requestId,
+      operation,
+      payload,
+      timing: { connect: phase(), challenge: phase(), requestWrite: phase(), response: phase() },
+      signal: new AbortController().signal,
     });
-    const iterator = connection[Symbol.asyncIterator]();
-    const buffered = { value: Buffer.alloc(0) };
-    const challengeFrame = await readFrame(iterator, buffered);
-    const challenge = Buffer.from(challengeFrame.challenge, "base64");
-    const payloadBytes = Buffer.from(JSON.stringify(payload));
-    const hmac = tag(credential.secret, ["request", protocolVersion, challenge, credential.id, requestId, operation, payloadBytes]);
-    connection.end(frame({ type: "request", version: protocolVersion, credentialId: credential.id, requestId, operation,
-      payload: payloadBytes.toString("base64"), hmac: hmac.toString("hex") }));
-    const response = await readFrame(iterator, buffered);
-    const responseBytes = Buffer.from(response.payload, "base64");
-    const expected = tag(credential.secret, ["response", protocolVersion, response.version, challenge, credential.id,
-      requestId, `${operation}:${response.status}`, responseBytes]);
-    const actual = Buffer.from(response.hmac, "hex");
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail("Bridge response authentication failed.");
-    return { status: response.status, payload: JSON.parse(responseBytes) };
-  } finally {
-    connection.destroy();
+  } catch (error) {
+    if (error instanceof BridgeProtocolFailure) {
+      fail(`Bridge protocol ${error.kind} failure during ${error.stage}.`);
+    }
+    throw error;
   }
 }
 function capability() { return { recordingId: randomUUID(), leaseSecret: randomBytes(32).toString("base64") }; }
@@ -208,7 +166,8 @@ async function assertReady(credential) {
     fail("Installed companion health is not ready for real-device capture.");
   }
 }
-function safeEvidence(scenario, manual) {
+async function safeEvidence(scenario, manual) {
+  const { protocolVersion } = await sharedProtocol;
   console.log(JSON.stringify({ product, protocolVersion, scenario, result: "passed", audioRetained: false,
     secretRetained: false, manualConfirmation: manual, completedAt: new Date().toISOString() }));
 }
@@ -281,7 +240,7 @@ async function cleanupLifecycle(state, credential) {
   }
   await assertNoOwnedAudio(credential);
   commitProvenLifecycle(observedReason, expected.reason, status.payload.state, clearState);
-  safeEvidence(state.scenario, true);
+  await safeEvidence(state.scenario, true);
 }
 async function prepareLifecycle(name, scenario) {
   const credential = validateCredential(privateJson(credentialPath));
@@ -445,7 +404,7 @@ async function advanceCleanUser(confirm) {
   certificationCommand("npm", ["uninstall", "--global", "pi-dictation"], { failure: "Tarball package uninstall failed." });
   if (fileDigest(state.externalArtifact) !== state.externalArtifactSha256) fail("Uninstall changed the external artifact.");
   clearState();
-  safeEvidence("clean-user-tarball", true);
+  await safeEvidence("clean-user-tarball", true);
 }
 
 async function prepareGuided(name, scenario, alias) {
@@ -512,7 +471,7 @@ async function runAutomated(name, aliases) {
     if (!cleanupFailure) clearState();
     if (cleanupFailure) throw cleanupFailure;
   }
-  if (completed) safeEvidence(name, false);
+  if (completed) await safeEvidence(name, false);
 }
 function launchctl(arguments_) {
   const result = spawnSync("launchctl", arguments_, { encoding: "utf8", timeout: 10_000 });
@@ -586,7 +545,7 @@ async function tunnelFault() {
     if (!cleanupFailure) clearState();
     if (cleanupFailure) throw cleanupFailure;
   }
-  safeEvidence(state.scenario, false);
+  await safeEvidence(state.scenario, false);
 }
 async function verify() {
   if (!existsSync(statePath)) fail("No real-device certification is awaiting verification.");
@@ -622,16 +581,16 @@ async function verify() {
   if (!process.argv.slice(2).includes("--confirm")) fail("Guided certification requires --confirm after every listed observation succeeds.");
   if (scenario.host) await assertNoOwnedAudio(configuredHost(state.alias).credential);
   clearState();
-  safeEvidence(state.scenario, true);
+  await safeEvidence(state.scenario, true);
 }
-function list(json) {
+async function list(json) {
   const values = [...scenarios].map(([name, value]) => ({ name, kind: value.kind,
     requiredHostAliases: value.host === true ? value.hostCount || 1 : 0,
     requiresHumanAction: ["guided", "duration", "tunnel", "lifecycle", "clean-user"].includes(value.kind),
     ...(value.stages ? { stages: value.stages } : {}),
     ...(value.livenessBoundMilliseconds ? { livenessBoundMilliseconds: value.livenessBoundMilliseconds } : {}),
     ...(value.reconnectValidation ? { reconnectValidation: value.reconnectValidation } : {}) }));
-  if (json) console.log(JSON.stringify({ protocolVersion, scenarios: values }));
+  if (json) console.log(JSON.stringify({ protocolVersion: (await sharedProtocol).protocolVersion, scenarios: values }));
   else for (const value of values) console.log(`${value.name}\t${value.kind}`);
 }
 function usage() {

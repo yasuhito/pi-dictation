@@ -35,6 +35,11 @@ function runBridge(home, args, env = {}) {
   });
 }
 
+function npmPackEntries(stdout) {
+  const parsed = JSON.parse(stdout);
+  return Array.isArray(parsed) ? parsed : Object.values(parsed);
+}
+
 function runInPseudoTerminal(args, options) {
   if (process.platform === "darwin") {
     const command = args.map((argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("}", "\\}")}}`).join(" ");
@@ -164,6 +169,7 @@ test("packaged real-device certification lists every required gate scenario with
   });
   if (result.status !== 0) throw new Error(result.stderr);
   const output = JSON.parse(result.stdout);
+  const certificationSource = readFileSync(certificationPath, "utf8");
   await t.test("lists every recurring and lifecycle scenario", () => {
     assert.deepEqual(output.scenarios.map(({ name }) => name), [
       "bridge-level-transcription", "bridge-cancellation", "bridge-duration-limit", "bridge-tunnel-reconnect",
@@ -211,9 +217,17 @@ test("packaged real-device certification lists every required gate scenario with
     const source = readFileSync(certificationPath, "utf8");
     assert.equal(source.includes("await assertReady(credential)") && source.includes("Companion restart did not return authenticated readiness"), true);
   });
-  await t.test("bounds each certification protocol control connection and destroys it in finally", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("connection.setTimeout(controlDeadlineMilliseconds") && source.includes("finally {\n    connection.destroy();"), true);
+  await t.test("loads the shared production Bridge protocol module", () => {
+    assert.equal(certificationSource.includes('import("../lib/bridge-protocol.mjs")'), true);
+  });
+  await t.test("does not ship an independent socket and HMAC client", () => {
+    assert.equal(/node:net|createHmac|timingSafeEqual/.test(certificationSource), false);
+  });
+  await t.test("owns a fixed deadline for every control phase", () => {
+    assert.match(certificationSource, /timing: \{ connect: phase\(\), challenge: phase\(\), requestWrite: phase\(\), response: phase\(\) \}/);
+  });
+  await t.test("reports only the safe shared protocol failure classification", () => {
+    assert.match(certificationSource, /Bridge protocol \$\{error\.kind\} failure during \$\{error\.stage\}\./);
   });
   await t.test("requires a distinct predecessor before upgrading to the candidate tarball", () => {
     const source = readFileSync(certificationPath, "utf8");
@@ -902,7 +916,7 @@ test("the actual npm package loads in Pi extension and native CLI runtime regime
       cwd: packageRoot, encoding: "utf8",
     });
     if (packed.status !== 0) throw new Error(packed.stderr);
-    const tarball = join(directory, JSON.parse(packed.stdout)[0].filename);
+    const tarball = join(directory, npmPackEntries(packed.stdout)[0].filename);
     const extracted = join(directory, "extracted");
     mkdirSync(extracted);
     const unpacked = spawnSync("tar", ["-xzf", tarball, "-C", extracted], { encoding: "utf8" });
@@ -926,11 +940,11 @@ test("the actual npm package loads in Pi extension and native CLI runtime regime
       `import * as protocol from ${JSON.stringify(packedRuntime)};
        console.log(JSON.stringify(Object.entries(protocol).map(([name, value]) => [name, typeof value]).sort()));`,
     ], { cwd: directory, encoding: "utf8" });
-    // Callable declarations are the whole shared interface; a value export of any other kind
-    // must fail this comparison so the agreement is reconsidered deliberately.
-    const declaredExports = [...new Set([...readFileSync(packedDeclaration, "utf8")
-      .matchAll(/^export (?:declare )?(?:function|class) (\w+)/gm)]
-      .map(([, name]) => name))].sort().map((name) => [name, "function"]);
+    const declaration = readFileSync(packedDeclaration, "utf8");
+    const callableExports = [...new Set([...declaration.matchAll(/^export (?:declare )?(?:function|class) (\w+)/gm)]
+      .map(([, name]) => name))].map((name) => [name, "function"]);
+    const valueExports = [...declaration.matchAll(/^export const (\w+):/gm)].map(([, name]) => [name, "number"]);
+    const declaredExports = [...callableExports, ...valueExports].sort(([left], [right]) => left.localeCompare(right));
     await t.test("loads the shipped TypeScript extension through Pi's Jiti regime", () => {
       assert.equal(extensionSmoke.status, 0, extensionSmoke.stderr);
     });
@@ -951,7 +965,7 @@ test("the actual npm package loads in Pi extension and native CLI runtime regime
 test("the npm tarball includes the bridge CLI and companion source", async (t) => {
   const result = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd: packageRoot, encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr);
-  const files = JSON.parse(result.stdout)[0].files.map((entry) => entry.path);
+  const files = npmPackEntries(result.stdout)[0].files.map((entry) => entry.path);
 
   await t.test("includes the unified CLI", () => {
     assert.ok(files.includes("bin/pi-dictation.mjs"));
