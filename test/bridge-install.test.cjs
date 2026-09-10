@@ -385,6 +385,49 @@ test("remote prepare preserves a user-selected Local Recorder while updating the
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("legacy receipt migration distinguishes unrelated configuration from Recorder changes", async (t) => {
+  const scenario = () => {
+    const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-legacy-receipt-"));
+    const id = "acdef0123456789b";
+    const hostRoot = join(home, ".local", "share", "pi-dictation", "bridge", "hosts", id);
+    const configDirectory = join(home, ".pi", "agent");
+    const configPath = join(configDirectory, "pi-dictation.json");
+    const receiptPath = join(configDirectory, "pi-dictation.bridge-owner.json");
+    const endpoint = { type: "unix", path: join(hostRoot, "listener.sock") };
+    const credential = { id: "36363636-3636-4363-8363-363636363636", secret: Buffer.alloc(32, 21).toString("base64") };
+    const invoke = () => spawnSync(process.execPath, [cli, "bridge", "remote-prepare", id,
+      Buffer.from(JSON.stringify(endpoint)).toString("base64")], {
+      cwd: root, encoding: "utf8", input: JSON.stringify(credential), env: { ...process.env, HOME: home },
+    });
+    const first = invoke();
+    if (first.status !== 0) throw new Error(first.stderr);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    const sha256 = createHash("sha256").update(JSON.stringify(config)).digest("hex");
+    writeFileSync(receiptPath, JSON.stringify({
+      product: "com.yasuhito.pi-dictation.bridge", hostId: id, phase: "ready", sha256,
+    }), { mode: 0o600 });
+    return { config, configPath, home, invoke };
+  };
+  await t.test("migrates after an unrelated configuration change", () => {
+    const { config, configPath, home, invoke } = scenario();
+    try {
+      config.language = "ja";
+      writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+      const result = invoke();
+      assert.equal(result.status, 0, result.stderr);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+  await t.test("rejects a changed Bridge Recorder", () => {
+    const { config, configPath, home, invoke } = scenario();
+    try {
+      config.recorders.bridge.endpoint.path += ".changed";
+      writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+      const result = invoke();
+      assert.match(result.stderr, /Bridge Recorder changed outside bridge setup/);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
 test("remote removal reservation permits cleanup while Local Recorder remains selected", () => {
   const home = mkdtempSync(join(tmpdir(), "pi-dictation-remote-reserved-revoke-"));
   const id = "bdef0123456789ac";

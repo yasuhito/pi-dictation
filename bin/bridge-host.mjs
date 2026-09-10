@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import net from "node:net";
 import { isCanonicalIdentity, protocolVersion } from "../lib/bridge-protocol.mjs";
 
@@ -1022,7 +1023,7 @@ function legacyReceiptCanMigrate(id, receipt, current) {
   const endpointPath = join(remoteRoot(id), "endpoint.json");
   if (!existsSync(endpointPath)) return false;
   const endpoint = readOwnedJson(endpointPath, "remote Recorder endpoint configuration");
-  return JSON.stringify(endpoint) === JSON.stringify(managedRecorder(current));
+  return isDeepStrictEqual(endpoint, managedRecorder(current));
 }
 
 function reconcileRemoteRecorder(id, recorder) {
