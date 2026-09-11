@@ -49,7 +49,8 @@
     "test:assertions": "node scripts/check-test-assertions.mjs",
     "check": "npm run test:assertions && npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run",
-    "demo:generate": "node scripts/generate-demo.mjs"
+    "demo:generate": "node scripts/generate-demo.mjs",
+    "prepare": "husky"
   },
   "pi": {
     "extensions": [
@@ -71,7 +72,10 @@
     "@types/node": "^24.0.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "husky": "^9.1.7",
     "jiti": "^2.6.1",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.9.6",
     "typescript": "^5.9.0"
   },
   "engines": {
