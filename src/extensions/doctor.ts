@@ -8,7 +8,10 @@ export type DoctorReport = {
   text: string;
 };
 
-function commandExists(command: string, path = process.env.PATH || ""): boolean {
+function commandExists(
+  command: string,
+  path = process.env.PATH || ""
+): boolean {
   for (const directory of path.split(":")) {
     if (!directory) continue;
     try {
@@ -30,12 +33,17 @@ function versionAtLeast(current: string, minimum: number[]): boolean {
 
 export async function diagnoseDictation(
   config: EffectiveDictationConfig,
-  { platform = process.platform, path = process.env.PATH || "", nodeVersion = process.versions.node } = {}
+  {
+    platform = process.platform,
+    path = process.env.PATH || "",
+    nodeVersion = process.versions.node,
+  } = {}
 ): Promise<DoctorReport> {
   const issues: string[] = [];
   const lines = ["Pi Dictation doctor", ""];
 
-  if (versionAtLeast(nodeVersion, [22, 19, 0])) lines.push(`Node: ok (v${nodeVersion})`);
+  if (versionAtLeast(nodeVersion, [22, 19, 0]))
+    lines.push(`Node: ok (v${nodeVersion})`);
   else {
     lines.push(`Node: unavailable (v${nodeVersion}; requires >=22.19.0)`);
     issues.push("upgrade Node.js to 22.19.0 or newer");
@@ -57,25 +65,35 @@ export async function diagnoseDictation(
   }
 
   if (config.recorder.type === "bridge") {
-    if (await checkBridgeRecorder(config.recorder)) lines.push("Recorder: ok (Bridge recording available)");
+    if (await checkBridgeRecorder(config.recorder))
+      lines.push("Recorder: ok (Bridge recording available)");
     else {
-      lines.push("Recorder: unavailable (Bridge recording health check failed)");
-      issues.push("run pi-dictation bridge doctor on the Mac that owns the microphone");
+      lines.push(
+        "Recorder: unavailable (Bridge recording health check failed)"
+      );
+      issues.push(
+        "run pi-dictation bridge doctor on the Mac that owns the microphone"
+      );
     }
   } else if (config.recorder.command) {
     lines.push("Recorder: ok (custom local command configured)");
   } else if (platform === "darwin") {
-    if (commandExists("ffmpeg", path)) lines.push("Recorder: ok (ffmpeg AVFoundation auto-detected)");
+    if (commandExists("ffmpeg", path))
+      lines.push("Recorder: ok (ffmpeg AVFoundation auto-detected)");
     else {
       lines.push("Recorder: unavailable (ffmpeg not found)");
       issues.push("install ffmpeg or configure the Local Recorder command");
     }
   } else if (platform === "linux") {
-    if (commandExists("pw-record", path)) lines.push("Recorder: ok (pw-record auto-detected)");
-    else if (commandExists("arecord", path)) lines.push("Recorder: ok (arecord auto-detected)");
+    if (commandExists("pw-record", path))
+      lines.push("Recorder: ok (pw-record auto-detected)");
+    else if (commandExists("arecord", path))
+      lines.push("Recorder: ok (arecord auto-detected)");
     else {
       lines.push("Recorder: unavailable (pw-record and arecord not found)");
-      issues.push("install pw-record/arecord or configure the Local Recorder command");
+      issues.push(
+        "install pw-record/arecord or configure the Local Recorder command"
+      );
     }
   } else {
     lines.push(`Recorder: unavailable (no default recorder for ${platform})`);
@@ -84,17 +102,28 @@ export async function diagnoseDictation(
   if (config.transcribeCommand) {
     lines.push("Backend: ok (custom command configured)");
   } else if (config.openaiApiKey || config.openaiApiKeyCommand) {
-    lines.push(`Backend: ok (OpenAI-compatible transcription; model=${config.openaiModel})`);
+    lines.push(
+      `Backend: ok (OpenAI-compatible transcription; model=${config.openaiModel})`
+    );
   } else {
-    lines.push("Backend: unavailable (no local command or OpenAI credential configured)");
-    issues.push("configure a local transcription command or an OpenAI credential");
+    lines.push(
+      "Backend: unavailable (no local command or OpenAI credential configured)"
+    );
+    issues.push(
+      "configure a local transcription command or an OpenAI credential"
+    );
   }
 
-  if (config.openaiApiKey) lines.push("OpenAI credential: present (value hidden)");
-  else if (config.openaiApiKeyCommand) lines.push("OpenAI credential: configured (key command not executed)");
+  if (config.openaiApiKey)
+    lines.push("OpenAI credential: present (value hidden)");
+  else if (config.openaiApiKeyCommand)
+    lines.push("OpenAI credential: configured (key command not executed)");
   else lines.push("OpenAI credential: absent");
 
-  lines.push("", issues.length === 0 ? "Result: ready" : "Result: needs attention");
+  lines.push(
+    "",
+    issues.length === 0 ? "Result: ready" : "Result: needs attention"
+  );
   for (const issue of issues) lines.push(`- ${issue}`);
   return { ready: issues.length === 0, text: lines.join("\n") };
 }

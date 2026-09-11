@@ -19,18 +19,22 @@ export type LevelObservation = {
   dbfs: number | "silence";
 };
 
-export type LevelEvent = LevelObservation | {
-  type: "unavailable";
-  sequence: number;
-  capturedAtMs: number;
-} | {
-  type: "gap";
-  fromSequence: number;
-  toSequence: number;
-} | {
-  type: "transport";
-  state: "connected" | "unavailable";
-};
+export type LevelEvent =
+  | LevelObservation
+  | {
+      type: "unavailable";
+      sequence: number;
+      capturedAtMs: number;
+    }
+  | {
+      type: "gap";
+      fromSequence: number;
+      toSequence: number;
+    }
+  | {
+      type: "transport";
+      state: "connected" | "unavailable";
+    };
 
 export type RecorderStartOptions = {
   destination: string;
@@ -69,21 +73,28 @@ export type RecorderErrorCode =
   | "recording-failed";
 
 const SAFE_MESSAGES: Record<RecorderErrorCode, string> = {
-  "bridge-companion-restarted": "Recording stopped because the Bridge companion restarted.",
-  "bridge-companion-stopped": "Recording stopped because the Bridge companion terminated.",
-  "bridge-device-lost": "Recording stopped because the default input device was lost.",
+  "bridge-companion-restarted":
+    "Recording stopped because the Bridge companion restarted.",
+  "bridge-companion-stopped":
+    "Recording stopped because the Bridge companion terminated.",
+  "bridge-device-lost":
+    "Recording stopped because the default input device was lost.",
   "bridge-logout": "Recording stopped because the Mac login session ended.",
-  "bridge-owner-liveness-lost": "Recording stopped because owner liveness was lost.",
+  "bridge-owner-liveness-lost":
+    "Recording stopped because owner liveness was lost.",
   "bridge-reboot": "Recording stopped because the Mac rebooted.",
   "bridge-session-lock": "Recording stopped because the Mac session locked.",
   "bridge-sleep": "Recording stopped because the Mac slept.",
   cancelled: "Recording was cancelled.",
-  "cancellation-unconfirmed": "Cancellation could not be confirmed within five seconds; the recording owner may remain live on the companion.",
+  "cancellation-unconfirmed":
+    "Cancellation could not be confirmed within five seconds; the recording owner may remain live on the companion.",
   "duration-limit-reached": "Recording reached the maximum duration.",
   "invalid-audio": "The recorder did not produce a complete PCM16 mono WAV.",
-  "outcome-unknown": "The Bridge recording outcome could not be determined within the recovery window.",
+  "outcome-unknown":
+    "The Bridge recording outcome could not be determined within the recovery window.",
   "recorder-busy": "Another Bridge recording is already in progress.",
-  "recorder-storage-full": "The Bridge companion cannot safely reserve storage for this recording.",
+  "recorder-storage-full":
+    "The Bridge companion cannot safely reserve storage for this recording.",
   "recorder-unavailable": "No supported local recorder is available.",
   "recording-failed": "Voice recording stopped unexpectedly.",
 };
@@ -112,9 +123,13 @@ type LocalRecorderOptions = {
 
 async function systemCommandExists(command: string): Promise<boolean> {
   try {
-    await execFileAsync("/bin/sh", ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`], {
-      timeout: 1000,
-    });
+    await execFileAsync(
+      "/bin/sh",
+      ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`],
+      {
+        timeout: 1000,
+      }
+    );
     return true;
   } catch {
     return false;
@@ -183,10 +198,16 @@ function processGroupExists(proc: ChildProcess): boolean {
   }
 }
 
-async function waitForExit(proc: ChildProcess, timeoutMs = 3000): Promise<void> {
+async function waitForExit(
+  proc: ChildProcess,
+  timeoutMs = 3000
+): Promise<void> {
   if (proc.exitCode !== null || proc.signalCode !== null) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(() => signalProcessGroup(proc, "SIGKILL"), timeoutMs);
+    const timer = setTimeout(
+      () => signalProcessGroup(proc, "SIGKILL"),
+      timeoutMs
+    );
     timer.unref?.();
     proc.once("exit", () => {
       clearTimeout(timer);
@@ -196,7 +217,10 @@ async function waitForExit(proc: ChildProcess, timeoutMs = 3000): Promise<void> 
   if (processGroupExists(proc)) signalProcessGroup(proc, "SIGKILL");
 }
 
-async function stopProcessGroup(proc: ChildProcess, timeoutMs = 3000): Promise<void> {
+async function stopProcessGroup(
+  proc: ChildProcess,
+  timeoutMs = 3000
+): Promise<void> {
   signalProcessGroup(proc, "SIGINT");
   await waitForExit(proc, timeoutMs);
 }
@@ -255,7 +279,8 @@ export async function validatePcm16MonoWav(
       riff.toString("ascii", 0, 4) !== "RIFF" ||
       riff.toString("ascii", 8, 12) !== "WAVE" ||
       riffEnd !== size
-    ) throw new RecorderError("invalid-audio");
+    )
+      throw new RecorderError("invalid-audio");
 
     let formatValid = false;
     let formatSeen = false;
@@ -263,23 +288,27 @@ export async function validatePcm16MonoWav(
     let dataSize = 0;
     let dataSeen = false;
     let chunkOffset = 12;
-    for (; chunkOffset + 8 <= riffEnd; ) {
+    for (; chunkOffset + 8 <= riffEnd;) {
       checkCancellation();
       const header = await readAt(chunkOffset, 8);
       const chunkSize = header.readUInt32LE(4);
       const body = chunkOffset + 8;
       const next = body + chunkSize + (chunkSize % 2);
-      if (next <= chunkOffset || next > riffEnd) throw new RecorderError("invalid-audio");
+      if (next <= chunkOffset || next > riffEnd)
+        throw new RecorderError("invalid-audio");
       const id = header.toString("ascii", 0, 4);
       if (id === "fmt ") {
-        if (formatSeen || dataSeen || chunkSize < 16) throw new RecorderError("invalid-audio");
+        if (formatSeen || dataSeen || chunkSize < 16)
+          throw new RecorderError("invalid-audio");
         formatSeen = true;
         const format = await readAt(body, 16);
         const sampleRate = format.readUInt32LE(4);
         formatValid =
           format.readUInt16LE(0) === 1 &&
           format.readUInt16LE(2) === 1 &&
-          (expectedSampleRate === undefined ? sampleRate >= 8_000 && sampleRate <= 192_000 : sampleRate === expectedSampleRate) &&
+          (expectedSampleRate === undefined
+            ? sampleRate >= 8_000 && sampleRate <= 192_000
+            : sampleRate === expectedSampleRate) &&
           format.readUInt32LE(8) === sampleRate * 2 &&
           format.readUInt16LE(14) === 16 &&
           format.readUInt16LE(12) === 2;
@@ -291,15 +320,26 @@ export async function validatePcm16MonoWav(
       }
       chunkOffset = next;
     }
-    if (chunkOffset !== riffEnd || !formatValid || !formatSeen || !dataSeen || !dataOffset || dataSize < 2 || dataSize % 2 !== 0 ||
-        size - dataSize > MAXIMUM_WAV_NON_PCM_BYTES ||
-        (maximumPcmBytes !== undefined && (!Number.isSafeInteger(maximumPcmBytes) || maximumPcmBytes < 2 || dataSize > maximumPcmBytes))) {
+    if (
+      chunkOffset !== riffEnd ||
+      !formatValid ||
+      !formatSeen ||
+      !dataSeen ||
+      !dataOffset ||
+      dataSize < 2 ||
+      dataSize % 2 !== 0 ||
+      size - dataSize > MAXIMUM_WAV_NON_PCM_BYTES ||
+      (maximumPcmBytes !== undefined &&
+        (!Number.isSafeInteger(maximumPcmBytes) ||
+          maximumPcmBytes < 2 ||
+          dataSize > maximumPcmBytes))
+    ) {
       throw new RecorderError("invalid-audio");
     }
 
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let hasSignal = false;
-    for (let position = dataOffset; position < dataOffset + dataSize; ) {
+    for (let position = dataOffset; position < dataOffset + dataSize;) {
       checkCancellation();
       const length = Math.min(buffer.length, dataOffset + dataSize - position);
       const { bytesRead } = await handle.read(buffer, 0, length, position);
@@ -315,7 +355,9 @@ export async function validatePcm16MonoWav(
   }
 }
 
-export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorder {
+export function createLocalRecorder(
+  options: LocalRecorderOptions = {}
+): Recorder {
   return {
     async start(startOptions) {
       if (startOptions.signal.aborted) throw new RecorderError("cancelled");
@@ -344,7 +386,8 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
 
       const recordingStartedAt = Date.now();
       const levelTimelineStartedAt = performance.now();
-      let state: "active" | "stopping" | "stopped" | "cancelled" | "failed" = "active";
+      let state: "active" | "stopping" | "stopped" | "cancelled" | "failed" =
+        "active";
       let stopPromise: Promise<void> | undefined;
       let cancelPromise: Promise<void> | undefined;
       let durationReached = false;
@@ -353,11 +396,24 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
       let lastLevelSequence = -1;
       let levelReadInFlight = false;
       const input = new GrowingPcm16WavInput(partial);
-      const emitLevel = (event: { type: "observation"; dbfs: number | "silence" } | { type: "unavailable" }) => {
-        const sequence = Math.max(0, Math.floor((performance.now() - levelTimelineStartedAt) / LEVEL_INTERVAL_MS));
+      const emitLevel = (
+        event:
+          | { type: "observation"; dbfs: number | "silence" }
+          | { type: "unavailable" }
+      ) => {
+        const sequence = Math.max(
+          0,
+          Math.floor(
+            (performance.now() - levelTimelineStartedAt) / LEVEL_INTERVAL_MS
+          )
+        );
         if (sequence <= lastLevelSequence || state !== "active") return;
         lastLevelSequence = sequence;
-        startOptions.onLevel({ ...event, sequence, capturedAtMs: sequence * LEVEL_INTERVAL_MS });
+        startOptions.onLevel({
+          ...event,
+          sequence,
+          capturedAtMs: sequence * LEVEL_INTERVAL_MS,
+        });
       };
       const levelTimer = setInterval(async () => {
         if (levelReadInFlight) return;
@@ -399,21 +455,32 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
         unexpected = true;
         state = "failed";
         void cleanup();
-        options.onFailure?.(new RecorderError(durationReached ? "duration-limit-reached" : "recording-failed"));
+        options.onFailure?.(
+          new RecorderError(
+            durationReached ? "duration-limit-reached" : "recording-failed"
+          )
+        );
       });
 
       const onStartupAbort = () => {
         if (state === "active") void recording.cancel();
       };
-      startOptions.signal.addEventListener("abort", onStartupAbort, { once: true });
+      startOptions.signal.addEventListener("abort", onStartupAbort, {
+        once: true,
+      });
 
       const recording: Recording = {
         startedAt: recordingStartedAt,
         stop() {
           if (state === "stopped") return Promise.resolve();
-          if (state === "cancelled") return Promise.reject(new RecorderError("cancelled"));
+          if (state === "cancelled")
+            return Promise.reject(new RecorderError("cancelled"));
           if (state === "failed" || unexpected) {
-            return Promise.reject(new RecorderError(durationReached ? "duration-limit-reached" : "recording-failed"));
+            return Promise.reject(
+              new RecorderError(
+                durationReached ? "duration-limit-reached" : "recording-failed"
+              )
+            );
           }
           if (stopPromise) return stopPromise;
           state = "stopping";
@@ -421,7 +488,8 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
             try {
               await stopProcessGroup(proc);
               if (cancellationRequested) throw new RecorderError("cancelled");
-              if (durationReached) throw new RecorderError("duration-limit-reached");
+              if (durationReached)
+                throw new RecorderError("duration-limit-reached");
               await validatePcm16MonoWav(partial);
               if (cancellationRequested) throw new RecorderError("cancelled");
               await rename(partial, startOptions.destination);
@@ -438,13 +506,15 @@ export function createLocalRecorder(options: LocalRecorderOptions = {}): Recorde
               startOptions.signal.removeEventListener("abort", onStartupAbort);
               clearInterval(levelTimer);
               clearTimeout(durationTimer);
-              if (state !== "stopped") await rm(partial, { force: true }).catch(() => {});
+              if (state !== "stopped")
+                await rm(partial, { force: true }).catch(() => {});
             }
           })();
           return stopPromise;
         },
         cancel() {
-          if (state === "stopped" || state === "cancelled") return Promise.resolve();
+          if (state === "stopped" || state === "cancelled")
+            return Promise.resolve();
           if (cancelPromise) return cancelPromise;
           cancellationRequested = true;
           state = "cancelled";
@@ -473,6 +543,7 @@ export function createRecorder(
   config: RecorderConfig,
   options: Omit<LocalRecorderOptions, "command"> = {}
 ): Recorder {
-  if (config.type === "local") return createLocalRecorder({ ...options, command: config.command });
+  if (config.type === "local")
+    return createLocalRecorder({ ...options, command: config.command });
   return createBridgeRecorder(config);
 }

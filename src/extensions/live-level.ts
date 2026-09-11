@@ -34,7 +34,8 @@ export class LiveLevelAnalyzer {
     }
     const coefficient = rawRms > this.smoothedRms ? 0.82 : 0.45;
     this.smoothedRms += (rawRms - this.smoothedRms) * coefficient;
-    const db = this.smoothedRms > 0 ? 20 * Math.log10(this.smoothedRms) : -Infinity;
+    const db =
+      this.smoothedRms > 0 ? 20 * Math.log10(this.smoothedRms) : -Infinity;
     return levelForDb(db);
   }
 }
@@ -74,7 +75,10 @@ export class GrowingPcm16WavInput {
   private async parseHeader(fileSize: number): Promise<boolean> {
     if (fileSize < 12) return false;
     const handle = await open(this.file, "r");
-    const readAt = async (position: number, length: number): Promise<Buffer | undefined> => {
+    const readAt = async (
+      position: number,
+      length: number
+    ): Promise<Buffer | undefined> => {
       if (position + length > fileSize) return undefined;
       const buffer = Buffer.allocUnsafe(length);
       const { bytesRead } = await handle.read(buffer, 0, length, position);
@@ -84,12 +88,15 @@ export class GrowingPcm16WavInput {
     try {
       const riff = await readAt(0, 12);
       if (!riff) return false;
-      if (riff.toString("ascii", 0, 4) !== "RIFF" || riff.toString("ascii", 8, 12) !== "WAVE") {
+      if (
+        riff.toString("ascii", 0, 4) !== "RIFF" ||
+        riff.toString("ascii", 8, 12) !== "WAVE"
+      ) {
         return this.reject();
       }
 
       let format: PcmFormat | undefined;
-      for (let offset = 12; offset + 8 <= MAX_WAV_HEADER_BYTES; ) {
+      for (let offset = 12; offset + 8 <= MAX_WAV_HEADER_BYTES;) {
         const chunk = await readAt(offset, 8);
         if (!chunk) return false;
         const id = chunk.toString("ascii", 0, 4);
@@ -146,16 +153,18 @@ export class GrowingPcm16WavInput {
       return new Int16Array();
     }
 
-    if (this.state === "pending" && !(await this.parseHeader(fileSize))) return new Int16Array();
+    if (this.state === "pending" && !(await this.parseHeader(fileSize)))
+      return new Int16Array();
     if (fileSize < this.cursor) {
       this.state = "pending";
       this.cursor = 0;
       return new Int16Array();
     }
 
-    const declaredEnd = this.dataSize === 0 || this.dataSize === 0xffffffff
-      ? fileSize
-      : this.dataOffset + this.dataSize;
+    const declaredEnd =
+      this.dataSize === 0 || this.dataSize === 0xffffffff
+        ? fileSize
+        : this.dataOffset + this.dataSize;
     const availableEnd = Math.min(fileSize, declaredEnd);
     const wanted = Math.min(
       MAX_INTERVAL_BYTES,
@@ -167,7 +176,8 @@ export class GrowingPcm16WavInput {
       position = availableEnd - wanted;
       position -= (position - this.dataOffset) % 2;
     }
-    const byteLength = Math.max(0, Math.min(wanted, availableEnd - position)) & ~1;
+    const byteLength =
+      Math.max(0, Math.min(wanted, availableEnd - position)) & ~1;
     if (!byteLength) return new Int16Array();
 
     const buffer = Buffer.allocUnsafe(byteLength);

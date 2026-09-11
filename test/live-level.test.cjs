@@ -1,5 +1,10 @@
 const assert = require("node:assert/strict");
-const { appendFileSync, mkdtempSync, rmSync, writeFileSync } = require("node:fs");
+const {
+  appendFileSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
@@ -8,7 +13,12 @@ const { createJiti } = require("jiti");
 const packageRoot = resolve(__dirname, "..");
 const jiti = createJiti(__filename, { interopDefault: true });
 
-function wavHeader({ format = 1, channels = 1, sampleRate = 16000, bits = 16 } = {}) {
+function wavHeader({
+  format = 1,
+  channels = 1,
+  sampleRate = 16000,
+  bits = 16,
+} = {}) {
   const blockAlign = channels * (bits / 8);
   const header = Buffer.alloc(44);
   header.write("RIFF", 0, "ascii");
@@ -34,9 +44,13 @@ function pcm(samples) {
 }
 
 test("the fixed level scale keeps silence gated and preserves speech bands", async () => {
-  const { levelForDb } = await jiti.import(join(packageRoot, "extensions", "live-level.ts"));
+  const { levelForDb } = await jiti.import(
+    join(packageRoot, "dist", "extensions", "live-level.js")
+  );
   assert.deepEqual(
-    [-Infinity, -41, -40, -37, -34, -31, -28, -25, -21, -17, -10].map(levelForDb),
+    [-Infinity, -41, -40, -37, -34, -31, -28, -25, -21, -17, -10].map(
+      levelForDb
+    ),
     [0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7]
   );
 });
@@ -46,7 +60,7 @@ test("incomplete and unsupported audio input stays on the truthful silent-line f
   const file = join(dir, "recording.wav");
   try {
     const { GrowingPcm16WavInput } = await jiti.import(
-      join(packageRoot, "extensions", "live-level.ts")
+      join(packageRoot, "dist", "extensions", "live-level.js")
     );
     writeFileSync(file, wavHeader().subarray(0, 24));
     const input = new GrowingPcm16WavInput(file);
@@ -58,7 +72,10 @@ test("incomplete and unsupported audio input stays on the truthful silent-line f
       assert.equal(input.state, "pending");
     });
 
-    writeFileSync(file, Buffer.concat([wavHeader({ channels: 2 }), pcm(Array(1600).fill(8000))]));
+    writeFileSync(
+      file,
+      Buffer.concat([wavHeader({ channels: 2 }), pcm(Array(1600).fill(8000))])
+    );
     const unsupportedSamples = Array.from(await input.readNewestInterval(50));
     await t.test("unsupported input produces no visual samples", () => {
       assert.deepEqual(unsupportedSamples, []);
@@ -76,12 +93,15 @@ test("implausible WAV sample rates are rejected before they can amplify allocati
   const file = join(dir, "recording.wav");
   try {
     const { GrowingPcm16WavInput } = await jiti.import(
-      join(packageRoot, "extensions", "live-level.ts")
+      join(packageRoot, "dist", "extensions", "live-level.js")
     );
-    writeFileSync(file, Buffer.concat([
-      wavHeader({ sampleRate: 1_000_000 }),
-      pcm(Array(1000).fill(1000)),
-    ]));
+    writeFileSync(
+      file,
+      Buffer.concat([
+        wavHeader({ sampleRate: 1_000_000 }),
+        pcm(Array(1000).fill(1000)),
+      ])
+    );
     const input = new GrowingPcm16WavInput(file);
     const samples = Array.from(await input.readNewestInterval(50));
     await t.test("implausible input produces no visual samples", () => {
@@ -100,16 +120,19 @@ test("growing PCM16 mono WAV input drops stale visualization backlog and reads t
   const file = join(dir, "recording.wav");
   try {
     const { GrowingPcm16WavInput } = await jiti.import(
-      join(packageRoot, "extensions", "live-level.ts")
+      join(packageRoot, "dist", "extensions", "live-level.js")
     );
-    writeFileSync(file, Buffer.concat([
-      wavHeader(),
-      pcm([
-        ...Array(800).fill(1000),
-        ...Array(800).fill(2000),
-        ...Array(800).fill(3000),
-      ]),
-    ]));
+    writeFileSync(
+      file,
+      Buffer.concat([
+        wavHeader(),
+        pcm([
+          ...Array(800).fill(1000),
+          ...Array(800).fill(2000),
+          ...Array(800).fill(3000),
+        ]),
+      ])
+    );
 
     const input = new GrowingPcm16WavInput(file);
     const newestInitialSamples = Array.from(await input.readNewestInterval(50));

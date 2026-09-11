@@ -125,19 +125,19 @@ security add-generic-password -a "$USER" -s pi-dictation-openai -U -w
 
 `/dictate-config` にない項目は、`~/.pi/agent/pi-dictation.json` を編集します。[`pi-dictation.example.json`](./pi-dictation.example.json) には、エディターの入力補完と検証に使えるJSON Schemaが含まれています。
 
-| フィールド | デフォルト | 用途 |
-| --- | --- | --- |
-| `shortcut` | `insert` | 音声入力を切り替えるPiショートカット |
-| `language` | 未設定 | OpenAIバックエンドに渡す言語 |
-| `recorders` | `{ "selected": "local" }` | ローカル録音またはBridge録音を選択し、必要に応じてローカル録音コマンドを設定 |
-| `transcribeCommand` | 未設定 | ローカル文字起こしコマンド |
-| `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI互換の文字起こしモデル |
-| `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI互換APIのベースURL |
-| `openaiApiKey` | 未設定 | 非公開の設定ファイルに平文で保存されるAPIキー。環境変数または認証情報管理コマンドを推奨 |
-| `openaiApiKeyCommand` | 未設定 | APIキーを出力するコマンド |
-| `timeoutMs` | `120000` | 文字起こしのタイムアウト。`1000`〜`3600000` ミリ秒 |
-| `maxRecordingMs` | `600000` | 最大録音時間。`1000`〜`3600000` ミリ秒 |
-| `spinner` | `arc` | `cli-spinners` のアニメーション名 |
+| フィールド            | デフォルト                  | 用途                                                                                    |
+| --------------------- | --------------------------- | --------------------------------------------------------------------------------------- |
+| `shortcut`            | `insert`                    | 音声入力を切り替えるPiショートカット                                                    |
+| `language`            | 未設定                      | OpenAIバックエンドに渡す言語                                                            |
+| `recorders`           | `{ "selected": "local" }`   | ローカル録音またはBridge録音を選択し、必要に応じてローカル録音コマンドを設定            |
+| `transcribeCommand`   | 未設定                      | ローカル文字起こしコマンド                                                              |
+| `openaiModel`         | `gpt-4o-mini-transcribe`    | OpenAI互換の文字起こしモデル                                                            |
+| `openaiBaseUrl`       | `https://api.openai.com/v1` | OpenAI互換APIのベースURL                                                                |
+| `openaiApiKey`        | 未設定                      | 非公開の設定ファイルに平文で保存されるAPIキー。環境変数または認証情報管理コマンドを推奨 |
+| `openaiApiKeyCommand` | 未設定                      | APIキーを出力するコマンド                                                               |
+| `timeoutMs`           | `120000`                    | 文字起こしのタイムアウト。`1000`〜`3600000` ミリ秒                                      |
+| `maxRecordingMs`      | `600000`                    | 最大録音時間。`1000`〜`3600000` ミリ秒                                                  |
+| `spinner`             | `arc`                       | `cli-spinners` のアニメーション名                                                       |
 
 `OPENAI_API_KEY` だけは環境変数で設定でき、`openaiApiKey` より優先されます。それ以外の設定には設定ファイルを使用します。
 
@@ -187,6 +187,8 @@ pi-dictation bridge uninstall my-pi        # preview
 4. 話したフレーズがPiに挿入されることを確認します。
 
 ## 開発
+
+TypeScriptのソースは `src/` にあり、`npm install` と各チェックによって、Git管理対象外の `dist/` ディレクトリへコンパイルされます。
 
 ```bash
 npm install

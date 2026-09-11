@@ -78,7 +78,9 @@ export async function acquireBridgeSelectionLock(
   let handle;
   try {
     handle = await open(path, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify({ product: "pi-dictation", purpose: "recorder-selection" })}\n`);
+    await handle.writeFile(
+      `${JSON.stringify({ product: "pi-dictation", purpose: "recorder-selection" })}\n`
+    );
     await handle.chmod(0o600);
     await handle.sync();
   } catch (error) {
@@ -94,7 +96,9 @@ export async function acquireBridgeSelectionLock(
 
 export function normalizeDuration(value: unknown, fallback: number): number {
   const duration = Number(value);
-  return Number.isInteger(duration) && duration >= MIN_DURATION_MS && duration <= MAX_DURATION_MS
+  return Number.isInteger(duration) &&
+    duration >= MIN_DURATION_MS &&
+    duration <= MAX_DURATION_MS
     ? duration
     : fallback;
 }
@@ -115,7 +119,13 @@ export function validateConfigFile(value: unknown): DictationConfigFile {
     "openaiApiKeyCommand",
     "spinner",
   ];
-  const knownFields = new Set([...stringFields, "recorder", "recorders", "timeoutMs", "maxRecordingMs"]);
+  const knownFields = new Set([
+    ...stringFields,
+    "recorder",
+    "recorders",
+    "timeoutMs",
+    "maxRecordingMs",
+  ]);
   if (Object.keys(config).some((field) => !knownFields.has(field))) {
     throw new Error("Unknown configuration field");
   }
@@ -126,21 +136,29 @@ export function validateConfigFile(value: unknown): DictationConfigFile {
   }
   for (const field of ["timeoutMs", "maxRecordingMs"]) {
     if (config[field] === undefined) continue;
-    if (typeof config[field] !== "number") throw new Error(`${field} must be a number`);
-    if (!Number.isInteger(config[field])) throw new Error(`${field} must be an integer`);
+    if (typeof config[field] !== "number")
+      throw new Error(`${field} must be a number`);
+    if (!Number.isInteger(config[field]))
+      throw new Error(`${field} must be an integer`);
     if (config[field] < MIN_DURATION_MS || config[field] > MAX_DURATION_MS) {
-      throw new Error(`${field} must be between ${MIN_DURATION_MS} and ${MAX_DURATION_MS}`);
+      throw new Error(
+        `${field} must be between ${MIN_DURATION_MS} and ${MAX_DURATION_MS}`
+      );
     }
   }
   if (config.recorder !== undefined && config.recorders !== undefined) {
     throw new Error("recorder and recorders cannot both be configured");
   }
   if (config.recorder !== undefined) validateRecorderConfig(config.recorder);
-  if (config.recorders !== undefined) validateRecorderProfilesConfig(config.recorders);
+  if (config.recorders !== undefined)
+    validateRecorderProfilesConfig(config.recorders);
   return config as DictationConfigFile;
 }
 
-function validateExactFields(value: Record<string, unknown>, fields: string[]): void {
+function validateExactFields(
+  value: Record<string, unknown>,
+  fields: string[]
+): void {
   if (Object.keys(value).some((field) => !fields.includes(field))) {
     throw new Error("Unknown Recorder configuration field");
   }
@@ -161,12 +179,20 @@ export function validateRecorderConfig(value: unknown): RecorderConfig {
     }
     return recorder as RecorderConfig;
   }
-  if (recorder.type !== "bridge") throw new Error("recorder.type must be local or bridge");
+  if (recorder.type !== "bridge")
+    throw new Error("recorder.type must be local or bridge");
   validateExactFields(recorder, ["type", "endpoint", "credentialFile"]);
-  if (typeof recorder.credentialFile !== "string" || !isAbsolute(recorder.credentialFile)) {
+  if (
+    typeof recorder.credentialFile !== "string" ||
+    !isAbsolute(recorder.credentialFile)
+  ) {
     throw new Error("Bridge credentialFile must be an absolute path");
   }
-  if (!recorder.endpoint || typeof recorder.endpoint !== "object" || Array.isArray(recorder.endpoint)) {
+  if (
+    !recorder.endpoint ||
+    typeof recorder.endpoint !== "object" ||
+    Array.isArray(recorder.endpoint)
+  ) {
     throw new Error("Bridge endpoint must be an object");
   }
   const endpoint = recorder.endpoint as Record<string, unknown>;
@@ -180,7 +206,11 @@ export function validateRecorderConfig(value: unknown): RecorderConfig {
     if (endpoint.host !== "127.0.0.1" && endpoint.host !== "::1") {
       throw new Error("Bridge TCP endpoint host must be loopback");
     }
-    if (!Number.isInteger(endpoint.port) || Number(endpoint.port) < 1 || Number(endpoint.port) > 65535) {
+    if (
+      !Number.isInteger(endpoint.port) ||
+      Number(endpoint.port) < 1 ||
+      Number(endpoint.port) > 65535
+    ) {
       throw new Error("Bridge TCP endpoint port must be from 1 to 65535");
     }
   } else {
@@ -189,7 +219,9 @@ export function validateRecorderConfig(value: unknown): RecorderConfig {
   return recorder as RecorderConfig;
 }
 
-export function validateRecorderProfilesConfig(value: unknown): RecorderProfilesConfig {
+export function validateRecorderProfilesConfig(
+  value: unknown
+): RecorderProfilesConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("recorders must be an object");
   }
@@ -202,42 +234,68 @@ export function validateRecorderProfilesConfig(value: unknown): RecorderProfiles
     throw new Error("Bridge selection requires a configured Bridge Recorder");
   }
   if (recorders.local !== undefined) {
-    if (!recorders.local || typeof recorders.local !== "object" || Array.isArray(recorders.local)) {
+    if (
+      !recorders.local ||
+      typeof recorders.local !== "object" ||
+      Array.isArray(recorders.local)
+    ) {
       throw new Error("recorders.local must be an object");
     }
-    validateExactFields(recorders.local as Record<string, unknown>, ["command"]);
+    validateExactFields(recorders.local as Record<string, unknown>, [
+      "command",
+    ]);
     validateRecorderConfig({ ...(recorders.local as object), type: "local" });
   }
   if (recorders.bridge !== undefined) {
-    if (!recorders.bridge || typeof recorders.bridge !== "object" || Array.isArray(recorders.bridge)) {
+    if (
+      !recorders.bridge ||
+      typeof recorders.bridge !== "object" ||
+      Array.isArray(recorders.bridge)
+    ) {
       throw new Error("recorders.bridge must be an object");
     }
-    validateExactFields(recorders.bridge as Record<string, unknown>, ["endpoint", "credentialFile"]);
+    validateExactFields(recorders.bridge as Record<string, unknown>, [
+      "endpoint",
+      "credentialFile",
+    ]);
     validateRecorderConfig({ ...(recorders.bridge as object), type: "bridge" });
   }
   return recorders as RecorderProfilesConfig;
 }
 
-export function migrateRecorderConfiguration(config: DictationConfigFile): DictationConfigFile {
-  if (config.recorders) return { ...config, recorders: { ...config.recorders } };
+export function migrateRecorderConfiguration(
+  config: DictationConfigFile
+): DictationConfigFile {
+  if (config.recorders)
+    return { ...config, recorders: { ...config.recorders } };
   if (!config.recorder) return { ...config, recorders: { selected: "local" } };
   const { recorder, ...rest } = config;
   return recorder.type === "local"
-    ? { ...rest, recorders: { selected: "local", local: { command: recorder.command } } }
+    ? {
+        ...rest,
+        recorders: { selected: "local", local: { command: recorder.command } },
+      }
     : {
         ...rest,
         recorders: {
           selected: "bridge",
-          bridge: { endpoint: recorder.endpoint, credentialFile: recorder.credentialFile },
+          bridge: {
+            endpoint: recorder.endpoint,
+            credentialFile: recorder.credentialFile,
+          },
         },
       };
 }
 
-function configuredRecorders(config: DictationConfigFile): EffectiveDictationConfig["recorders"] {
+function configuredRecorders(
+  config: DictationConfigFile
+): EffectiveDictationConfig["recorders"] {
   if (config.recorders) {
     return {
       local: { ...config.recorders.local, type: "local" },
-      bridge: config.recorders.bridge ? { ...config.recorders.bridge, type: "bridge" } : undefined,
+      bridge: config.recorders.bridge
+        ? { ...config.recorders.bridge, type: "bridge" }
+        : undefined,
     };
   }
   if (config.recorder?.type === "bridge") {
@@ -251,7 +309,8 @@ export function readConfigFile(path = getConfigPath()): DictationConfigFile {
   let parsed: unknown;
   try {
     const info = statSync(path);
-    if (!info.isFile() || info.size < 2 || info.size > 64 * 1024) throw new Error();
+    if (!info.isFile() || info.size < 2 || info.size > 64 * 1024)
+      throw new Error();
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     throw new Error("invalid JSON");
@@ -272,10 +331,12 @@ export function loadConfig(
   }
 
   const recorders = configuredRecorders(fromFile);
-  const recorderSelection = fromFile.recorders?.selected || fromFile.recorder?.type || "local";
-  const recorder = recorderSelection === "bridge" && recorders.bridge
-    ? recorders.bridge
-    : recorders.local;
+  const recorderSelection =
+    fromFile.recorders?.selected || fromFile.recorder?.type || "local";
+  const recorder =
+    recorderSelection === "bridge" && recorders.bridge
+      ? recorders.bridge
+      : recorders.local;
 
   return {
     shortcut: fromFile.shortcut || DEFAULT_SHORTCUT,
@@ -288,7 +349,10 @@ export function loadConfig(
     openaiBaseUrl: fromFile.openaiBaseUrl || "https://api.openai.com/v1",
     openaiApiKey: env.OPENAI_API_KEY || fromFile.openaiApiKey || "",
     openaiApiKeyCommand: fromFile.openaiApiKeyCommand || "",
-    timeoutMs: normalizeDuration(fromFile.timeoutMs || DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    timeoutMs: normalizeDuration(
+      fromFile.timeoutMs || DEFAULT_TIMEOUT_MS,
+      DEFAULT_TIMEOUT_MS
+    ),
     maxRecordingMs: normalizeDuration(
       fromFile.maxRecordingMs || DEFAULT_MAX_RECORDING_MS,
       DEFAULT_MAX_RECORDING_MS
@@ -305,7 +369,10 @@ export async function writeConfigFileAtomic(
   const validated = validateConfigFile(config);
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporaryPath = join(directory, `.pi-dictation.${process.pid}.${randomUUID()}.tmp`);
+  const temporaryPath = join(
+    directory,
+    `.pi-dictation.${process.pid}.${randomUUID()}.tmp`
+  );
   let handle;
   try {
     handle = await open(temporaryPath, "wx", 0o600);

@@ -25,11 +25,21 @@ import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cliSpinners from "cli-spinners";
-import { DEFAULT_SHORTCUT, DEFAULT_SPINNER, getConfigPath, loadConfig } from "./config.js";
+import {
+  DEFAULT_SHORTCUT,
+  DEFAULT_SPINNER,
+  getConfigPath,
+  loadConfig,
+} from "./config.js";
 import { showDictationConfig } from "./config-ui.js";
 import { diagnoseDictation } from "./doctor.js";
 import { levelForDb } from "./live-level.js";
-import { createRecorder, type LevelEvent, type LevelObservation, type Recording } from "./recorder.js";
+import {
+  createRecorder,
+  type LevelEvent,
+  type LevelObservation,
+  type Recording,
+} from "./recorder.js";
 import { shellQuote } from "./shell.js";
 const CONFIG_PATH = getConfigPath();
 const MAX_ERROR_DETAIL_BYTES = 8 * 1024;
@@ -46,7 +56,9 @@ type StripOptions = {
   spinner?: string;
 };
 
-type LevelSlot = LevelObservation | { type: "unavailable" | "gap"; sequence: number; capturedAtMs: number };
+type LevelSlot =
+  | LevelObservation
+  | { type: "unavailable" | "gap"; sequence: number; capturedAtMs: number };
 
 type ActiveRecording = {
   config: ReturnType<typeof loadConfig>;
@@ -59,7 +71,9 @@ type ActiveRecording = {
 };
 
 function errorDetail(value) {
-  const sanitized = String(value || "").replace(/[^\t\n\x20-\x7e\u00a0-\uffff]/g, "�").trim();
+  const sanitized = String(value || "")
+    .replace(/[^\t\n\x20-\x7e\u00a0-\uffff]/g, "�")
+    .trim();
   const bytes = Buffer.from(sanitized);
   if (bytes.length <= MAX_ERROR_DETAIL_BYTES) return sanitized;
   return `${bytes.subarray(0, MAX_ERROR_DETAIL_BYTES).toString("utf8")}\n[diagnostic truncated]`;
@@ -77,7 +91,8 @@ async function boundedBody(response, maximumBytes) {
       const retained = value.subarray(0, maximumBytes + 1 - bytes);
       chunks.push(Buffer.from(retained));
       bytes += retained.length;
-      if (bytes > maximumBytes) throw new Error("Response body exceeds the safe limit.");
+      if (bytes > maximumBytes)
+        throw new Error("Response body exceeds the safe limit.");
     }
   } finally {
     await reader.cancel().catch(() => {});
@@ -86,12 +101,17 @@ async function boundedBody(response, maximumBytes) {
 }
 
 async function boundedResponseText(response) {
-  try { return errorDetail(await boundedBody(response, MAX_ERROR_DETAIL_BYTES)); }
-  catch { return "[diagnostic truncated]"; }
+  try {
+    return errorDetail(await boundedBody(response, MAX_ERROR_DETAIL_BYTES));
+  } catch {
+    return "[diagnostic truncated]";
+  }
 }
 
 async function boundedTranscriptionResponse(response) {
-  return (await boundedBody(response, MAX_TRANSCRIPTION_RESPONSE_BYTES)).toString("utf8");
+  return (
+    await boundedBody(response, MAX_TRANSCRIPTION_RESPONSE_BYTES)
+  ).toString("utf8");
 }
 
 function expandFileTemplate(template, file) {
@@ -113,7 +133,11 @@ function signalProcessGroup(proc, signal) {
   } catch {}
 }
 
-async function waitForExit(proc, timeoutMs = 3000, forceKill = () => proc.kill("SIGKILL")) {
+async function waitForExit(
+  proc,
+  timeoutMs = 3000,
+  forceKill = () => proc.kill("SIGKILL")
+) {
   if (proc.exitCode !== null || proc.signalCode !== null) {
     return { code: proc.exitCode, signal: proc.signalCode };
   }
@@ -148,7 +172,9 @@ function processGroupExists(proc) {
 
 async function stopProcessGroup(proc, timeoutMs = 3000) {
   signalProcessGroup(proc, "SIGINT");
-  const result = await waitForExit(proc, timeoutMs, () => signalProcessGroup(proc, "SIGKILL"));
+  const result = await waitForExit(proc, timeoutMs, () =>
+    signalProcessGroup(proc, "SIGKILL")
+  );
   if (processGroupExists(proc)) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     if (processGroupExists(proc)) signalProcessGroup(proc, "SIGKILL");
@@ -163,7 +189,12 @@ async function runIsolatedShellCommand(
     signal,
     timeoutMs,
     maxBuffer,
-  }: { cwd?: string; signal?: AbortSignal; timeoutMs: number; maxBuffer: number }
+  }: {
+    cwd?: string;
+    signal?: AbortSignal;
+    timeoutMs: number;
+    maxBuffer: number;
+  }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const proc = spawn("/bin/sh", ["-lc", command], {
@@ -210,7 +241,8 @@ async function runIsolatedShellCommand(
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const stderr = Buffer.concat(stderrChunks).toString("utf8");
       if (error || stopReason || code !== 0) {
-        const reason = error?.message || stopReason || processSignal || `exit code ${code}`;
+        const reason =
+          error?.message || stopReason || processSignal || `exit code ${code}`;
         const failure = Object.assign(new Error(reason), { stdout, stderr });
         reject(failure);
         return;
@@ -219,7 +251,10 @@ async function runIsolatedShellCommand(
     };
 
     proc.once("error", (error) => void finish(error, null, null));
-    proc.once("exit", (code, processSignal) => void finish(null, code, processSignal));
+    proc.once(
+      "exit",
+      (code, processSignal) => void finish(null, code, processSignal)
+    );
   });
 }
 
@@ -234,13 +269,21 @@ async function transcribeWithCommand(config, file, cwd, signal) {
     });
     const text = String(stdout || "").trim();
     if (!text) {
-      throw new Error(String(stderr || "transcribeCommand produced no stdout").trim());
+      throw new Error(
+        String(stderr || "transcribeCommand produced no stdout").trim()
+      );
     }
     return text;
   } catch (error) {
-    const stdout = error.stdout ? `\nstdout:\n${errorDetail(error.stdout)}` : "";
-    const stderr = error.stderr ? `\nstderr:\n${errorDetail(error.stderr)}` : "";
-    throw new Error(`transcribeCommand failed: ${error.message}${stdout}${stderr}`);
+    const stdout = error.stdout
+      ? `\nstdout:\n${errorDetail(error.stdout)}`
+      : "";
+    const stderr = error.stderr
+      ? `\nstderr:\n${errorDetail(error.stderr)}`
+      : "";
+    throw new Error(
+      `transcribeCommand failed: ${error.message}${stdout}${stderr}`
+    );
   }
 }
 
@@ -249,16 +292,25 @@ async function resolveOpenAIApiKey(config, signal) {
   if (!config.openaiApiKeyCommand) return "";
 
   try {
-    const { stdout } = await runIsolatedShellCommand(config.openaiApiKeyCommand, {
-      signal,
-      timeoutMs: 5000,
-      maxBuffer: 128 * 1024,
-    });
+    const { stdout } = await runIsolatedShellCommand(
+      config.openaiApiKeyCommand,
+      {
+        signal,
+        timeoutMs: 5000,
+        maxBuffer: 128 * 1024,
+      }
+    );
     return String(stdout || "").trim();
   } catch (error) {
-    const stdout = error.stdout ? `\nstdout:\n${errorDetail(error.stdout)}` : "";
-    const stderr = error.stderr ? `\nstderr:\n${errorDetail(error.stderr)}` : "";
-    throw new Error(`openaiApiKeyCommand failed: ${error.message}${stdout}${stderr}`);
+    const stdout = error.stdout
+      ? `\nstdout:\n${errorDetail(error.stdout)}`
+      : "";
+    const stderr = error.stderr
+      ? `\nstderr:\n${errorDetail(error.stderr)}`
+      : "";
+    throw new Error(
+      `openaiApiKeyCommand failed: ${error.message}${stdout}${stderr}`
+    );
   }
 }
 
@@ -268,7 +320,10 @@ async function transcribeWithOpenAI(config, file, signal) {
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
   const timer = setTimeout(
-    () => controller.abort(new Error(`OpenAI transcription timed out after ${config.timeoutMs}ms`)),
+    () =>
+      controller.abort(
+        new Error(`OpenAI transcription timed out after ${config.timeoutMs}ms`)
+      ),
     config.timeoutMs
   );
   timer.unref?.();
@@ -297,7 +352,10 @@ async function transcribeWithOpenAI(config, file, signal) {
         signal: controller.signal,
       });
     } catch (error) {
-      if (controller.signal.aborted && controller.signal.reason instanceof Error) {
+      if (
+        controller.signal.aborted &&
+        controller.signal.reason instanceof Error
+      ) {
         throw controller.signal.reason;
       }
       throw new Error(`OpenAI request to ${endpoint} failed: ${error.message}`);
@@ -305,13 +363,20 @@ async function transcribeWithOpenAI(config, file, signal) {
 
     if (!response.ok) {
       const body = await boundedResponseText(response).catch(() => "");
-      throw new Error(`OpenAI transcription failed: HTTP ${response.status} ${body}`);
+      throw new Error(
+        `OpenAI transcription failed: HTTP ${response.status} ${body}`
+      );
     }
 
     const body = await boundedTranscriptionResponse(response);
     let json;
-    try { json = JSON.parse(body); }
-    catch { throw new Error("OpenAI transcription returned an invalid bounded response."); }
+    try {
+      json = JSON.parse(body);
+    } catch {
+      throw new Error(
+        "OpenAI transcription returned an invalid bounded response."
+      );
+    }
     const text = String(json.text || "").trim();
     if (!text) throw new Error("OpenAI transcription returned empty text.");
     return text;
@@ -329,7 +394,9 @@ async function transcribe(config, file, cwd, signal) {
 }
 
 function resolveSpinner(name) {
-  return cliSpinners?.[name] || cliSpinners?.[DEFAULT_SPINNER] || FALLBACK_SPINNER;
+  return (
+    cliSpinners?.[name] || cliSpinners?.[DEFAULT_SPINNER] || FALLBACK_SPINNER
+  );
 }
 
 class DictationStrip {
@@ -345,7 +412,12 @@ class DictationStrip {
   startedAt: number;
   levels: number[];
   levelObservations: Map<number, LevelSlot>;
-  levelDiagnosis: "ok" | "measurement-unavailable" | "transport-gap" | "transport-unavailable" | "conflicting-duplicate";
+  levelDiagnosis:
+    | "ok"
+    | "measurement-unavailable"
+    | "transport-gap"
+    | "transport-unavailable"
+    | "conflicting-duplicate";
   levelTimer: ReturnType<typeof setInterval> | null;
 
   constructor(ui: any, label: string, options: StripOptions = {}) {
@@ -376,7 +448,11 @@ class DictationStrip {
   setLabel(label: string, options: StripOptions = {}) {
     this.label = label;
     if (options.spinner) this.spinner = resolveSpinner(options.spinner);
-    this.animationMode = options.spin ? "spin" : options.blink ? "blink" : "none";
+    this.animationMode = options.spin
+      ? "spin"
+      : options.blink
+        ? "blink"
+        : "none";
     if (this.animationMode === "blink") this.startLiveLevels();
     else this.stopLiveLevels();
     this.frameIndex = 0;
@@ -387,7 +463,12 @@ class DictationStrip {
   }
 
   setRecordingStartedAt(startedAt: number) {
-    if (this.animationMode !== "blink" || !Number.isFinite(startedAt) || startedAt > Date.now()) return;
+    if (
+      this.animationMode !== "blink" ||
+      !Number.isFinite(startedAt) ||
+      startedAt > Date.now()
+    )
+      return;
     this.startedAt = startedAt;
     this.rebuildLevels();
     this.requestRender();
@@ -398,7 +479,8 @@ class DictationStrip {
     this.timer = null;
     if (this.animationMode === "none") return;
 
-    const interval = this.animationMode === "spin" ? this.spinner.interval : 520;
+    const interval =
+      this.animationMode === "spin" ? this.spinner.interval : 520;
     this.timer = setInterval(() => {
       if (this.animationMode === "spin") {
         this.frameIndex = (this.frameIndex + 1) % this.spinner.frames.length;
@@ -429,28 +511,47 @@ class DictationStrip {
   observeLevel(event: LevelEvent) {
     if (this.animationMode !== "blink") return;
     if (event.type === "transport") {
-      this.levelDiagnosis = event.state === "connected" ? "ok" : "transport-unavailable";
+      this.levelDiagnosis =
+        event.state === "connected" ? "ok" : "transport-unavailable";
       return;
     }
     if (event.type === "gap") {
-      if (!Number.isInteger(event.fromSequence) || !Number.isInteger(event.toSequence) ||
-          event.fromSequence < 0 || event.toSequence < event.fromSequence) return;
-      const latestSlot = Math.max(0, Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS));
+      if (
+        !Number.isInteger(event.fromSequence) ||
+        !Number.isInteger(event.toSequence) ||
+        event.fromSequence < 0 ||
+        event.toSequence < event.fromSequence
+      )
+        return;
+      const latestSlot = Math.max(
+        0,
+        Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS)
+      );
       const first = Math.max(event.fromSequence, latestSlot - 499);
       const last = Math.min(event.toSequence, latestSlot + 499);
       for (let sequence = first; sequence <= last; sequence++) {
-        if (!this.levelObservations.has(sequence)) this.levelObservations.set(sequence, {
-          type: "gap", sequence, capturedAtMs: sequence * LEVEL_REFRESH_MS,
-        });
+        if (!this.levelObservations.has(sequence))
+          this.levelObservations.set(sequence, {
+            type: "gap",
+            sequence,
+            capturedAtMs: sequence * LEVEL_REFRESH_MS,
+          });
       }
       this.levelDiagnosis = "transport-gap";
       this.rebuildLevels();
       this.requestRender();
       return;
     }
-    if (!Number.isInteger(event.sequence) || event.sequence < 0 ||
-        !Number.isFinite(event.capturedAtMs) || event.capturedAtMs !== event.sequence * LEVEL_REFRESH_MS ||
-        (event.type === "observation" && event.dbfs !== "silence" && !Number.isFinite(event.dbfs))) return;
+    if (
+      !Number.isInteger(event.sequence) ||
+      event.sequence < 0 ||
+      !Number.isFinite(event.capturedAtMs) ||
+      event.capturedAtMs !== event.sequence * LEVEL_REFRESH_MS ||
+      (event.type === "observation" &&
+        event.dbfs !== "silence" &&
+        !Number.isFinite(event.dbfs))
+    )
+      return;
     const slot = event.capturedAtMs / LEVEL_REFRESH_MS;
     const existing = this.levelObservations.get(slot);
     if (existing) {
@@ -459,13 +560,17 @@ class DictationStrip {
       return;
     }
     this.levelObservations.set(slot, event);
-    if (event.type === "unavailable") this.levelDiagnosis = "measurement-unavailable";
+    if (event.type === "unavailable")
+      this.levelDiagnosis = "measurement-unavailable";
     this.rebuildLevels();
     this.requestRender();
   }
 
   rebuildLevels() {
-    const latestSlot = Math.max(0, Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS));
+    const latestSlot = Math.max(
+      0,
+      Math.floor((Date.now() - this.startedAt) / LEVEL_REFRESH_MS)
+    );
     const firstSlot = Math.max(0, latestSlot - 499);
     for (const sequence of this.levelObservations.keys()) {
       if (sequence < firstSlot) this.levelObservations.delete(sequence);
@@ -479,7 +584,10 @@ class DictationStrip {
         levels.push(0);
         continue;
       }
-      if (observation.type !== "observation" || observation.dbfs === "silence") {
+      if (
+        observation.type !== "observation" ||
+        observation.dbfs === "silence"
+      ) {
         smoothedRms = 0;
         levels.push(0);
         continue;
@@ -502,22 +610,35 @@ class DictationStrip {
     if (this.animationMode === "blink") {
       const elapsedSeconds = Math.floor((Date.now() - this.startedAt) / 1000);
       const elapsed = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
-      const marker = this.blinkOn ? this.theme?.bold(this.theme?.fg("error", "●") ?? "●") ?? "●" : " ";
+      const marker = this.blinkOn
+        ? (this.theme?.bold(this.theme?.fg("error", "●") ?? "●") ?? "●")
+        : " ";
       const left = `${marker} REC  `;
       const leftWidth = "● REC  ".length;
       const right = `  ${elapsed}`;
       if (safeWidth < leftWidth + right.length) {
-        return [truncateToWidth(`${this.blinkOn ? "●" : " "} REC ${elapsed}`, safeWidth, "")];
+        return [
+          truncateToWidth(
+            `${this.blinkOn ? "●" : " "} REC ${elapsed}`,
+            safeWidth,
+            ""
+          ),
+        ];
       }
       const waveWidth = safeWidth - leftWidth - right.length;
       const selected = waveWidth > 0 ? this.levels.slice(-waveWidth) : [];
-      const levels = Array(Math.max(0, waveWidth - selected.length)).fill(0).concat(selected);
-      const wave = levels.map((level, index) => {
-        const ratio = (index + 1) / waveWidth;
-        const color = ratio <= 0.2 ? "dim" : ratio <= 0.65 ? "muted" : "accent";
-        const bar = LEVEL_BARS[level] ?? LEVEL_BARS[0];
-        return this.theme?.fg(color, bar) ?? bar;
-      }).join("");
+      const levels = Array(Math.max(0, waveWidth - selected.length))
+        .fill(0)
+        .concat(selected);
+      const wave = levels
+        .map((level, index) => {
+          const ratio = (index + 1) / waveWidth;
+          const color =
+            ratio <= 0.2 ? "dim" : ratio <= 0.65 ? "muted" : "accent";
+          const bar = LEVEL_BARS[level] ?? LEVEL_BARS[0];
+          return this.theme?.fg(color, bar) ?? bar;
+        })
+        .join("");
       return [`${left}${wave}${right}`];
     }
 
@@ -532,10 +653,13 @@ class DictationStrip {
         const segmentWidth = barWidth >= 3 ? Math.min(5, barWidth - 2) : 1;
         const margin = barWidth >= 3 ? 1 : 0;
         const travel = barWidth - segmentWidth - margin * 2;
-        const step = Math.floor((Date.now() - this.startedAt) / Math.max(60, this.spinner.interval));
+        const step = Math.floor(
+          (Date.now() - this.startedAt) / Math.max(60, this.spinner.interval)
+        );
         const cycle = Math.max(1, travel * 2);
         const offset = step % cycle;
-        const segmentStart = margin + (offset <= travel ? offset : cycle - offset);
+        const segmentStart =
+          margin + (offset <= travel ? offset : cycle - offset);
         const before = "─".repeat(segmentStart);
         const active = "━".repeat(segmentWidth);
         const after = "─".repeat(barWidth - segmentStart - segmentWidth);
@@ -701,11 +825,13 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Dictation failed: ${error.message}`, "error");
       }
     } finally {
-      if (startupAbortController === startupController) startupAbortController = null;
+      if (startupAbortController === startupController)
+        startupAbortController = null;
       if (!ownershipTransferred) {
         cancelStartupRequested = false;
         if (!shuttingDown) recordingPhase = "idle";
-        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+        if (dir)
+          await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
     }
   }
@@ -716,7 +842,8 @@ export default function (pi: ExtensionAPI) {
       if (recordingPhase === "starting") {
         cancelStartupRequested = true;
         startupAbortController?.abort();
-        if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
+        if (!shuttingDown)
+          showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
         return;
       }
       if (!shuttingDown) showStrip(ctx, "Idle", { autoHideMs: 1000 });
@@ -733,20 +860,31 @@ export default function (pi: ExtensionAPI) {
 
     const config = active.config;
     recordingPhase = "stopping";
-    if (!shuttingDown) showStrip(ctx, "Processing…", { spin: true, spinner: config.spinner });
+    if (!shuttingDown)
+      showStrip(ctx, "Processing…", { spin: true, spinner: config.spinner });
 
     active.stopPromise = (async () => {
       try {
-        if (active.cancelRequested || shuttingDown) await active.handle.cancel();
+        if (active.cancelRequested || shuttingDown)
+          await active.handle.cancel();
         else await active.handle.stop();
 
         if (active.cancelRequested || shuttingDown) {
-          if (!shuttingDown) showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
+          if (!shuttingDown)
+            showStrip(ctx, "Dictation cancelled", { autoHideMs: 1000 });
           return;
         }
 
-        showStrip(ctx, "Transcribing…", { spin: true, spinner: config.spinner });
-        const text = await transcribe(config, active.file, ctx.cwd, active.abortController.signal);
+        showStrip(ctx, "Transcribing…", {
+          spin: true,
+          spinner: config.spinner,
+        });
+        const text = await transcribe(
+          config,
+          active.file,
+          ctx.cwd,
+          active.abortController.signal
+        );
         if (shuttingDown || active.cancelRequested) return;
         ctx.ui.pasteToEditor(text);
         showDone(ctx);
@@ -808,7 +946,10 @@ export default function (pi: ExtensionAPI) {
     description: "Configure Pi Dictation",
     handler: async (_args, ctx) => {
       if (recordingPhase !== "idle") {
-        ctx.ui.notify("Recorder selection cannot be changed during dictation.", "warning");
+        ctx.ui.notify(
+          "Recorder selection cannot be changed during dictation.",
+          "warning"
+        );
         return;
       }
       await showDictationConfig(ctx);

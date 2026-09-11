@@ -4,6 +4,7 @@ const { createHash } = require("node:crypto");
 const { once } = require("node:events");
 const {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -14,13 +15,24 @@ const {
   writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join, resolve } = require("node:path");
+const { join, relative, resolve, sep } = require("node:path");
 const { test } = require("node:test");
 
 const packageRoot = resolve(__dirname, "..");
-const cliPath = join(packageRoot, "bin", "pi-dictation.mjs");
-const certificationPath = join(packageRoot, "bin", "pi-dictation-bridge-certify.cjs");
-const { commitProvenLifecycle, recoverLifecycleOrRethrow, recoversLifecycleInlineAfterError } = require("../bin/certification-recovery.cjs");
+const cliPath = join(packageRoot, "dist", "bin", "pi-dictation.js");
+const certificationPath = join(
+  packageRoot,
+  "dist",
+  "bin",
+  "pi-dictation-bridge-certify.js"
+);
+const certificationSourcePath = join(
+  packageRoot,
+  "src",
+  "bin",
+  "pi-dictation-bridge-certify.ts"
+);
+const recoveryModule = import("../dist/bin/certification-recovery.js");
 
 function temporaryHome() {
   const base = process.platform === "darwin" ? "/tmp" : tmpdir();
@@ -42,12 +54,23 @@ function npmPackEntries(stdout) {
 
 function runInPseudoTerminal(args, options) {
   if (process.platform === "darwin") {
-    const command = args.map((argument) => `{${argument.replaceAll("\\", "\\\\").replaceAll("}", "\\}")}}`).join(" ");
+    const command = args
+      .map(
+        (argument) =>
+          `{${argument.replaceAll("\\", "\\\\").replaceAll("}", "\\}")}}`
+      )
+      .join(" ");
     const program = `set timeout -1; spawn ${command}; expect eof; set result [wait]; exit [lindex $result 3]`;
     return spawnSync("/usr/bin/expect", ["-c", program], options);
   }
-  const command = args.map((argument) => `'${argument.replaceAll("'", `'\\''`)}'`).join(" ");
-  return spawnSync("/usr/bin/script", ["-q", "-e", "-c", command, "/dev/null"], options);
+  const command = args
+    .map((argument) => `'${argument.replaceAll("'", `'\\''`)}'`)
+    .join(" ");
+  return spawnSync(
+    "/usr/bin/script",
+    ["-q", "-e", "-c", command, "/dev/null"],
+    options
+  );
 }
 
 function writeExecutable(path, content) {
@@ -106,35 +129,56 @@ printf '{"permission":"authorized","capture":"%s"}\\n' "$capture" > "$result"
   );
   writeExecutable(
     join(tools, "launchctl"),
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LAUNCHCTL_LOG\"\nexit 0\n"
+    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n'
   );
 }
 
 test("package exposes the unified Pi Dictation CLI and native companion source", async (t) => {
-  const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  const manifest = JSON.parse(
+    readFileSync(join(packageRoot, "package.json"), "utf8")
+  );
 
   await t.test("maps pi-dictation to the unified CLI", () => {
-    assert.equal(manifest.bin?.["pi-dictation"], "bin/pi-dictation.mjs");
+    assert.equal(manifest.bin?.["pi-dictation"], "dist/bin/pi-dictation.js");
   });
   await t.test("ships native companion files", () => {
     assert.ok(manifest.files.includes("native"));
   });
   await t.test("maps the packaged real-device certification command", () => {
-    assert.equal(manifest.bin?.["pi-dictation-bridge-certify"], "bin/pi-dictation-bridge-certify.cjs");
+    assert.equal(
+      manifest.bin?.["pi-dictation-bridge-certify"],
+      "dist/bin/pi-dictation-bridge-certify.js"
+    );
   });
 });
 
 test("lifecycle recovery owns the verdict after an interrupted request", async (t) => {
+  const { recoverLifecycleOrRethrow } = await recoveryModule;
   const original = new Error("transport-eof");
-  await t.test("returns successfully when recovery proves the scenario", async () => {
-    assert.equal(await recoverLifecycleOrRethrow(original, async () => "passed"), "passed");
-  });
-  await t.test("preserves the original error when recovery cannot prove the scenario", async () => {
-    await assert.rejects(recoverLifecycleOrRethrow(original, async () => { throw new Error("unavailable"); }), original);
-  });
+  await t.test(
+    "returns successfully when recovery proves the scenario",
+    async () => {
+      assert.equal(
+        await recoverLifecycleOrRethrow(original, async () => "passed"),
+        "passed"
+      );
+    }
+  );
+  await t.test(
+    "preserves the original error when recovery cannot prove the scenario",
+    async () => {
+      await assert.rejects(
+        recoverLifecycleOrRethrow(original, async () => {
+          throw new Error("unavailable");
+        }),
+        original
+      );
+    }
+  );
 });
 
 test("logout and reboot retain recovery state after teardown errors", async (t) => {
+  const { recoversLifecycleInlineAfterError } = await recoveryModule;
   await t.test("logout defers cleanup until post-login verification", () => {
     assert.equal(recoversLifecycleInlineAfterError("logout"), false);
   });
@@ -145,165 +189,411 @@ test("logout and reboot retain recovery state after teardown errors", async (t) 
     assert.equal(recoversLifecycleInlineAfterError("session-lock"), true);
   });
   await t.test("keeps heartbeat polling before the teardown error", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("while (true)") && !source.includes("if (!waitsForLifecycleInline(name)) return"), true);
+    const source = readFileSync(certificationSourcePath, "utf8");
+    assert.equal(
+      source.includes("while (true)") &&
+        !source.includes("if (!waitsForLifecycleInline(name)) return"),
+      true
+    );
   });
 });
 
 test("lifecycle evidence commits recovery cleanup only after proving its reason", async (t) => {
+  const { commitProvenLifecycle } = await recoveryModule;
   await t.test("commits when the observed reason matches", () => {
     let committed = false;
-    commitProvenLifecycle("companion-restart", "companion-restart", "failed", () => { committed = true; });
+    commitProvenLifecycle(
+      "companion-restart",
+      "companion-restart",
+      "failed",
+      () => {
+        committed = true;
+      }
+    );
     assert.equal(committed, true);
   });
-  await t.test("retains recovery state when the observed reason differs", () => {
-    let committed = false;
-    try { commitProvenLifecycle(undefined, "companion-restart", "recording", () => { committed = true; }); } catch {}
-    assert.equal(committed, false);
-  });
+  await t.test(
+    "retains recovery state when the observed reason differs",
+    () => {
+      let committed = false;
+      try {
+        commitProvenLifecycle(
+          undefined,
+          "companion-restart",
+          "recording",
+          () => {
+            committed = true;
+          }
+        );
+      } catch {}
+      assert.equal(committed, false);
+    }
+  );
 });
 
 test("packaged real-device certification lists every required gate scenario without repository fixtures", async (t) => {
-  const result = spawnSync(process.execPath, [certificationPath, "list", "--json"], {
-    cwd: packageRoot, encoding: "utf8",
-  });
+  const result = spawnSync(
+    process.execPath,
+    [certificationPath, "list", "--json"],
+    {
+      cwd: packageRoot,
+      encoding: "utf8",
+    }
+  );
   if (result.status !== 0) throw new Error(result.stderr);
   const output = JSON.parse(result.stdout);
-  const certificationSource = readFileSync(certificationPath, "utf8");
+  const certificationSource = readFileSync(certificationSourcePath, "utf8");
   await t.test("lists every recurring and lifecycle scenario", () => {
-    assert.deepEqual(output.scenarios.map(({ name }) => name), [
-      "bridge-level-transcription", "bridge-cancellation", "bridge-duration-limit", "bridge-tunnel-reconnect",
-      "bridge-single-lease", "local-recording", "clean-user-tarball", "sleep", "logout", "reboot", "session-lock",
-      "companion-stop", "companion-restart", "device-loss",
-    ]);
+    assert.deepEqual(
+      output.scenarios.map(({ name }) => name),
+      [
+        "bridge-level-transcription",
+        "bridge-cancellation",
+        "bridge-duration-limit",
+        "bridge-tunnel-reconnect",
+        "bridge-single-lease",
+        "local-recording",
+        "clean-user-tarball",
+        "sleep",
+        "logout",
+        "reboot",
+        "session-lock",
+        "companion-stop",
+        "companion-restart",
+        "device-loss",
+      ]
+    );
   });
   await t.test("declares the exact production protocol version", () => {
     assert.equal(output.protocolVersion, 3);
   });
-  await t.test("automates cancellation and arbitration without human actions", () => {
-    assert.deepEqual(output.scenarios.filter(({ requiresHumanAction }) => !requiresHumanAction).map(({ name }) => name), [
-      "bridge-cancellation", "bridge-single-lease",
-    ]);
-  });
-  await t.test("requires real microphone input for the duration-limit WAV", () => {
-    assert.equal(output.scenarios.find(({ name }) => name === "bridge-duration-limit").requiresHumanAction, true);
-  });
-  await t.test("requires two independently configured hosts for arbitration", () => {
-    assert.equal(output.scenarios.find(({ name }) => name === "bridge-single-lease").requiredHostAliases, 2);
-  });
-  await t.test("enumerates every clean-user actual-tarball certification stage", () => {
-    assert.deepEqual(output.scenarios.find(({ name }) => name === "clean-user-tarball").stages, [
-      "tarball-install", "real-audio-preflight", "idempotent-install", "human-diagnosis", "json-diagnosis",
-      "bridge-recording", "upgrade", "credential-rotation", "uninstall", "external-artifact-preservation",
-    ]);
-  });
-  await t.test("declares tunnel-loss termination at the fifteen-second owner-liveness bound", () => {
-    assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").livenessBoundMilliseconds, 15000);
-  });
-  await t.test("declares authenticated remote health as the reconnect proof", () => {
-    assert.equal(output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect").reconnectValidation, "authenticated-remote-health");
-  });
-  await t.test("classifies companion stop and restart through one lifecycle predicate", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('const companionLifecycleScenarios = new Set(["companion-stop", "companion-restart"])'), true);
-  });
-  await t.test("actively restores the owned companion before lifecycle verification", () => {
-    assert.equal(readFileSync(certificationPath, "utf8").includes("restartCompanionForLifecycleVerification"), true);
-  });
-  await t.test("retains recovery state until the expected lifecycle reason is proven", () => {
-    assert.equal(readFileSync(certificationPath, "utf8").includes("commitProvenLifecycle(observedReason, expected.reason, status.payload.state, clearState)"), true);
-  });
-  await t.test("requires authenticated readiness rather than only a successful launchctl submission", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("await assertReady(credential)") && source.includes("Companion restart did not return authenticated readiness"), true);
-  });
+  await t.test(
+    "automates cancellation and arbitration without human actions",
+    () => {
+      assert.deepEqual(
+        output.scenarios
+          .filter(({ requiresHumanAction }) => !requiresHumanAction)
+          .map(({ name }) => name),
+        ["bridge-cancellation", "bridge-single-lease"]
+      );
+    }
+  );
+  await t.test(
+    "requires real microphone input for the duration-limit WAV",
+    () => {
+      assert.equal(
+        output.scenarios.find(({ name }) => name === "bridge-duration-limit")
+          .requiresHumanAction,
+        true
+      );
+    }
+  );
+  await t.test(
+    "requires two independently configured hosts for arbitration",
+    () => {
+      assert.equal(
+        output.scenarios.find(({ name }) => name === "bridge-single-lease")
+          .requiredHostAliases,
+        2
+      );
+    }
+  );
+  await t.test(
+    "enumerates every clean-user actual-tarball certification stage",
+    () => {
+      assert.deepEqual(
+        output.scenarios.find(({ name }) => name === "clean-user-tarball")
+          .stages,
+        [
+          "tarball-install",
+          "real-audio-preflight",
+          "idempotent-install",
+          "human-diagnosis",
+          "json-diagnosis",
+          "bridge-recording",
+          "upgrade",
+          "credential-rotation",
+          "uninstall",
+          "external-artifact-preservation",
+        ]
+      );
+    }
+  );
+  await t.test(
+    "declares tunnel-loss termination at the fifteen-second owner-liveness bound",
+    () => {
+      assert.equal(
+        output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect")
+          .livenessBoundMilliseconds,
+        15000
+      );
+    }
+  );
+  await t.test(
+    "declares authenticated remote health as the reconnect proof",
+    () => {
+      assert.equal(
+        output.scenarios.find(({ name }) => name === "bridge-tunnel-reconnect")
+          .reconnectValidation,
+        "authenticated-remote-health"
+      );
+    }
+  );
+  await t.test(
+    "classifies companion stop and restart through one lifecycle predicate",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        /const companionLifecycleScenarios = new Set\(\[\s*"companion-stop",\s*"companion-restart",?\s*\]\)/.test(
+          source
+        ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "actively restores the owned companion before lifecycle verification",
+    () => {
+      assert.equal(
+        readFileSync(certificationSourcePath, "utf8").includes(
+          "restartCompanionForLifecycleVerification"
+        ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "retains recovery state until the expected lifecycle reason is proven",
+    () => {
+      assert.equal(
+        /commitProvenLifecycle\(\s*observedReason,\s*expected\.reason,\s*status\.payload\.state,\s*clearState\s*\)/.test(
+          readFileSync(certificationSourcePath, "utf8")
+        ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "requires authenticated readiness rather than only a successful launchctl submission",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes("await assertReady(credential)") &&
+          source.includes(
+            "Companion restart did not return authenticated readiness"
+          ),
+        true
+      );
+    }
+  );
   await t.test("loads the shared production Bridge protocol module", () => {
-    assert.equal(certificationSource.includes('import("../lib/bridge-protocol.mjs")'), true);
+    assert.equal(
+      certificationSource.includes('import("../lib/bridge-protocol.js")'),
+      true
+    );
   });
   await t.test("does not ship an independent socket and HMAC client", () => {
-    assert.equal(/node:net|createHmac|timingSafeEqual/.test(certificationSource), false);
+    assert.equal(
+      /node:net|createHmac|timingSafeEqual/.test(certificationSource),
+      false
+    );
   });
   await t.test("owns a fixed deadline for every control phase", () => {
-    assert.match(certificationSource, /timing: \{ connect: phase\(\), challenge: phase\(\), requestWrite: phase\(\), response: phase\(\) \}/);
+    assert.match(
+      certificationSource,
+      /timing:\s*\{\s*connect: phase\(\),\s*challenge: phase\(\),\s*requestWrite: phase\(\),\s*response: phase\(\),?\s*\}/
+    );
   });
-  await t.test("reports only the safe shared protocol failure classification", () => {
-    assert.match(certificationSource, /Bridge protocol \$\{error\.kind\} failure during \$\{error\.stage\}\./);
-  });
-  await t.test("requires a distinct predecessor before upgrading to the candidate tarball", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('certificationCommand("npm", ["install", "--global", predecessor]') &&
-      source.includes("packagedPiCommand(state.predecessor") &&
-      source.includes("state.predecessorSha256 === state.tarballSha256"), true);
-  });
+  await t.test(
+    "reports only the safe shared protocol failure classification",
+    () => {
+      assert.match(
+        certificationSource,
+        /Bridge protocol \$\{error\.kind\} failure during \$\{error\.stage\}\./
+      );
+    }
+  );
+  await t.test(
+    "requires a distinct predecessor before upgrading to the candidate tarball",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes(
+          'certificationCommand("npm", ["install", "--global", predecessor]'
+        ) &&
+          source.includes("packagedPiCommand(state.predecessor") &&
+          source.includes("state.predecessorSha256 === state.tarballSha256"),
+        true
+      );
+    }
+  );
   await t.test("uses human and JSON doctor diagnosis from packed bytes", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('["bridge", "doctor"]') && source.includes('["bridge", "doctor", "--json"]'), true);
+    const source = readFileSync(certificationSourcePath, "utf8");
+    assert.equal(
+      source.includes('["bridge", "doctor"]') &&
+        source.includes('["bridge", "doctor", "--json"]'),
+      true
+    );
   });
-  await t.test("installs the exact candidate digest on both hosts before candidate upgrade and recording", async (stage) => {
-    const source = readFileSync(certificationPath, "utf8");
-    await stage.test("transfers the selected candidate", () => {
-      assert.equal(source.includes("installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)"), true);
-    });
-    await stage.test("checks the remote candidate digest", () => {
-      assert.equal(source.includes('["--", alias, "sha256sum", remoteTarball]'), true);
-    });
-    await stage.test("installs the remote candidate globally", () => {
-      assert.equal(source.includes('["--", alias, "npm", "install", "--global", remoteTarball]'), true);
-    });
-    await stage.test("upgrades the configured Bridge", () => {
-      assert.equal(source.includes('["bridge", "upgrade"]'), true);
-    });
-    await stage.test("requires candidate real-audio preflight", () => {
-      assert.equal(source.includes('phase: "awaiting-candidate-preflight"'), true);
-    });
-    await stage.test("requires candidate Bridge recording", () => {
-      assert.equal(source.includes('phase: "awaiting-candidate-recording"'), true);
-    });
-  });
-  await t.test("interrupted automated certification cleanup cannot emit passing evidence", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("Rerun the complete scenario; recovery is not passing evidence."), true);
-  });
-  await t.test("keeps recovery state outside the Bridge runtime removed by uninstall", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('"Caches", "pi-dictation-certification"') &&
-      source.includes('const statePath = join(certificationRuntime, "state.json")'), true);
-  });
-  await t.test("commits every recovery transition through an atomic private rename", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("function atomicState") && source.includes("renameSync(temporary, statePath)"), true);
-  });
-  await t.test("removes the empty certification directory with directory semantics", () => {
-    assert.equal(readFileSync(certificationPath, "utf8").includes("rmdirSync(certificationRuntime)"), true);
-  });
-  await t.test("separates the Bridge uninstall preview from final deletion confirmation", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials"]') &&
-      source.includes('phase: "awaiting-uninstall-confirmation"') &&
-      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
-  });
-  await t.test("persists resumable states before predecessor install, candidate upgrade, and confirmed uninstall", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('phase: "preparing-predecessor"') &&
-      source.includes('phase: "upgrading-candidate"') && source.includes('phase: "uninstalling"'), true);
-  });
-  await t.test("replays idempotent installs and destructive cleanup from transitional phases", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes('if (state.phase === "preparing-predecessor")') &&
-      source.includes('if (state.phase === "upgrading-candidate")') &&
-      source.includes('["bridge", "uninstall", state.alias, "--delete-retained-wav", "--delete-credentials", "--confirm"]'), true);
-  });
-  await t.test("requires a new reviewed confirmation if uninstall effects change", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.equal(source.includes("uninstallPreviewSha256") &&
-      source.includes("Uninstall effects changed. Review the new preview"), true);
-  });
+  await t.test(
+    "installs the exact candidate digest on both hosts before candidate upgrade and recording",
+    async (stage) => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      await stage.test("transfers the selected candidate", () => {
+        assert.equal(
+          source.includes(
+            "installRemoteCandidate(state.alias, state.tarball, state.tarballSha256)"
+          ),
+          true
+        );
+      });
+      await stage.test("checks the remote candidate digest", () => {
+        assert.equal(
+          source.includes('["--", alias, "sha256sum", remoteTarball]'),
+          true
+        );
+      });
+      await stage.test("installs the remote candidate globally", () => {
+        assert.equal(
+          source.includes(
+            '["--", alias, "npm", "install", "--global", remoteTarball]'
+          ),
+          true
+        );
+      });
+      await stage.test("upgrades the configured Bridge", () => {
+        assert.equal(source.includes('["bridge", "upgrade"]'), true);
+      });
+      await stage.test("requires candidate real-audio preflight", () => {
+        assert.equal(
+          source.includes('phase: "awaiting-candidate-preflight"'),
+          true
+        );
+      });
+      await stage.test("requires candidate Bridge recording", () => {
+        assert.equal(
+          source.includes('phase: "awaiting-candidate-recording"'),
+          true
+        );
+      });
+    }
+  );
+  await t.test(
+    "interrupted automated certification cleanup cannot emit passing evidence",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes(
+          "Rerun the complete scenario; recovery is not passing evidence."
+        ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "keeps recovery state outside the Bridge runtime removed by uninstall",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        /"Caches",\s*"pi-dictation-certification"/.test(source) &&
+          source.includes(
+            'const statePath = join(certificationRuntime, "state.json")'
+          ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "commits every recovery transition through an atomic private rename",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes("function atomicState") &&
+          source.includes("renameSync(temporary, statePath)"),
+        true
+      );
+    }
+  );
+  await t.test(
+    "removes the empty certification directory with directory semantics",
+    () => {
+      assert.equal(
+        readFileSync(certificationSourcePath, "utf8").includes(
+          "rmdirSync(certificationRuntime)"
+        ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "separates the Bridge uninstall preview from final deletion confirmation",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        /\[\s*"bridge",\s*"uninstall",\s*state\.alias,\s*"--delete-retained-wav",\s*"--delete-credentials",?\s*\]/.test(
+          source
+        ) &&
+          source.includes('phase: "awaiting-uninstall-confirmation"') &&
+          /\[\s*"bridge",\s*"uninstall",\s*state\.alias,\s*"--delete-retained-wav",\s*"--delete-credentials",\s*"--confirm",?\s*\]/.test(
+            source
+          ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "persists resumable states before predecessor install, candidate upgrade, and confirmed uninstall",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes('phase: "preparing-predecessor"') &&
+          source.includes('phase: "upgrading-candidate"') &&
+          source.includes('phase: "uninstalling"'),
+        true
+      );
+    }
+  );
+  await t.test(
+    "replays idempotent installs and destructive cleanup from transitional phases",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        /if\s*\(\s*state\.phase === "preparing-predecessor"\s*\)/.test(
+          source
+        ) &&
+          /if\s*\(\s*state\.phase === "upgrading-candidate"\s*\)/.test(
+            source
+          ) &&
+          /\[\s*"bridge",\s*"uninstall",\s*state\.alias,\s*"--delete-retained-wav",\s*"--delete-credentials",\s*"--confirm",?\s*\]/.test(
+            source
+          ),
+        true
+      );
+    }
+  );
+  await t.test(
+    "requires a new reviewed confirmation if uninstall effects change",
+    () => {
+      const source = readFileSync(certificationSourcePath, "utf8");
+      assert.equal(
+        source.includes("uninstallPreviewSha256") &&
+          source.includes("Uninstall effects changed. Review the new preview"),
+        true
+      );
+    }
+  );
   await t.test("does not let verify bypass clean-user staged gates", () => {
-    const source = readFileSync(certificationPath, "utf8");
-    assert.match(source, /scenario\.kind === "clean-user"\) fail\("Clean-user certification must resume with `advance --confirm`/);
+    const source = readFileSync(certificationSourcePath, "utf8");
+    assert.match(
+      source,
+      /scenario\.kind === "clean-user"\s*\)\s*fail\(\s*"Clean-user certification must resume with `advance --confirm`/
+    );
   });
   await t.test("does not import a repository test fixture", () => {
-    assert.equal(readFileSync(certificationPath, "utf8").includes("test/fixtures"), false);
+    assert.equal(
+      readFileSync(certificationSourcePath, "utf8").includes("test/fixtures"),
+      false
+    );
   });
 });
 
@@ -311,7 +601,9 @@ test("bridge build stops before creating output when Swift is unavailable", asyn
   const home = temporaryHome();
   const output = join(home, "PiDictationBridge.app");
   try {
-    const result = runBridge(home, ["build", "--output", output], { PATH: "/nonexistent" });
+    const result = runBridge(home, ["build", "--output", output], {
+      PATH: "/nonexistent",
+    });
 
     await t.test("fails", () => {
       assert.notEqual(result.status, 0);
@@ -331,9 +623,14 @@ test("bridge build rejects an unsuitable Swift toolchain before creating output"
   const home = temporaryHome();
   const output = join(home, "PiDictationBridge.app");
   const tools = fakeToolchain(home);
-  writeExecutable(join(tools, "swiftc"), "#!/bin/sh\necho 'Swift version 5.8.1'\necho 'Target: arm64-apple-macosx13.0'\n");
+  writeExecutable(
+    join(tools, "swiftc"),
+    "#!/bin/sh\necho 'Swift version 5.8.1'\necho 'Target: arm64-apple-macosx13.0'\n"
+  );
   try {
-    const result = runBridge(home, ["build", "--output", output], { PATH: tools });
+    const result = runBridge(home, ["build", "--output", output], {
+      PATH: tools,
+    });
 
     await t.test("fails with the required version", () => {
       assert.match(result.stderr, /Swift 5\.9 or newer is required/);
@@ -351,14 +648,19 @@ test("bridge build creates a fixed hidden native app bundle", async (t) => {
   const output = join(home, "PiDictationBridge.app");
   const tools = fakeToolchain(home);
   try {
-    const result = runBridge(home, ["build", "--output", output], { PATH: tools });
+    const result = runBridge(home, ["build", "--output", output], {
+      PATH: tools,
+    });
     const info = readFileSync(join(output, "Contents", "Info.plist"), "utf8");
 
     await t.test("succeeds", () => {
       assert.equal(result.status, 0, result.stderr);
     });
     await t.test("uses the fixed bundle identity", () => {
-      assert.match(info, /<string>com\.yasuhito\.pi-dictation\.bridge<\/string>/);
+      assert.match(
+        info,
+        /<string>com\.yasuhito\.pi-dictation\.bridge<\/string>/
+      );
     });
     await t.test("declares microphone purpose", () => {
       assert.match(info, /<key>NSMicrophoneUsageDescription<\/key>/);
@@ -367,11 +669,24 @@ test("bridge build creates a fixed hidden native app bundle", async (t) => {
       assert.match(info, /<key>LSUIElement<\/key>\s*<true\/>/);
     });
     await t.test("contains the companion executable", () => {
-      assert.equal(lstatSync(join(output, "Contents", "MacOS", "PiDictationBridge")).isFile(), true);
+      assert.equal(
+        lstatSync(
+          join(output, "Contents", "MacOS", "PiDictationBridge")
+        ).isFile(),
+        true
+      );
     });
-    await t.test("contains the independent duration watchdog executable", () => {
-      assert.equal(lstatSync(join(output, "Contents", "MacOS", "PiDictationDurationWatchdog")).isFile(), true);
-    });
+    await t.test(
+      "contains the independent duration watchdog executable",
+      () => {
+        assert.equal(
+          lstatSync(
+            join(output, "Contents", "MacOS", "PiDictationDurationWatchdog")
+          ).isFile(),
+          true
+        );
+      }
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -383,7 +698,9 @@ test("bridge install refuses a symlinked managed root", () => {
   const support = join(home, "Library", "Application Support", "pi-dictation");
   const tools = fakeToolchain(home);
   try {
-    mkdirSync(join(home, "Library", "Application Support"), { recursive: true });
+    mkdirSync(join(home, "Library", "Application Support"), {
+      recursive: true,
+    });
     symlinkSync(outside, support);
     const result = runBridge(home, ["install"], { PATH: tools });
     assert.match(result.stderr, /refusing symlink/i);
@@ -399,7 +716,14 @@ test("bridge install refuses a dangling symlink at a managed artifact", () => {
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const credential = join(home, "Library", "Application Support", "pi-dictation", "bridge", "credential.json");
+    const credential = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "credential.json"
+    );
     rmSync(credential);
     symlinkSync(join(home, "missing-credential"), credential);
     const result = runBridge(home, ["install"], { PATH: tools });
@@ -415,9 +739,20 @@ test("bridge install refuses a credential whose identity is not canonical", asyn
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const path = join(home, "Library", "Application Support", "pi-dictation", "bridge", "credential.json");
+    const path = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "credential.json"
+    );
     const credential = JSON.parse(readFileSync(path, "utf8"));
-    writeFileSync(path, JSON.stringify({ ...credential, id: credential.id.toUpperCase() }), { mode: 0o600 });
+    writeFileSync(
+      path,
+      JSON.stringify({ ...credential, id: credential.id.toUpperCase() }),
+      { mode: 0o600 }
+    );
     const result = runBridge(home, ["install"], { PATH: tools });
 
     await t.test("fails the command", () => {
@@ -427,7 +762,10 @@ test("bridge install refuses a credential whose identity is not canonical", asyn
       assert.match(result.stderr, /Refusing invalid bridge credential\./);
     });
     await t.test("directs the user to generate a credential", () => {
-      assert.match(result.stderr, /Run `pi-dictation bridge install` to generate one\./);
+      assert.match(
+        result.stderr,
+        /Run `pi-dictation bridge install` to generate one\./
+      );
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -440,8 +778,25 @@ test("bridge install refuses an existing app whose ownership cannot be proven", 
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const marker = join(home, "Library", "Application Support", "pi-dictation", "bridge", "PiDictationBridge.app", "Contents", "Resources", "ownership.json");
-    writeFileSync(marker, JSON.stringify({ product: "someone-else", installId: "00000000-0000-0000-0000-000000000000" }), { mode: 0o600 });
+    const marker = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "PiDictationBridge.app",
+      "Contents",
+      "Resources",
+      "ownership.json"
+    );
+    writeFileSync(
+      marker,
+      JSON.stringify({
+        product: "someone-else",
+        installId: "00000000-0000-0000-0000-000000000000",
+      }),
+      { mode: 0o600 }
+    );
     const result = runBridge(home, ["install"], { PATH: tools });
     assert.match(result.stderr, /ownership cannot be proven/);
   } finally {
@@ -454,9 +809,20 @@ test("bridge install creates private owned artifacts without loading before pref
   const tools = fakeToolchain(home);
   try {
     const result = runBridge(home, ["install"], { PATH: tools });
-    const root = join(home, "Library", "Application Support", "pi-dictation", "bridge");
+    const root = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge"
+    );
     const credential = join(root, "credential.json");
-    const plist = join(home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist");
+    const plist = join(
+      home,
+      "Library",
+      "LaunchAgents",
+      "com.yasuhito.pi-dictation.bridge.plist"
+    );
 
     await t.test("succeeds", () => {
       assert.equal(result.status, 0, result.stderr);
@@ -468,11 +834,20 @@ test("bridge install creates private owned artifacts without loading before pref
       assert.equal(lstatSync(credential).mode & 0o777, 0o600);
     });
     await t.test("writes the user LaunchAgent configuration", () => {
-      assert.match(readFileSync(plist, "utf8"), /com\.yasuhito\.pi-dictation\.bridge/);
+      assert.match(
+        readFileSync(plist, "utf8"),
+        /com\.yasuhito\.pi-dictation\.bridge/
+      );
     });
-    await t.test("keeps the LaunchAgent inactive before real-audio preflight", () => {
-      assert.doesNotMatch(readFileSync(plist, "utf8"), /<key>RunAtLoad<\/key>/);
-    });
+    await t.test(
+      "keeps the LaunchAgent inactive before real-audio preflight",
+      () => {
+        assert.doesNotMatch(
+          readFileSync(plist, "utf8"),
+          /<key>RunAtLoad<\/key>/
+        );
+      }
+    );
     await t.test("does not mark the companion ready", () => {
       assert.equal(existsSync(join(root, "preflight.json")), false);
     });
@@ -517,12 +892,27 @@ test("bridge preflight requires and records interactive real-audio observation b
   try {
     const installed = runBridge(home, ["install"], { PATH: tools });
     if (installed.status !== 0) throw new Error(installed.stderr);
-    const result = runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
-      cwd: packageRoot,
-      encoding: "utf8",
-      env: { ...process.env, HOME: home, PATH: tools, LAUNCHCTL_LOG: launchctlLog },
-    });
-    const ready = join(home, "Library", "Application Support", "pi-dictation", "bridge", "preflight.json");
+    const result = runInPseudoTerminal(
+      [process.execPath, cliPath, "bridge", "preflight"],
+      {
+        cwd: packageRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: tools,
+          LAUNCHCTL_LOG: launchctlLog,
+        },
+      }
+    );
+    const ready = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "preflight.json"
+    );
 
     await t.test("succeeds only after real audio is observed", () => {
       assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -537,12 +927,28 @@ test("bridge preflight requires and records interactive real-audio observation b
       assert.equal(existsSync(ready), true);
     });
     await t.test("enables supervision after preflight", () => {
-      const plist = join(home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist");
-      assert.match(readFileSync(plist, "utf8"), /<key>RunAtLoad<\/key><true\/>/);
+      const plist = join(
+        home,
+        "Library",
+        "LaunchAgents",
+        "com.yasuhito.pi-dictation.bridge.plist"
+      );
+      assert.match(
+        readFileSync(plist, "utf8"),
+        /<key>RunAtLoad<\/key><true\/>/
+      );
     });
     await t.test("keeps the companion alive after an unexpected exit", () => {
-      const plist = join(home, "Library", "LaunchAgents", "com.yasuhito.pi-dictation.bridge.plist");
-      assert.match(readFileSync(plist, "utf8"), /<key>KeepAlive<\/key><true\/>/);
+      const plist = join(
+        home,
+        "Library",
+        "LaunchAgents",
+        "com.yasuhito.pi-dictation.bridge.plist"
+      );
+      assert.match(
+        readFileSync(plist, "utf8"),
+        /<key>KeepAlive<\/key><true\/>/
+      );
     });
     await t.test("loads the user LaunchAgent after preflight", () => {
       assert.match(readFileSync(launchctlLog, "utf8"), /bootstrap gui\/\d+/);
@@ -565,7 +971,14 @@ test("bridge preflight removes readiness when LaunchAgent loading fails", () => 
       encoding: "utf8",
       env: { ...process.env, HOME: home, PATH: tools },
     });
-    const ready = join(home, "Library", "Application Support", "pi-dictation", "bridge", "preflight.json");
+    const ready = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "preflight.json"
+    );
     assert.equal(existsSync(ready), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -582,9 +995,22 @@ test("bridge preflight does not mark digital silence ready", () => {
     runInPseudoTerminal([process.execPath, cliPath, "bridge", "preflight"], {
       cwd: packageRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: home, PATH: tools, FAKE_CAPTURE: "silence", LAUNCHCTL_LOG: join(home, "launchctl.log") },
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: tools,
+        FAKE_CAPTURE: "silence",
+        LAUNCHCTL_LOG: join(home, "launchctl.log"),
+      },
     });
-    const ready = join(home, "Library", "Application Support", "pi-dictation", "bridge", "preflight.json");
+    const ready = join(
+      home,
+      "Library",
+      "Application Support",
+      "pi-dictation",
+      "bridge",
+      "preflight.json"
+    );
     assert.equal(existsSync(ready), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -592,20 +1018,42 @@ test("bridge preflight does not mark digital silence ready", () => {
 });
 
 function markPreflightReady(home) {
-  const root = join(home, "Library", "Application Support", "pi-dictation", "bridge");
-  const receipt = JSON.parse(readFileSync(join(root, "ownership.json"), "utf8"));
-  const executable = join(root, "PiDictationBridge.app", "Contents", "MacOS", "PiDictationBridge");
-  const executableSha256 = createHash("sha256").update(readFileSync(executable)).digest("hex");
+  const root = join(
+    home,
+    "Library",
+    "Application Support",
+    "pi-dictation",
+    "bridge"
+  );
+  const receipt = JSON.parse(
+    readFileSync(join(root, "ownership.json"), "utf8")
+  );
+  const executable = join(
+    root,
+    "PiDictationBridge.app",
+    "Contents",
+    "MacOS",
+    "PiDictationBridge"
+  );
+  const executableSha256 = createHash("sha256")
+    .update(readFileSync(executable))
+    .digest("hex");
   writeFileSync(
     join(root, "preflight.json"),
-    JSON.stringify({ product: "com.yasuhito.pi-dictation.bridge", installId: receipt.installId, executableSha256 }) + "\n",
+    JSON.stringify({
+      product: "com.yasuhito.pi-dictation.bridge",
+      installId: receipt.installId,
+      executableSha256,
+    }) + "\n",
     { mode: 0o600 }
   );
 }
 
 async function startHealthServer(home, mode = "ok") {
   const script = join(home, "health-server.cjs");
-  writeFileSync(script, String.raw`
+  writeFileSync(
+    script,
+    String.raw`
 const { createHmac, randomBytes, timingSafeEqual } = require("node:crypto");
 const { appendFileSync, chmodSync, readFileSync, rmSync } = require("node:fs");
 const net = require("node:net");
@@ -673,12 +1121,30 @@ const server = net.createServer({ allowHalfOpen: true }, (socket) => {
 });
 rmSync(socketPath, { force: true });
 server.listen(socketPath, () => { chmodSync(socketPath, 0o600); process.stdout.write("ready\\n"); });
-`);
-  const root = join(home, "Library", "Application Support", "pi-dictation", "bridge");
-  const socket = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock");
-  const child = spawn(process.execPath, [script, join(root, "credential.json"), socket, mode], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+`
+  );
+  const root = join(
+    home,
+    "Library",
+    "Application Support",
+    "pi-dictation",
+    "bridge"
+  );
+  const socket = join(
+    home,
+    "Library",
+    "Caches",
+    "pi-dictation",
+    "bridge",
+    "companion.sock"
+  );
+  const child = spawn(
+    process.execPath,
+    [script, join(root, "credential.json"), socket, mode],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
   await once(child.stdout, "data");
   return child;
 }
@@ -783,7 +1249,10 @@ test("bridge health rejects any other protocol version", () => {
       markPreflightReady(home);
       server = await startHealthServer(home, "wrong-version");
       const result = runBridge(home, ["health"]);
-      assert.match(result.stderr, /Authenticated protocol mismatch: Pi uses version 3; companion uses version 2/);
+      assert.match(
+        result.stderr,
+        /Authenticated protocol mismatch: Pi uses version 3; companion uses version 2/
+      );
     } finally {
       server?.kill();
       rmSync(home, { recursive: true, force: true });
@@ -801,12 +1270,25 @@ test("bridge health returns authenticated non-success status without retrying", 
     markPreflightReady(home);
     server = await startHealthServer(home, "authenticated-busy");
     const result = runBridge(home, ["health"]);
-    const connectionLog = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock.connections");
+    const connectionLog = join(
+      home,
+      "Library",
+      "Caches",
+      "pi-dictation",
+      "bridge",
+      "companion.sock.connections"
+    );
     await t.test("preserves the authenticated CLI status message", () => {
-      assert.match(result.stderr, /The companion rejected health with authenticated status busy\./);
+      assert.match(
+        result.stderr,
+        /The companion rejected health with authenticated status busy\./
+      );
     });
     await t.test("opens exactly one management connection", () => {
-      assert.equal(readFileSync(connectionLog, "utf8").trim().split("\n").length, 1);
+      assert.equal(
+        readFileSync(connectionLog, "utf8").trim().split("\n").length,
+        1
+      );
     });
   } finally {
     server?.kill();
@@ -824,12 +1306,22 @@ test("bridge health does not retry a transient transport failure", async (t) => 
     markPreflightReady(home);
     server = await startHealthServer(home, "transport-drop");
     const result = runBridge(home, ["health"]);
-    const connectionLog = join(home, "Library", "Caches", "pi-dictation", "bridge", "companion.sock.connections");
+    const connectionLog = join(
+      home,
+      "Library",
+      "Caches",
+      "pi-dictation",
+      "bridge",
+      "companion.sock.connections"
+    );
     await t.test("preserves the incomplete-response message", () => {
       assert.match(result.stderr, /closed an incomplete health response/);
     });
     await t.test("opens exactly one management connection", () => {
-      assert.equal(readFileSync(connectionLog, "utf8").trim().split("\n").length, 1);
+      assert.equal(
+        readFileSync(connectionLog, "utf8").trim().split("\n").length,
+        1
+      );
     });
   } finally {
     server?.kill();
@@ -852,9 +1344,12 @@ test("bridge health resets its five-second deadline between challenge and respon
     await t.test("succeeds when each phase stays within five seconds", () => {
       assert.equal(result.status, 0, result.stderr);
     });
-    await t.test("allows total operation time to exceed one phase budget", () => {
-      assert.equal(elapsed >= 6000, true);
-    });
+    await t.test(
+      "allows total operation time to exceed one phase budget",
+      () => {
+        assert.equal(elapsed >= 6000, true);
+      }
+    );
   } finally {
     server?.kill();
     rmSync(home, { recursive: true, force: true });
@@ -874,7 +1369,10 @@ test("bridge health bounds a stalled challenge at its challenge-phase deadline",
     const result = runBridge(home, ["health"]);
     const elapsed = Date.now() - startedAt;
     await t.test("preserves the challenge timeout message", () => {
-      assert.equal(result.stderr.trim(), "Error: Authenticated health request timed out.");
+      assert.equal(
+        result.stderr.trim(),
+        "Error: Authenticated health request timed out."
+      );
     });
     await t.test("returns at the five-second challenge bound", () => {
       assert.equal(elapsed >= 4500 && elapsed < 6000, true);
@@ -898,7 +1396,10 @@ test("bridge health bounds a stalled authenticated response at its response-phas
     const result = runBridge(home, ["health"]);
     const elapsed = Date.now() - startedAt;
     await t.test("preserves the response timeout message", () => {
-      assert.equal(result.stderr.trim(), "Error: Authenticated health request timed out.");
+      assert.equal(
+        result.stderr.trim(),
+        "Error: Authenticated health request timed out."
+      );
     });
     await t.test("returns at the five-second response bound", () => {
       assert.equal(elapsed >= 4500 && elapsed < 6000, true);
@@ -912,77 +1413,172 @@ test("bridge health bounds a stalled authenticated response at its response-phas
 test("the actual npm package loads in Pi extension and native CLI runtime regimes", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-package-load-"));
   try {
-    const packed = spawnSync("npm", ["pack", "--json", "--pack-destination", directory], {
-      cwd: packageRoot, encoding: "utf8",
+    const cleanPackageRoot = join(directory, "source");
+    const excludedRoots = new Set([
+      ".git",
+      ".pi",
+      ".pi-subagents",
+      "dist",
+      "node_modules",
+    ]);
+    cpSync(packageRoot, cleanPackageRoot, {
+      recursive: true,
+      filter(source) {
+        const topLevel = relative(packageRoot, source).split(sep)[0];
+        return !excludedRoots.has(topLevel);
+      },
     });
+    symlinkSync(
+      join(packageRoot, "node_modules"),
+      join(cleanPackageRoot, "node_modules"),
+      "dir"
+    );
+    const packed = spawnSync(
+      "npm",
+      ["pack", "--json", "--pack-destination", directory],
+      {
+        cwd: cleanPackageRoot,
+        encoding: "utf8",
+      }
+    );
     if (packed.status !== 0) throw new Error(packed.stderr);
     const tarball = join(directory, npmPackEntries(packed.stdout)[0].filename);
     const extracted = join(directory, "extracted");
     mkdirSync(extracted);
-    const unpacked = spawnSync("tar", ["-xzf", tarball, "-C", extracted], { encoding: "utf8" });
+    const unpacked = spawnSync("tar", ["-xzf", tarball, "-C", extracted], {
+      encoding: "utf8",
+    });
     if (unpacked.status !== 0) throw new Error(unpacked.stderr);
     const packagedRoot = join(extracted, "package");
-    const extensionSmoke = spawnSync(process.execPath, ["-e", `
+    const extensionSmoke = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
       const { createJiti } = require(${JSON.stringify(require.resolve("jiti"))});
       createJiti(process.cwd(), { interopDefault: true })
-        .import(${JSON.stringify(join(packagedRoot, "extensions", "pi-dictation.ts"))}, { default: true })
+        .import(${JSON.stringify(join(packagedRoot, "dist", "extensions", "pi-dictation.js"))}, { default: true })
         .then((value) => process.exit(typeof value === "function" ? 0 : 1), (error) => { console.error(error); process.exit(1); });
-    `], {
-      cwd: packagedRoot, encoding: "utf8", env: { ...process.env, NODE_PATH: join(packageRoot, "node_modules") },
-    });
-    const cliSmoke = spawnSync(process.execPath, [join(packagedRoot, "bin", "pi-dictation.mjs")], {
-      cwd: directory, encoding: "utf8",
-    });
-    const packedRuntime = join(packagedRoot, "lib", "bridge-protocol.mjs");
-    const packedDeclaration = join(packagedRoot, "lib", "bridge-protocol.d.mts");
-    const runtimeSmoke = spawnSync(process.execPath, [
-      "--input-type=module", "--eval",
-      `import * as protocol from ${JSON.stringify(packedRuntime)};
+    `,
+      ],
+      {
+        cwd: packagedRoot,
+        encoding: "utf8",
+        env: { ...process.env, NODE_PATH: join(packageRoot, "node_modules") },
+      }
+    );
+    const cliSmoke = spawnSync(
+      process.execPath,
+      [join(packagedRoot, "dist", "bin", "pi-dictation.js")],
+      {
+        cwd: directory,
+        encoding: "utf8",
+      }
+    );
+    const packedRuntime = join(
+      packagedRoot,
+      "dist",
+      "lib",
+      "bridge-protocol.js"
+    );
+    const packedDeclaration = join(
+      packagedRoot,
+      "dist",
+      "lib",
+      "bridge-protocol.d.ts"
+    );
+    const runtimeSmoke = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import * as protocol from ${JSON.stringify(packedRuntime)};
        console.log(JSON.stringify(Object.entries(protocol).map(([name, value]) => [name, typeof value]).sort()));`,
-    ], { cwd: directory, encoding: "utf8" });
+      ],
+      { cwd: directory, encoding: "utf8" }
+    );
     const declaration = readFileSync(packedDeclaration, "utf8");
-    const callableExports = [...new Set([...declaration.matchAll(/^export (?:declare )?(?:function|class) (\w+)/gm)]
-      .map(([, name]) => name))].map((name) => [name, "function"]);
-    const valueExports = [...declaration.matchAll(/^export const (\w+):/gm)].map(([, name]) => [name, "number"]);
-    const declaredExports = [...callableExports, ...valueExports].sort(([left], [right]) => left.localeCompare(right));
-    await t.test("loads the shipped TypeScript extension through Pi's Jiti regime", () => {
-      assert.equal(extensionSmoke.status, 0, extensionSmoke.stderr);
+    const callableExports = [
+      ...new Set(
+        [
+          ...declaration.matchAll(
+            /^export (?:declare )?(?:function|class) (\w+)/gm
+          ),
+        ].map(([, name]) => name)
+      ),
+    ].map((name) => [name, "function"]);
+    const valueExports = [
+      ...declaration.matchAll(/^export (?:declare )?const (\w+):/gm),
+    ].map(([, name]) => [name, "number"]);
+    const declaredExports = [...callableExports, ...valueExports].sort(
+      ([left], [right]) => left.localeCompare(right)
+    );
+    await t.test("builds the package from a clean source tree", () => {
+      assert.equal(
+        existsSync(
+          join(cleanPackageRoot, "dist", "extensions", "pi-dictation.js")
+        ),
+        true
+      );
     });
+    await t.test(
+      "loads the compiled extension through Pi's extension regime",
+      () => {
+        assert.equal(extensionSmoke.status, 0, extensionSmoke.stderr);
+      }
+    );
     await t.test("loads the shipped management CLI as native ESM", () => {
       assert.match(cliSmoke.stdout, /Usage: pi-dictation bridge/);
     });
-    await t.test("imports the shipped Bridge protocol runtime as a JavaScript caller", () => {
-      assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
-    });
-    await t.test("agrees between the shipped native ESM exports and its NodeNext declaration", () => {
-      assert.deepEqual(JSON.parse(runtimeSmoke.stdout), declaredExports);
-    });
+    await t.test(
+      "imports the shipped Bridge protocol runtime as a JavaScript caller",
+      () => {
+        assert.equal(runtimeSmoke.status, 0, runtimeSmoke.stderr);
+      }
+    );
+    await t.test(
+      "agrees between the shipped native ESM exports and its NodeNext declaration",
+      () => {
+        assert.deepEqual(JSON.parse(runtimeSmoke.stdout), declaredExports);
+      }
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("the npm tarball includes the bridge CLI and companion source", async (t) => {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd: packageRoot, encoding: "utf8" });
+  const result = spawnSync(
+    "npm",
+    ["pack", "--ignore-scripts", "--dry-run", "--json"],
+    { cwd: packageRoot, encoding: "utf8" }
+  );
   if (result.status !== 0) throw new Error(result.stderr);
-  const files = npmPackEntries(result.stdout)[0].files.map((entry) => entry.path);
+  const files = npmPackEntries(result.stdout)[0].files.map(
+    (entry) => entry.path
+  );
 
   await t.test("includes the unified CLI", () => {
-    assert.ok(files.includes("bin/pi-dictation.mjs"));
+    assert.ok(files.includes("dist/bin/pi-dictation.js"));
   });
-  await t.test("includes the self-contained real-device certification command", () => {
-    assert.ok(files.includes("bin/pi-dictation-bridge-certify.cjs"));
-  });
+  await t.test(
+    "includes the self-contained real-device certification command",
+    () => {
+      assert.ok(files.includes("dist/bin/pi-dictation-bridge-certify.js"));
+    }
+  );
   await t.test("includes the shared Bridge protocol runtime", () => {
-    assert.ok(files.includes("lib/bridge-protocol.mjs"));
+    assert.ok(files.includes("dist/lib/bridge-protocol.js"));
   });
   await t.test("includes the shared Bridge protocol declaration", () => {
-    assert.ok(files.includes("lib/bridge-protocol.d.mts"));
+    assert.ok(files.includes("dist/lib/bridge-protocol.d.ts"));
   });
   await t.test("includes the companion Swift source", () => {
     assert.ok(files.includes("native/macos-companion/PiDictationBridge.swift"));
   });
   await t.test("includes the least-privilege duration watchdog source", () => {
-    assert.ok(files.includes("native/macos-companion/PiDictationDurationWatchdog.swift"));
+    assert.ok(
+      files.includes("native/macos-companion/PiDictationDurationWatchdog.swift")
+    );
   });
 });

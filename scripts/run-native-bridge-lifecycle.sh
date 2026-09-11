@@ -8,7 +8,7 @@ fi
 
 if [ "${1:-}" = "real-device" ]; then
   shift
-  exec node bin/pi-dictation-bridge-certify.cjs "$@"
+  exec node dist/bin/pi-dictation-bridge-certify.js "$@"
 fi
 if [ "$#" -ne 0 ]; then
   echo 'Usage: scripts/run-native-bridge-lifecycle.sh [real-device list [--json]|real-device prepare SCENARIO [ssh-alias]|real-device verify [--confirm]]' >&2

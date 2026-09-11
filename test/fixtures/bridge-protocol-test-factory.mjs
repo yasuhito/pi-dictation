@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { request, withStream } from "../../lib/bridge-protocol.mjs";
+import { request, withStream } from "../../dist/lib/bridge-protocol.js";
 
 const TEST_ADAPTER = Symbol.for("pi-dictation.bridge-protocol.test-adapter");
 const VERSION = 3;
@@ -7,26 +7,48 @@ const VERSION = 3;
 function encode(fields) {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
   for (const field of fields) {
-    const value = Buffer.isBuffer(field) || field instanceof Uint8Array ? Buffer.from(field) : Buffer.from(String(field));
+    const value =
+      Buffer.isBuffer(field) || field instanceof Uint8Array
+        ? Buffer.from(field)
+        : Buffer.from(String(field));
     const length = Buffer.alloc(4);
     length.writeUInt32BE(value.length);
     pieces.push(length, value);
   }
   return Buffer.concat(pieces);
 }
-function tag(secret, fields) { return createHmac("sha256", secret).update(encode(fields)).digest(); }
+function tag(secret, fields) {
+  return createHmac("sha256", secret).update(encode(fields)).digest();
+}
 function frameBody(body) {
   const header = Buffer.alloc(4);
   header.writeUInt32BE(body.length);
   return Buffer.concat([header, body]);
 }
-function frame(value) { return frameBody(Buffer.from(JSON.stringify(value))); }
+function frame(value) {
+  return frameBody(Buffer.from(JSON.stringify(value)));
+}
 
-function authenticatedFrame(credential, challenge, requestId, sequence, payload, overrides = {}) {
-  const payloadBytes = overrides.payloadBytes ?? Buffer.from(JSON.stringify(payload));
+function authenticatedFrame(
+  credential,
+  challenge,
+  requestId,
+  sequence,
+  payload,
+  overrides = {}
+) {
+  const payloadBytes =
+    overrides.payloadBytes ?? Buffer.from(JSON.stringify(payload));
   const version = overrides.version ?? VERSION;
   const streamTag = tag(credential.secret, [
-    "stream", VERSION, version, challenge, credential.id, requestId, sequence, payloadBytes,
+    "stream",
+    VERSION,
+    version,
+    challenge,
+    credential.id,
+    requestId,
+    sequence,
+    payloadBytes,
   ]);
   return frame({
     type: overrides.type ?? "level-event",
@@ -53,8 +75,13 @@ export function createRequestHarness(overrides = {}) {
         if (waiter) waiter(chunk);
         else queue.push(chunk);
       };
-      const challengeBytes = overrides.challengeBytes ?? frame({ type: "challenge", challenge: challenge.toString("base64") });
-      for (const chunk of overrides.fragmentChallenge ? [...challengeBytes].map((byte) => Buffer.from([byte])) : [challengeBytes]) enqueue(chunk);
+      const challengeBytes =
+        overrides.challengeBytes ??
+        frame({ type: "challenge", challenge: challenge.toString("base64") });
+      for (const chunk of overrides.fragmentChallenge
+        ? [...challengeBytes].map((byte) => Buffer.from([byte]))
+        : [challengeBytes])
+        enqueue(chunk);
       if (overrides.challengeEof) enqueue(null);
       const connection = {
         connected: overrides.connect ?? Promise.resolve(),
@@ -70,45 +97,92 @@ export function createRequestHarness(overrides = {}) {
         end() {
           if (overrides.noResponse) return;
           const length = requestBytes.readUInt32BE(0);
-          const requestMessage = JSON.parse(requestBytes.subarray(4, length + 4));
+          const requestMessage = JSON.parse(
+            requestBytes.subarray(4, length + 4)
+          );
           state.request = requestMessage;
           const payloadBytes = Buffer.from(requestMessage.payload, "base64");
           const status = overrides.status ?? "ok";
           const responseVersion = overrides.responseVersion ?? VERSION;
-          const responsePayload = overrides.responsePayloadBytes ?? Buffer.from(JSON.stringify(overrides.responsePayload ?? { accepted: true }));
-          const responseRequestId = overrides.responseRequestId ?? requestMessage.requestId;
+          const responsePayload =
+            overrides.responsePayloadBytes ??
+            Buffer.from(
+              JSON.stringify(overrides.responsePayload ?? { accepted: true })
+            );
+          const responseRequestId =
+            overrides.responseRequestId ?? requestMessage.requestId;
           const responseTag = tag(credential.secret, [
-            "response", VERSION, responseVersion, challenge, credential.id, requestMessage.requestId,
-            `${requestMessage.operation}:${status}`, responsePayload,
+            "response",
+            VERSION,
+            responseVersion,
+            challenge,
+            credential.id,
+            requestMessage.requestId,
+            `${requestMessage.operation}:${status}`,
+            responsePayload,
           ]);
-          const response = overrides.responseBytes ?? frame({
-            type: "response", version: responseVersion, requestId: responseRequestId, status,
-            payload: overrides.responsePayloadEncoding ?? responsePayload.toString("base64"),
-            hmac: overrides.responseHmac ?? responseTag.toString("hex"),
-          });
+          const response =
+            overrides.responseBytes ??
+            frame({
+              type: "response",
+              version: responseVersion,
+              requestId: responseRequestId,
+              status,
+              payload:
+                overrides.responsePayloadEncoding ??
+                responsePayload.toString("base64"),
+              hmac: overrides.responseHmac ?? responseTag.toString("hex"),
+            });
           let streamBytes = overrides.streamBytes ?? Buffer.alloc(0);
           if (overrides.framePayloads) {
-            streamBytes = Buffer.concat(overrides.framePayloads.map((payload, sequence) => authenticatedFrame(
-              credential, challenge, requestMessage.requestId, sequence, payload,
-              sequence === (overrides.frameOverrideSequence ?? -1) ? overrides.frameOverrides : undefined,
-            )));
+            streamBytes = Buffer.concat(
+              overrides.framePayloads.map((payload, sequence) =>
+                authenticatedFrame(
+                  credential,
+                  challenge,
+                  requestMessage.requestId,
+                  sequence,
+                  payload,
+                  sequence === (overrides.frameOverrideSequence ?? -1)
+                    ? overrides.frameOverrides
+                    : undefined
+                )
+              )
+            );
           }
           const suffix = overrides.trailingBytes ?? streamBytes;
           if (overrides.separateStreamChunks) {
             enqueue(response);
             const chunks = overrides.separateStreamChunks;
-            chunks.forEach((chunk, index) => setTimeout(
-              () => enqueue(chunk), overrides.streamDelayMs * (index + 1),
-            ));
-            if (!overrides.noStreamEof) setTimeout(
-              () => enqueue(null), overrides.streamDelayMs * (chunks.length + 1),
+            chunks.forEach((chunk, index) =>
+              setTimeout(
+                () => enqueue(chunk),
+                overrides.streamDelayMs * (index + 1)
+              )
             );
+            if (!overrides.noStreamEof)
+              setTimeout(
+                () => enqueue(null),
+                overrides.streamDelayMs * (chunks.length + 1)
+              );
           } else {
-            const output = suffix.length > 0 ? Buffer.concat([response, suffix]) : response;
-            const chunks = overrides.fragmentResponse ? [...output].map((byte) => Buffer.from([byte])) : [output];
+            const output =
+              suffix.length > 0 ? Buffer.concat([response, suffix]) : response;
+            const chunks = overrides.fragmentResponse
+              ? [...output].map((byte) => Buffer.from([byte]))
+              : [output];
             if (overrides.streamDelayMs) {
-              chunks.forEach((chunk, index) => setTimeout(() => enqueue(chunk), overrides.streamDelayMs * index));
-              if (!overrides.noStreamEof) setTimeout(() => enqueue(null), overrides.streamDelayMs * chunks.length);
+              chunks.forEach((chunk, index) =>
+                setTimeout(
+                  () => enqueue(chunk),
+                  overrides.streamDelayMs * index
+                )
+              );
+              if (!overrides.noStreamEof)
+                setTimeout(
+                  () => enqueue(null),
+                  overrides.streamDelayMs * chunks.length
+                );
             } else {
               for (const chunk of chunks) enqueue(chunk);
               if (!overrides.noStreamEof) enqueue(null);
@@ -132,20 +206,30 @@ export function createRequestHarness(overrides = {}) {
     response: { kind: "no-progress", timeoutMs: 100 },
   };
   const defaults = {
-    endpoint, credential, requestId: randomUUID(), operation: "health", payload: {}, timing,
+    endpoint,
+    credential,
+    requestId: randomUUID(),
+    operation: "health",
+    payload: {},
+    timing,
     signal: new AbortController().signal,
   };
   return {
     state,
     credential,
-    request(options = {}) { return request({ ...defaults, ...options }); },
+    request(options = {}) {
+      return request({ ...defaults, ...options });
+    },
     withStream(kind, consumer, options = {}) {
       const streamTiming = {
         ...timing,
         stream: { kind: "no-progress", timeoutMs: 100 },
         end: { kind: "no-progress", timeoutMs: 100 },
       };
-      return withStream({ ...defaults, kind, timing: streamTiming, ...options }, consumer);
+      return withStream(
+        { ...defaults, kind, timing: streamTiming, ...options },
+        consumer
+      );
     },
   };
 }

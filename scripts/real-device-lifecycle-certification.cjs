@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-require("../bin/pi-dictation-bridge-certify.cjs");
+void import("../dist/bin/pi-dictation-bridge-certify.js");

@@ -125,19 +125,19 @@ Run `/dictate-config` to choose Local or Bridge recording and edit the shortcut,
 
 For settings not available in `/dictate-config`, edit `~/.pi/agent/pi-dictation.json`. You can start from [`pi-dictation.example.json`](./pi-dictation.example.json), which includes a JSON Schema for editor completion and validation.
 
-| Field | Default | Purpose |
-| --- | --- | --- |
-| `shortcut` | `insert` | Pi shortcut used to toggle dictation |
-| `language` | unset | Language passed to the OpenAI backend |
-| `recorders` | `{ "selected": "local" }` | Select Local or Bridge recording and configure an optional Local Recorder command |
-| `transcribeCommand` | unset | Local transcription command |
-| `openaiModel` | `gpt-4o-mini-transcribe` | OpenAI-compatible transcription model |
-| `openaiBaseUrl` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
-| `openaiApiKey` | unset | API key stored as plaintext in the private configuration file; prefer an environment variable or credential-manager command |
-| `openaiApiKeyCommand` | unset | Command that prints the API key |
-| `timeoutMs` | `120000` | Transcription timeout; accepts `1000`–`3600000` ms |
-| `maxRecordingMs` | `600000` | Maximum recording duration; accepts `1000`–`3600000` ms |
-| `spinner` | `arc` | `cli-spinners` animation name |
+| Field                 | Default                     | Purpose                                                                                                                     |
+| --------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `shortcut`            | `insert`                    | Pi shortcut used to toggle dictation                                                                                        |
+| `language`            | unset                       | Language passed to the OpenAI backend                                                                                       |
+| `recorders`           | `{ "selected": "local" }`   | Select Local or Bridge recording and configure an optional Local Recorder command                                           |
+| `transcribeCommand`   | unset                       | Local transcription command                                                                                                 |
+| `openaiModel`         | `gpt-4o-mini-transcribe`    | OpenAI-compatible transcription model                                                                                       |
+| `openaiBaseUrl`       | `https://api.openai.com/v1` | OpenAI-compatible API base URL                                                                                              |
+| `openaiApiKey`        | unset                       | API key stored as plaintext in the private configuration file; prefer an environment variable or credential-manager command |
+| `openaiApiKeyCommand` | unset                       | Command that prints the API key                                                                                             |
+| `timeoutMs`           | `120000`                    | Transcription timeout; accepts `1000`–`3600000` ms                                                                          |
+| `maxRecordingMs`      | `600000`                    | Maximum recording duration; accepts `1000`–`3600000` ms                                                                     |
+| `spinner`             | `arc`                       | `cli-spinners` animation name                                                                                               |
 
 All settings use the configuration file except `OPENAI_API_KEY`, which takes precedence over `openaiApiKey`.
 
@@ -187,6 +187,8 @@ pi-dictation bridge uninstall my-pi        # preview
 4. Confirm the phrase is inserted into Pi.
 
 ## Development
+
+TypeScript source lives under `src/`; `npm install` and the checks compile it to the ignored `dist/` directory.
 
 ```bash
 npm install

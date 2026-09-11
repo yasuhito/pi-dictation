@@ -2,7 +2,12 @@ const { resolve } = require("node:path");
 const { createJiti } = require("jiti");
 
 const packageRoot = resolve(__dirname, "..", "..");
-const extensionPath = resolve(packageRoot, "extensions", "pi-dictation.ts");
+const extensionPath = resolve(
+  packageRoot,
+  "dist",
+  "extensions",
+  "pi-dictation.js"
+);
 const jiti = createJiti(__filename, { interopDefault: true });
 
 async function main() {

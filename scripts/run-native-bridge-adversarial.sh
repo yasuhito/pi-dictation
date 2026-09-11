@@ -19,7 +19,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 # Verify the production build as well as the test-mode binary used below.
-node bin/pi-dictation.mjs bridge build --output "$temporary/production.app" >/dev/null
+node dist/bin/pi-dictation.js bridge build --output "$temporary/production.app" >/dev/null
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 xcrun swiftc -O -whole-module-optimization -parse-as-library -D PROTOCOL_TESTING \
   -sdk "$sdk" -target arm64-apple-macosx14.0 \

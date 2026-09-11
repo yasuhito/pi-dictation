@@ -23,14 +23,11 @@
     "macos"
   ],
   "bin": {
-    "pi-dictation": "bin/pi-dictation.mjs",
-    "pi-dictation-bridge-certify": "bin/pi-dictation-bridge-certify.cjs"
+    "pi-dictation": "dist/bin/pi-dictation.js",
+    "pi-dictation-bridge-certify": "dist/bin/pi-dictation-bridge-certify.js"
   },
   "files": [
-    "bin",
-    "extensions",
-    "lib/bridge-protocol.mjs",
-    "lib/bridge-protocol.d.mts",
+    "dist",
     "native",
     "docs/bridge-recording-support.md",
     "docs/certification/bridge-recording-template.md",
@@ -42,19 +39,22 @@
     "LICENSE"
   ],
   "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.build.json && chmod 755 dist/bin/pi-dictation.js dist/bin/pi-dictation-bridge-certify.js",
+    "pretest": "npm run build",
     "test": "node --test test/*.test.cjs",
-    "test:native-bridge-adversarial": "scripts/run-native-bridge-adversarial.sh",
-    "test:native-bridge-lifecycle": "scripts/run-native-bridge-lifecycle.sh",
+    "test:native-bridge-adversarial": "npm run build && scripts/run-native-bridge-adversarial.sh",
+    "test:native-bridge-lifecycle": "npm run build && scripts/run-native-bridge-lifecycle.sh",
     "typecheck": "tsc --noEmit",
     "test:assertions": "node scripts/check-test-assertions.mjs",
     "check": "npm run test:assertions && npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run",
     "demo:generate": "node scripts/generate-demo.mjs",
-    "prepare": "husky"
+    "prepare": "npm run build && if git rev-parse --git-dir >/dev/null 2>&1; then husky; fi"
   },
   "pi": {
     "extensions": [
-      "./extensions/pi-dictation.ts"
+      "./dist/extensions/pi-dictation.js"
     ],
     "video": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.mp4",
     "image": "https://raw.githubusercontent.com/yasuhito/pi-dictation/main/assets/pi-dictation-demo.gif"

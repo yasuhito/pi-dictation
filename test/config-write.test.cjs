@@ -1,5 +1,12 @@
 const assert = require("node:assert/strict");
-const { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } = require("node:fs");
+const {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { test } = require("node:test");
@@ -9,7 +16,7 @@ const packageRoot = resolve(__dirname, "..");
 const jiti = createJiti(__filename, { interopDefault: true });
 
 async function configModule() {
-  return jiti.import(join(packageRoot, "extensions", "config.ts"));
+  return jiti.import(join(packageRoot, "dist", "extensions", "config.js"));
 }
 
 test("atomic configuration writes preserve hidden fields and private permissions", async (t) => {
@@ -33,7 +40,9 @@ test("atomic configuration writes preserve hidden fields and private permissions
     assert.equal(statSync(path).mode & 0o777, 0o600);
   });
   await t.test("leaves no temporary file", () => {
-    assert.deepEqual(readdirSync(join(directory, "nested")), ["pi-dictation.json"]);
+    assert.deepEqual(readdirSync(join(directory, "nested")), [
+      "pi-dictation.json",
+    ]);
   });
 });
 
@@ -49,64 +58,93 @@ test("atomic configuration writes replace a permissive file privately", async ()
 
 test("configuration validation rejects persisted durations outside the contract", async () => {
   const { validateConfigFile } = await configModule();
-  assert.throws(() => validateConfigFile({ timeoutMs: 999 }), /between 1000 and 3600000/);
+  assert.throws(
+    () => validateConfigFile({ timeoutMs: 999 }),
+    /between 1000 and 3600000/
+  );
 });
 
 test("configuration validation rejects fractional persisted durations", async () => {
   const { validateConfigFile } = await configModule();
-  assert.throws(() => validateConfigFile({ maxRecordingMs: 1000.5 }), /must be an integer/);
+  assert.throws(
+    () => validateConfigFile({ maxRecordingMs: 1000.5 }),
+    /must be an integer/
+  );
 });
 
 test("an omitted Recorder defaults to local", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-default-recorder-"));
+  const directory = mkdtempSync(
+    join(tmpdir(), "pi-dictation-config-default-recorder-")
+  );
   const { loadConfig } = await configModule();
-  assert.deepEqual(loadConfig(join(directory, "missing.json"), {}).recorder, { type: "local" });
+  assert.deepEqual(loadConfig(join(directory, "missing.json"), {}).recorder, {
+    type: "local",
+  });
 });
 
 test("Recorder selection chooses the persisted Local Recorder profile", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-selection-"));
+  const directory = mkdtempSync(
+    join(tmpdir(), "pi-dictation-config-selection-")
+  );
   const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, JSON.stringify({
-    recorders: {
-      selected: "local",
-      local: { command: "capture {file}" },
-      bridge: {
-        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
-        credentialFile: "/home/user/.config/pi-dictation/credential",
+  writeFileSync(
+    path,
+    JSON.stringify({
+      recorders: {
+        selected: "local",
+        local: { command: "capture {file}" },
+        bridge: {
+          endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
+          credentialFile: "/home/user/.config/pi-dictation/credential",
+        },
       },
-    },
-  }));
+    })
+  );
   const { loadConfig } = await configModule();
-  assert.deepEqual(loadConfig(path, {}).recorder, { type: "local", command: "capture {file}" });
+  assert.deepEqual(loadConfig(path, {}).recorder, {
+    type: "local",
+    command: "capture {file}",
+  });
 });
 
 test("Recorder selection chooses the persisted Bridge Recorder profile", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-bridge-selection-"));
+  const directory = mkdtempSync(
+    join(tmpdir(), "pi-dictation-config-bridge-selection-")
+  );
   const path = join(directory, "pi-dictation.json");
   const bridge = {
     endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
     credentialFile: "/home/user/.config/pi-dictation/credential",
   };
-  writeFileSync(path, JSON.stringify({ recorders: { selected: "bridge", bridge } }));
+  writeFileSync(
+    path,
+    JSON.stringify({ recorders: { selected: "bridge", bridge } })
+  );
   const { loadConfig } = await configModule();
-  assert.deepEqual(loadConfig(path, {}).recorder, { type: "bridge", ...bridge });
+  assert.deepEqual(loadConfig(path, {}).recorder, {
+    type: "bridge",
+    ...bridge,
+  });
 });
 
 test("package-specific environment settings are ignored", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-config-env-"));
   const path = join(directory, "pi-dictation.json");
-  writeFileSync(path, JSON.stringify({
-    shortcut: "f8",
-    language: "en",
-    transcribeCommand: "transcribe {file}",
-    openaiModel: "file-model",
-    openaiBaseUrl: "https://file.example/v1",
-    openaiApiKey: "file-key",
-    openaiApiKeyCommand: "file-key-command",
-    timeoutMs: 2000,
-    maxRecordingMs: 3000,
-    spinner: "dots",
-  }));
+  writeFileSync(
+    path,
+    JSON.stringify({
+      shortcut: "f8",
+      language: "en",
+      transcribeCommand: "transcribe {file}",
+      openaiModel: "file-model",
+      openaiBaseUrl: "https://file.example/v1",
+      openaiApiKey: "file-key",
+      openaiApiKeyCommand: "file-key-command",
+      timeoutMs: 2000,
+      maxRecordingMs: 3000,
+      spinner: "dots",
+    })
+  );
   const { loadConfig } = await configModule();
   const config = loadConfig(path, {
     PI_DICTATION_SHORTCUT: "insert",
@@ -152,14 +190,20 @@ test("package-specific environment settings are ignored", async () => {
 test("Local Recorder profiles cannot override their discriminator", async () => {
   const { validateConfigFile } = await configModule();
   assert.throws(
-    () => validateConfigFile({ recorders: {
-      selected: "local",
-      local: {
-        type: "bridge",
-        endpoint: { type: "unix", path: "/run/user/1000/pi-dictation.sock" },
-        credentialFile: "/home/user/.config/pi-dictation/credential",
-      },
-    } }),
+    () =>
+      validateConfigFile({
+        recorders: {
+          selected: "local",
+          local: {
+            type: "bridge",
+            endpoint: {
+              type: "unix",
+              path: "/run/user/1000/pi-dictation.sock",
+            },
+            credentialFile: "/home/user/.config/pi-dictation/credential",
+          },
+        },
+      }),
     /Unknown Recorder configuration field/
   );
 });
@@ -174,13 +218,23 @@ test("configuration validation rejects Bridge selection without a Bridge profile
 
 test("runtime validation rejects the removed top-level recordCommand", async () => {
   const { validateConfigFile } = await configModule();
-  assert.throws(() => validateConfigFile({ recordCommand: "capture" }), /Unknown configuration field/);
+  assert.throws(
+    () => validateConfigFile({ recordCommand: "capture" }),
+    /Unknown configuration field/
+  );
 });
 
 test("runtime validation rejects non-loopback Bridge endpoints", async () => {
   const { validateConfigFile } = await configModule();
   assert.throws(
-    () => validateConfigFile({ recorder: { type: "bridge", endpoint: { type: "tcp", host: "0.0.0.0", port: 1234 }, credentialFile: "/secret" } }),
+    () =>
+      validateConfigFile({
+        recorder: {
+          type: "bridge",
+          endpoint: { type: "tcp", host: "0.0.0.0", port: 1234 },
+          credentialFile: "/secret",
+        },
+      }),
     /must be loopback/
   );
 });

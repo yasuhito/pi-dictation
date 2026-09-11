@@ -12,13 +12,13 @@ Pi's own `auth.json` is relevant precedent but is not currently Pi Dictation's c
 
 The representative set was selected for credential relevance, with popularity taken only from the official Pi package gallery:
 
-| Package | Gallery evidence at inspection | Why inspected |
-| --- | ---: | --- |
-| [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter) | 354.4K downloads/month, 151.6K/week | Very widely downloaded extension with OS credential-store and Linux/headless behavior |
-| [`pi-web-access`](https://pi.dev/packages/pi-web-access) | 222K downloads/month, 75.6K/week | Very widely downloaded extension with OpenAI and many extension-specific API keys |
-| [`pi-voice-input`](https://pi.dev/packages/pi-voice-input) | 1,446 downloads/month, 77/week | Popular directly relevant voice-input extension with an extension-specific ASR key |
-| [`@codexstar/pi-listen`](https://pi.dev/packages/@codexstar/pi-listen) | 558 downloads/month, 203/week | Directly relevant voice/STT extension with cloud and local backends |
-| [`pi-keyrouter`](https://pi.dev/packages/pi-keyrouter) | 1,195 downloads/month, 38/week | Credential-focused extension illustrating plaintext multi-key configuration and Pi runtime overrides |
+| Package                                                                |      Gallery evidence at inspection | Why inspected                                                                                        |
+| ---------------------------------------------------------------------- | ----------------------------------: | ---------------------------------------------------------------------------------------------------- |
+| [`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)             | 354.4K downloads/month, 151.6K/week | Very widely downloaded extension with OS credential-store and Linux/headless behavior                |
+| [`pi-web-access`](https://pi.dev/packages/pi-web-access)               |    222K downloads/month, 75.6K/week | Very widely downloaded extension with OpenAI and many extension-specific API keys                    |
+| [`pi-voice-input`](https://pi.dev/packages/pi-voice-input)             |      1,446 downloads/month, 77/week | Popular directly relevant voice-input extension with an extension-specific ASR key                   |
+| [`@codexstar/pi-listen`](https://pi.dev/packages/@codexstar/pi-listen) |       558 downloads/month, 203/week | Directly relevant voice/STT extension with cloud and local backends                                  |
+| [`pi-keyrouter`](https://pi.dev/packages/pi-keyrouter)                 |      1,195 downloads/month, 38/week | Credential-focused extension illustrating plaintext multi-key configuration and Pi runtime overrides |
 
 The gallery figures are a point-in-time display and can change. They support only relative statements such as “the gallery displayed high download counts”; they do not establish active-user counts or security quality.
 
@@ -41,7 +41,7 @@ These are **model-provider** credentials. An extension can deliberately register
 
 ### Pi Dictation handling
 
-Pi Dictation does not register an OpenAI model provider or ask `ctx.modelRegistry` for provider authentication. It resolves, in order, the conventional `OPENAI_API_KEY`, a literal package-config value, and then (when no literal is resolved) its `openaiApiKeyCommand`; it sends the key itself to `/audio/transcriptions`. See [`extensions/config.ts`](../../extensions/config.ts) and [`extensions/pi-dictation.ts`](../../extensions/pi-dictation.ts).
+Pi Dictation does not register an OpenAI model provider or ask `ctx.modelRegistry` for provider authentication. It resolves, in order, the conventional `OPENAI_API_KEY`, a literal package-config value, and then (when no literal is resolved) its `openaiApiKeyCommand`; it sends the key itself to `/audio/transcriptions`. See [`src/extensions/config.ts`](../../src/extensions/config.ts) and [`src/extensions/pi-dictation.ts`](../../src/extensions/pi-dictation.ts).
 
 Consequences:
 
@@ -84,14 +84,14 @@ This is useful contrast: Pi runtime overrides prevent Pi itself from persisting 
 
 ## Method comparison
 
-| Method | Observed in primary sources | At-rest/security properties | Portability and operational notes | Recommendation for Pi Dictation docs |
-| --- | --- | --- | --- | --- |
-| Environment variable | Pi core; `pi-web-access`; `pi-listen` | Not written by Pi Dictation, but may be plaintext in shell config and is inherited by child processes | Broadest and simplest; suitable for CI/headless systems | Keep as the first/default setup, but do not call shell-profile storage secure |
-| Pi `auth.json` | Pi core and provider extensions | Plain JSON protected by `0600`; supports literal, env interpolation, or command references | Native for model providers and registered providers; not automatically available to unrelated extension calls | Explain it is separate and not currently used by Dictation; do not recommend manual duplication there |
-| Plaintext extension config | `pi-web-access`, `pi-voice-input`, `pi-keyrouter` | Secret directly readable by the account and backups; file mode can reduce exposure but does not encrypt | Easy, extension-local, often used in practice | Keep `openaiApiKey` supported but label it fallback/less preferred |
-| Command retrieval | Pi core; `pi-web-access`; Pi Dictation | Config stores a command/reference, not the key; key appears in process memory/stdout at retrieval | Works with Keychain, Secret Service, 1Password, `pass`, Vault CLIs, etc.; depends on command availability/session state | Keep and present as the advanced secure-store integration point |
-| Linux Secret Service/libsecret | `pi-mcp-adapter`; Pi Dictation's current `secret-tool` recipe | Encrypted/keyring-backed according to desktop keyring implementation; unlocked-session access is required | Common on GNOME/KDE desktops, but not universal; D-Bus/keyring availability is problematic on headless/SSH hosts | Keep recipe, but label “optional, for Linux desktops with an unlocked Secret Service keyring”; mention `secret-tool`/service prerequisites and offer env/other command managers for headless hosts |
-| macOS Keychain | Pi core command example; Pi Dictation; other extensions such as Pi MCP's OS store | Native per-user credential store; command emits the secret only at retrieval | `security` is built into macOS; access-control prompts/locked keychains can still fail | Keep as recommended macOS secure-storage recipe |
+| Method                         | Observed in primary sources                                                       | At-rest/security properties                                                                               | Portability and operational notes                                                                                       | Recommendation for Pi Dictation docs                                                                                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Environment variable           | Pi core; `pi-web-access`; `pi-listen`                                             | Not written by Pi Dictation, but may be plaintext in shell config and is inherited by child processes     | Broadest and simplest; suitable for CI/headless systems                                                                 | Keep as the first/default setup, but do not call shell-profile storage secure                                                                                                                      |
+| Pi `auth.json`                 | Pi core and provider extensions                                                   | Plain JSON protected by `0600`; supports literal, env interpolation, or command references                | Native for model providers and registered providers; not automatically available to unrelated extension calls           | Explain it is separate and not currently used by Dictation; do not recommend manual duplication there                                                                                              |
+| Plaintext extension config     | `pi-web-access`, `pi-voice-input`, `pi-keyrouter`                                 | Secret directly readable by the account and backups; file mode can reduce exposure but does not encrypt   | Easy, extension-local, often used in practice                                                                           | Keep `openaiApiKey` supported but label it fallback/less preferred                                                                                                                                 |
+| Command retrieval              | Pi core; `pi-web-access`; Pi Dictation                                            | Config stores a command/reference, not the key; key appears in process memory/stdout at retrieval         | Works with Keychain, Secret Service, 1Password, `pass`, Vault CLIs, etc.; depends on command availability/session state | Keep and present as the advanced secure-store integration point                                                                                                                                    |
+| Linux Secret Service/libsecret | `pi-mcp-adapter`; Pi Dictation's current `secret-tool` recipe                     | Encrypted/keyring-backed according to desktop keyring implementation; unlocked-session access is required | Common on GNOME/KDE desktops, but not universal; D-Bus/keyring availability is problematic on headless/SSH hosts        | Keep recipe, but label “optional, for Linux desktops with an unlocked Secret Service keyring”; mention `secret-tool`/service prerequisites and offer env/other command managers for headless hosts |
+| macOS Keychain                 | Pi core command example; Pi Dictation; other extensions such as Pi MCP's OS store | Native per-user credential store; command emits the secret only at retrieval                              | `security` is built into macOS; access-control prompts/locked keychains can still fail                                  | Keep as recommended macOS secure-storage recipe                                                                                                                                                    |
 
 ## Is `secret-tool` standard or appropriate?
 
@@ -161,7 +161,7 @@ The README findings below were resolved in the subsequent documentation update.
 - [`tr-nc/pi-voice-input`](https://github.com/tr-nc/pi-voice-input) — relevant voice extension's extension-owned key storage.
 - [`codexstar69/pi-listen`](https://github.com/codexstar69/pi-listen) — relevant voice extension's environment and explicit persistence behavior.
 - [`pi-keyrouter` gallery page](https://pi.dev/packages/pi-keyrouter) — gallery-rendered upstream README details on plaintext keys and Pi runtime overrides.
-- Local Pi Dictation source: [`extensions/config.ts`](../../extensions/config.ts), [`extensions/pi-dictation.ts`](../../extensions/pi-dictation.ts), [`README.md`](../../README.md), and [`README.ja.md`](../../README.ja.md) — current behavior and wording under review.
+- Local Pi Dictation source: [`src/extensions/config.ts`](../../src/extensions/config.ts), [`src/extensions/pi-dictation.ts`](../../src/extensions/pi-dictation.ts), [`README.md`](../../README.md), and [`README.ja.md`](../../README.ja.md) — current behavior and wording under review.
 
 ### Dropped or not used as evidence
 

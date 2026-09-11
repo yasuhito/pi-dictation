@@ -17,7 +17,10 @@ If a file or directory does not exist, proceed silently. Domain-modeling skills 
     ├── CONTEXT.md
     ├── docs/
     │   └── adr/
-    └── extensions/
+    └── src/
+        ├── bin/
+        ├── extensions/
+        └── lib/
 
 ## Use the glossary vocabulary
 
