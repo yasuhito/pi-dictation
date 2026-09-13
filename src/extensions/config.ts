@@ -327,7 +327,8 @@ export function loadConfig(
   try {
     fromFile = readConfigFile(path);
   } catch (error) {
-    configError = `Failed to load ${path}: ${error.message}`;
+    const message = error instanceof Error ? error.message : String(error);
+    configError = `Failed to load ${path}: ${message}`;
   }
 
   const recorders = configuredRecorders(fromFile);

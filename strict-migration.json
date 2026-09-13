@@ -1,5 +1,9 @@
 {
-  "modules": ["src/extensions/shell.ts"],
+  "modules": [
+    "src/extensions/config.ts",
+    "src/extensions/live-level.ts",
+    "src/extensions/shell.ts"
+  ],
   "typeFixtures": ["test/type-fixtures/strict-migration-valid.ts"],
   "invalidTypeFixtures": [
     {
