@@ -666,6 +666,15 @@ test("the Bridge protocol rejects recursively duplicated response payload fields
   assert.equal(error.kind, "malformed");
 });
 
+test("the Bridge protocol rejects a response payload outside strict JSON values", async () => {
+  const { createRequestHarness } = await loadFactory();
+  const bytes = Buffer.from('{"value":1e400}');
+  const error = await createRequestHarness({ responsePayloadBytes: bytes })
+    .request()
+    .catch((value) => value);
+  assert.equal(error.kind, "malformed");
+});
+
 test("the Bridge protocol rejects trailing response bytes", async () => {
   const { createRequestHarness } = await loadFactory();
   const error = await createRequestHarness({ trailingBytes: Buffer.from([1]) })

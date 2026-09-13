@@ -2,12 +2,24 @@
   "modules": [
     "src/extensions/config.ts",
     "src/extensions/live-level.ts",
-    "src/extensions/shell.ts"
+    "src/extensions/shell.ts",
+    "src/lib/bridge-protocol.ts"
   ],
-  "typeFixtures": ["test/type-fixtures/strict-migration-valid.ts"],
+  "typeFixtures": [
+    "test/type-fixtures/strict-migration-valid.ts",
+    "test/bridge-protocol-types.ts"
+  ],
   "invalidTypeFixtures": [
     {
       "path": "test/type-fixtures/strict-migration-invalid.ts",
+      "expectedDiagnostics": [2322]
+    },
+    {
+      "path": "test/type-fixtures/bridge-protocol-invalid-request.ts",
+      "expectedDiagnostics": [2741]
+    },
+    {
+      "path": "test/type-fixtures/bridge-protocol-invalid-stream.ts",
       "expectedDiagnostics": [2322]
     }
   ]

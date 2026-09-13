@@ -187,14 +187,17 @@ function exactObject(
   keys: readonly string[]
 ): value is Record<string, unknown> {
   return (
-    Boolean(value) &&
+    value !== null &&
     typeof value === "object" &&
     !Array.isArray(value) &&
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
   );
 }
 
-function validateJson(value, seen = new Set()) {
+function validateJson(
+  value: unknown,
+  seen: Set<object> = new Set()
+): asserts value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean")
     return;
   if (typeof value === "number") {
@@ -206,9 +209,9 @@ function validateJson(value, seen = new Set()) {
   if (seen.has(value)) throw new TypeError("payload must not be cyclic");
   seen.add(value);
   for (
-    let prototype = value;
+    let prototype: object | null = value;
     prototype;
-    prototype = Object.getPrototypeOf(prototype)
+    prototype = Object.getPrototypeOf(prototype) as object | null
   ) {
     if (Object.getOwnPropertyDescriptor(prototype, "toJSON"))
       throw new TypeError("payload serialization hooks are unsupported");
@@ -222,7 +225,8 @@ function validateJson(value, seen = new Set()) {
       validateJson(descriptor.value, seen);
     }
   } else {
-    const prototype = Object.getPrototypeOf(value);
+    const prototype: object | null = Object.getPrototypeOf(value) as
+      object | null;
     if (prototype !== Object.prototype && prototype !== null)
       throw new TypeError("payload must contain only JSON objects");
     for (const key of Object.keys(value)) {
@@ -245,9 +249,10 @@ function strictJson(
   } catch (error) {
     throw failure("malformed", stage, error);
   }
-  let parsed;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text) as unknown;
+    validateJson(parsed);
   } catch (error) {
     throw failure("malformed", stage, error);
   }
@@ -366,11 +371,13 @@ function canonicalHex(
   return Buffer.from(value, "hex");
 }
 
-function authEncoding(fields) {
+type AuthenticationField = string | number | Uint8Array;
+
+function authEncoding(fields: readonly AuthenticationField[]): Buffer {
   const pieces = [Buffer.from("pi-dictation-bridge-auth-v1\0")];
   for (const field of fields) {
     const value =
-      Buffer.isBuffer(field) || field instanceof Uint8Array
+      field instanceof Uint8Array
         ? Buffer.from(field)
         : Buffer.from(String(field));
     const length = Buffer.allocUnsafe(4);
@@ -380,11 +387,14 @@ function authEncoding(fields) {
   return Buffer.concat(pieces);
 }
 
-function tag(secret, fields) {
+function tag(
+  secret: Uint8Array,
+  fields: readonly AuthenticationField[]
+): Buffer {
   return createHmac("sha256", secret).update(authEncoding(fields)).digest();
 }
 
-function framed(value) {
+function framed(value: JsonObject): Buffer {
   const body = Buffer.from(JSON.stringify(value));
   if (body.length < 2 || body.length > MAX_FRAME_BYTES)
     throw frameLengthFailure("request-write");
@@ -393,7 +403,10 @@ function framed(value) {
   return Buffer.concat([header, body]);
 }
 
-function validateTiming(timing, streaming = false) {
+function validateTiming(
+  timing: unknown,
+  streaming = false
+): asserts timing is RequestTimingPolicy | StreamTimingPolicy {
   const keys = [
     "connect",
     "challenge",
@@ -426,61 +439,85 @@ function validateTiming(timing, streaming = false) {
   }
 }
 
-function validateInput(options, streaming = false) {
-  if (!options || typeof options !== "object")
+type ValidatedInput = Omit<BridgeProtocolRequest, "endpoint"> & {
+  endpoint: unknown;
+};
+type ValidatedStreamInput = Omit<StreamRequest, "endpoint"> & {
+  endpoint: unknown;
+};
+
+function validateInput(
+  options: unknown,
+  streaming = false
+): asserts options is ValidatedInput | ValidatedStreamInput {
+  if (options === null || typeof options !== "object")
     throw new TypeError("request options are required");
-  if (!isCanonicalIdentity(options.requestId)) {
+  const candidate = options as Record<string, unknown>;
+  if (!isCanonicalIdentity(candidate.requestId)) {
     throw new TypeError("requestId must be a canonical UUID");
   }
-  if (typeof options.operation !== "string" || options.operation.length === 0)
-    throw new TypeError("operation is required");
   if (
-    !options.credential ||
-    !isCanonicalIdentity(options.credential.id) ||
-    !(options.credential.secret instanceof Uint8Array) ||
-    options.credential.secret.byteLength !== 32
+    typeof candidate.operation !== "string" ||
+    candidate.operation.length === 0
+  )
+    throw new TypeError("operation is required");
+  const credential = candidate.credential;
+  if (credential === null || typeof credential !== "object")
+    throw new TypeError("invalid credential");
+  const credentialFields = credential as Record<string, unknown>;
+  const credentialSecret = credentialFields.secret;
+  if (
+    !isCanonicalIdentity(credentialFields.id) ||
+    !(credentialSecret instanceof Uint8Array) ||
+    credentialSecret.byteLength !== 32
   ) {
     throw new TypeError("invalid credential");
   }
-  validateTiming(options.timing, streaming);
+  validateTiming(candidate.timing, streaming);
   if (
     streaming &&
-    options.kind !== "binary" &&
-    options.kind !== "authenticated-frames"
+    candidate.kind !== "binary" &&
+    candidate.kind !== "authenticated-frames"
   ) {
     throw new TypeError("invalid stream kind");
   }
   if (
-    !options.payload ||
-    typeof options.payload !== "object" ||
-    Array.isArray(options.payload)
+    candidate.payload === null ||
+    typeof candidate.payload !== "object" ||
+    Array.isArray(candidate.payload)
   ) {
     throw new TypeError("payload must be a JSON object");
   }
-  validateJson(options.payload);
-  if (!(options.signal instanceof AbortSignal))
+  validateJson(candidate.payload);
+  if (!(candidate.signal instanceof AbortSignal))
     throw new TypeError("signal is required");
 }
 
-function anchored(policy) {
+function anchored(policy: TimingPolicy): TimingPolicy {
   return policy.kind === "phase"
     ? { kind: "absolute", at: Date.now() + policy.timeoutMs }
     : policy;
 }
 
-function deadlineMilliseconds(policy) {
+function deadlineMilliseconds(policy: TimingPolicy): number {
   return policy.kind === "absolute"
     ? Math.max(0, policy.at - Date.now())
     : policy.timeoutMs;
 }
 
-async function guarded(operation, policy, signal, stage, onTimeout) {
+async function guarded<T>(
+  operation: () => Promise<T>,
+  policy: TimingPolicy,
+  signal: AbortSignal,
+  stage: BridgeProtocolFailureStage,
+  onTimeout?: () => void
+): Promise<T> {
   if (signal.aborted) throw failure("cancelled", stage, signal.reason);
   const timeout = deadlineMilliseconds(policy);
   if (timeout <= 0) throw failure("deadline", stage);
-  let timer;
-  let abort;
-  const interruption = new Promise((_, reject) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const interruption = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       reject(failure("deadline", stage));
       onTimeout?.();
@@ -495,17 +532,20 @@ async function guarded(operation, policy, signal, stage, onTimeout) {
     return await Promise.race([operation(), interruption]);
   } finally {
     clearTimeout(timer);
-    signal.removeEventListener("abort", abort);
+    if (abort) signal.removeEventListener("abort", abort);
   }
 }
 
-function recordTestResourceMetric(name, bytes) {
+function recordTestResourceMetric(name: string, bytes: number): void {
   if (process.env.PI_DICTATION_TEST_RESOURCE_METRICS !== "1") return;
-  const metrics = (globalThis.__piDictationBridgeResourceMetrics ??= {});
+  const target = globalThis as typeof globalThis & {
+    __piDictationBridgeResourceMetrics?: Record<string, number>;
+  };
+  const metrics = (target.__piDictationBridgeResourceMetrics ??= {});
   metrics[name] = Math.max(metrics[name] ?? 0, bytes);
 }
 
-function netConnection(endpoint) {
+function netConnection(endpoint: BridgeEndpoint): Connection {
   const socket =
     endpoint.type === "unix"
       ? net.createConnection({ path: endpoint.path, allowHalfOpen: true })
@@ -549,7 +589,7 @@ function netConnection(endpoint) {
           cleanup();
           resolve(null);
         };
-        const failed = (error) => {
+        const failed = (error: Error) => {
           cleanup();
           reject(error);
         };
@@ -559,7 +599,7 @@ function netConnection(endpoint) {
         socket.once("error", failed);
       });
     },
-    write(bytes) {
+    write(bytes: Uint8Array) {
       return new Promise<void>((resolve, reject) =>
         socket.write(bytes, (error) => (error ? reject(error) : resolve()))
       );
@@ -567,22 +607,41 @@ function netConnection(endpoint) {
     end() {
       socket.end();
     },
-    destroy(error) {
+    destroy(error?: Error) {
       socket.destroy(error);
     },
   };
 }
 
-function connectionFor(endpoint) {
-  if (endpoint && typeof endpoint === "object" && endpoint[TEST_ADAPTER])
-    return endpoint[TEST_ADAPTER].connect();
+type TestConnectionAdapter = { connect(): Connection };
+
+function connectionFor(endpoint: unknown): Connection {
+  if (endpoint !== null && typeof endpoint === "object") {
+    const adapter = (endpoint as Record<PropertyKey, unknown>)[TEST_ADAPTER];
+    if (
+      adapter !== null &&
+      typeof adapter === "object" &&
+      typeof (adapter as Partial<TestConnectionAdapter>).connect === "function"
+    ) {
+      return (adapter as TestConnectionAdapter).connect();
+    }
+  }
   if (
-    !endpoint ||
+    endpoint === null ||
     typeof endpoint !== "object" ||
-    (!(endpoint.type === "unix" && typeof endpoint.path === "string") &&
+    (!(
+      "type" in endpoint &&
+      endpoint.type === "unix" &&
+      "path" in endpoint &&
+      typeof endpoint.path === "string"
+    ) &&
       !(
+        "type" in endpoint &&
         endpoint.type === "tcp" &&
+        "host" in endpoint &&
         typeof endpoint.host === "string" &&
+        "port" in endpoint &&
+        typeof endpoint.port === "number" &&
         Number.isInteger(endpoint.port) &&
         endpoint.port >= 1 &&
         endpoint.port <= 65_535
@@ -590,7 +649,7 @@ function connectionFor(endpoint) {
   ) {
     throw new TypeError("invalid endpoint");
   }
-  return netConnection(endpoint);
+  return netConnection(endpoint as BridgeEndpoint);
 }
 
 interface Connection {
@@ -642,13 +701,13 @@ class StreamGuard {
     );
   }
 
-  interrupt(error) {
+  interrupt(error: unknown): void {
     if (this.interrupted) return;
     this.interrupted = error;
     this.reject(error);
   }
 
-  check() {
+  check(): void {
     if (this.interrupted) throw this.interrupted;
     if (this.signal.aborted) {
       this.interrupt(failure("cancelled", "stream", this.signal.reason));
@@ -660,12 +719,12 @@ class StreamGuard {
     }
   }
 
-  progress() {
+  progress(): void {
     this.check();
     if (this.policy.kind === "no-progress") this.arm();
   }
 
-  async race(operation) {
+  async race<T>(operation: () => Promise<T>): Promise<T> {
     if (this.interrupted) return this.interruption;
     try {
       this.check();
@@ -675,7 +734,7 @@ class StreamGuard {
     return Promise.race([operation(), this.interruption]);
   }
 
-  close() {
+  close(): void {
     clearTimeout(this.timer);
     this.signal.removeEventListener("abort", this.abort);
   }
@@ -703,7 +762,7 @@ class Reader {
     this.guard = undefined;
   }
 
-  async chunk() {
+  async chunk(): Promise<Buffer | null> {
     try {
       const chunk = this.guard
         ? await this.guard.race(() => this.connection.read())
@@ -722,7 +781,7 @@ class Reader {
     }
   }
 
-  async exactly(length) {
+  async exactly(length: number): Promise<Buffer> {
     this.guard?.check();
     const pieces = [];
     let total = 0;
@@ -744,7 +803,7 @@ class Reader {
     return Buffer.concat(pieces, length);
   }
 
-  async frame() {
+  async frame(): Promise<JsonValue> {
     const header = await this.exactly(4);
     const length = header.readUInt32BE(0);
     if (length < 2 || length > MAX_FRAME_BYTES)
@@ -752,7 +811,7 @@ class Reader {
     return strictJson(await this.exactly(length), this.stage);
   }
 
-  async end() {
+  async end(): Promise<void> {
     if (this.policy.kind === "absolute" && this.policy.at <= Date.now())
       throw failure("deadline", this.stage);
     if (this.buffer.length > 0) throw trailingBytesFailure(this.stage);
@@ -761,7 +820,7 @@ class Reader {
   }
 }
 
-async function openAuthenticated(options, streaming = false) {
+async function openAuthenticated(options: unknown, streaming = false) {
   let payloadBytes;
   try {
     validateInput(options, streaming);
@@ -888,7 +947,10 @@ async function openAuthenticated(options, streaming = false) {
     try {
       parsed = strictJson(responsePayload);
     } catch (error) {
-      throw payloadFailure("response", error.cause);
+      throw payloadFailure(
+        "response",
+        error instanceof Error ? error.cause : error
+      );
     }
     if (response.status === "version-mismatch") {
       if (
@@ -923,7 +985,7 @@ class BinaryByteSource {
     this.incomplete = false;
   }
 
-  readExactly(length) {
+  readExactly(length: number): AsyncIterable<Uint8Array> {
     if (!Number.isSafeInteger(length) || length < 0)
       throw new TypeError("length must be a non-negative safe integer");
     if (this.incomplete) throw new TypeError("an exact read is already active");
@@ -945,7 +1007,7 @@ class BinaryByteSource {
     })();
   }
 
-  verifyComplete() {
+  verifyComplete(): void {
     if (this.incomplete) throw failure("malformed", "stream");
   }
 }
