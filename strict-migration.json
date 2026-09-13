@@ -1,0 +1,10 @@
+{
+  "modules": ["src/extensions/shell.ts"],
+  "typeFixtures": ["test/type-fixtures/strict-migration-valid.ts"],
+  "invalidTypeFixtures": [
+    {
+      "path": "test/type-fixtures/strict-migration-invalid.ts",
+      "expectedDiagnostics": [2322]
+    }
+  ]
+}

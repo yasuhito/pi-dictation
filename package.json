@@ -46,8 +46,9 @@
     "test:native-bridge-adversarial": "npm run build && scripts/run-native-bridge-adversarial.sh",
     "test:native-bridge-lifecycle": "npm run build && scripts/run-native-bridge-lifecycle.sh",
     "typecheck": "tsc --noEmit",
+    "typecheck:strict-migration": "node scripts/check-strict-migration.mjs",
     "test:assertions": "node scripts/check-test-assertions.mjs",
-    "check": "npm run test:assertions && npm run typecheck && npm test",
+    "check": "npm run test:assertions && npm run typecheck:strict-migration && npm run typecheck && npm test",
     "pack:check": "npm pack --dry-run",
     "demo:generate": "node scripts/generate-demo.mjs",
     "prepare": "npm run build && if git rev-parse --git-dir >/dev/null 2>&1; then husky; fi"
