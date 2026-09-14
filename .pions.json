@@ -1,0 +1,9 @@
+{
+  "review": {
+    "model": {
+      "provider": "claude-bridge",
+      "id": "claude-opus-5"
+    },
+    "thinkingLevel": "medium"
+  }
+}
