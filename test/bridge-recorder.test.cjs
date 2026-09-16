@@ -37,6 +37,9 @@ async function harness(mode = "valid", credentialMetadata = {}) {
   };
   writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
   const eventFile = join(directory, "events.log");
+  const { createRecorder } = await jiti.import(
+    join(root, "dist", "extensions", "recorder.js")
+  );
   const child = fork(
     companion,
     [
@@ -50,9 +53,6 @@ async function harness(mode = "valid", credentialMetadata = {}) {
     }
   );
   await once(child, "message");
-  const { createRecorder } = await jiti.import(
-    join(root, "dist", "extensions", "recorder.js")
-  );
   const config = {
     type: "bridge",
     endpoint: { type: "unix", path: socket },
