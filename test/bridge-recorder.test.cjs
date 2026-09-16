@@ -37,6 +37,12 @@ async function harness(mode = "valid", credentialMetadata = {}) {
   };
   writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
   const eventFile = join(directory, "events.log");
+  // Import before forking: a failed import here would otherwise leave the
+  // companion child alive with an open IPC channel, which keeps the test
+  // process from exiting until the CI job timeout.
+  const { createRecorder } = await jiti.import(
+    join(root, "dist", "extensions", "recorder.js")
+  );
   const child = fork(
     companion,
     [
@@ -50,9 +56,6 @@ async function harness(mode = "valid", credentialMetadata = {}) {
     }
   );
   await once(child, "message");
-  const { createRecorder } = await jiti.import(
-    join(root, "dist", "extensions", "recorder.js")
-  );
   const config = {
     type: "bridge",
     endpoint: { type: "unix", path: socket },
