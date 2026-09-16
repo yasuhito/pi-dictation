@@ -98,7 +98,17 @@ func consoleLockState(_ property: CFTypeRef?) -> Bool {
     (property as? Bool) == true
 }
 
+#if PROTOCOL_TESTING
+private let systemLifecycleObservationEnabled = false
+#else
+private let systemLifecycleObservationEnabled = true
+#endif
+
 private func ioConsoleIsLocked() -> Bool {
+#if PROTOCOL_TESTING
+    // Protocol fixtures inject lifecycle signals; a locked value catches accidental ambient observation.
+    return true
+#else
     let root = IORegistryGetRootEntry(kIOMainPortDefault)
     guard root != MACH_PORT_NULL else { return false }
     defer { IOObjectRelease(root) }
@@ -106,6 +116,7 @@ private func ioConsoleIsLocked() -> Bool {
         root, "IOConsoleLocked" as CFString, kCFAllocatorDefault, 0
     )?.takeRetainedValue()
     return consoleLockState(property)
+#endif
 }
 
 private func permissionName(_ status: AVAuthorizationStatus) -> String {
@@ -3008,10 +3019,16 @@ private func serve() throws {
     let distributed = DistributedNotificationCenter.default()
     let logoutContinuedObserver = distributed.addObserver(
         forName: Notification.Name("com.apple.logoutContinued"), object: nil, queue: nil
-    ) { _ in logoutAttribution.markContinued() }
+    ) { _ in
+        guard systemLifecycleObservationEnabled else { return }
+        logoutAttribution.markContinued()
+    }
     let logoutCancelledObserver = distributed.addObserver(
         forName: Notification.Name("com.apple.logoutCancelled"), object: nil, queue: nil
-    ) { _ in logoutAttribution.markCancelled() }
+    ) { _ in
+        guard systemLifecycleObservationEnabled else { return }
+        logoutAttribution.markCancelled()
+    }
     signal(SIGTERM, SIG_IGN)
     let terminationRequest = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
     terminationRequest.setEventHandler {
@@ -3043,8 +3060,14 @@ private func serve() throws {
 #endif
     let appleEvents = NSAppleEventManager.shared()
     let lifecycleRouter = LifecycleAppleEventRouter(
-        onLogout: { recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "logout")!) },
-        onReboot: { recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "restart")!) }
+        onLogout: {
+            guard systemLifecycleObservationEnabled else { return }
+            recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "logout")!)
+        },
+        onReboot: {
+            guard systemLifecycleObservationEnabled else { return }
+            recordings.failActive(reason: ownerVisibleLifecycleReason(systemEvent: "restart")!)
+        }
     )
     let coreEventClass = AEEventClass(0x61657674)
     let logoutEvent = AEEventID(0x6c6f676f)
@@ -3058,17 +3081,21 @@ private func serve() throws {
                                 forEventClass: coreEventClass, andEventID: shutdownEvent)
     let workspace = NSWorkspace.shared.notificationCenter
     let sleepObserver = workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
+        guard systemLifecycleObservationEnabled else { return }
         recordings.failActive(reason: "sleep")
     }
     let powerOffObserver = workspace.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: nil) { _ in
+        guard systemLifecycleObservationEnabled else { return }
         recordings.failActiveAfterPowerOffAttributionGrace()
     }
     let lockObserver = workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { _ in
+        guard systemLifecycleObservationEnabled else { return }
         recordings.failActiveAfterLockAttributionGrace()
     }
     let consoleLockMonitor = DispatchSource.makeTimerSource(queue: .global())
     consoleLockMonitor.schedule(deadline: .now(), repeating: .milliseconds(250))
     consoleLockMonitor.setEventHandler {
+        guard systemLifecycleObservationEnabled else { return }
         if ioConsoleIsLocked() { recordings.failActiveAfterLockAttributionGrace() }
     }
     consoleLockMonitor.resume()

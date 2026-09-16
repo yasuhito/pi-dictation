@@ -4,19 +4,26 @@ const { createHash } = require("node:crypto");
 const { once } = require("node:events");
 const {
   chmodSync,
-  cpSync,
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join, relative, resolve, sep } = require("node:path");
+const { join, resolve } = require("node:path");
 const { test } = require("node:test");
+const {
+  copyPackageSource,
+  isolatedPackageEnvironment,
+} = require("./fixtures/package-source.cjs");
 
 const packageRoot = resolve(__dirname, "..");
 const cliPath = join(packageRoot, "dist", "bin", "pi-dictation.js");
@@ -1413,32 +1420,14 @@ test("bridge health bounds a stalled authenticated response at its response-phas
 test("the actual npm package loads in Pi extension and native CLI runtime regimes", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "pi-dictation-package-load-"));
   try {
-    const cleanPackageRoot = join(directory, "source");
-    const excludedRoots = new Set([
-      ".git",
-      ".pi",
-      ".pi-subagents",
-      "dist",
-      "node_modules",
-    ]);
-    cpSync(packageRoot, cleanPackageRoot, {
-      recursive: true,
-      filter(source) {
-        const topLevel = relative(packageRoot, source).split(sep)[0];
-        return !excludedRoots.has(topLevel);
-      },
-    });
-    symlinkSync(
-      join(packageRoot, "node_modules"),
-      join(cleanPackageRoot, "node_modules"),
-      "dir"
-    );
+    const cleanPackageRoot = copyPackageSource(join(directory, "source"));
     const packed = spawnSync(
       "npm",
       ["pack", "--json", "--pack-destination", directory],
       {
         cwd: cleanPackageRoot,
         encoding: "utf8",
+        env: isolatedPackageEnvironment(),
       }
     );
     if (packed.status !== 0) throw new Error(packed.stderr);
@@ -1548,37 +1537,69 @@ test("the actual npm package loads in Pi extension and native CLI runtime regime
 });
 
 test("the npm tarball includes the bridge CLI and companion source", async (t) => {
-  const result = spawnSync(
-    "npm",
-    ["pack", "--ignore-scripts", "--dry-run", "--json"],
-    { cwd: packageRoot, encoding: "utf8" }
-  );
-  if (result.status !== 0) throw new Error(result.stderr);
-  const files = npmPackEntries(result.stdout)[0].files.map(
-    (entry) => entry.path
-  );
-
-  await t.test("includes the unified CLI", () => {
-    assert.ok(files.includes("dist/bin/pi-dictation.js"));
-  });
-  await t.test(
-    "includes the self-contained real-device certification command",
-    () => {
-      assert.ok(files.includes("dist/bin/pi-dictation-bridge-certify.js"));
-    }
-  );
-  await t.test("includes the shared Bridge protocol runtime", () => {
-    assert.ok(files.includes("dist/lib/bridge-protocol.js"));
-  });
-  await t.test("includes the shared Bridge protocol declaration", () => {
-    assert.ok(files.includes("dist/lib/bridge-protocol.d.ts"));
-  });
-  await t.test("includes the companion Swift source", () => {
-    assert.ok(files.includes("native/macos-companion/PiDictationBridge.swift"));
-  });
-  await t.test("includes the least-privilege duration watchdog source", () => {
-    assert.ok(
-      files.includes("native/macos-companion/PiDictationDurationWatchdog.swift")
+  const directory = mkdtempSync(join(tmpdir(), "pi-dictation-package-list-"));
+  const sharedCli = openSync(cliPath, "r");
+  const sharedCliIdentity = fstatSync(sharedCli);
+  try {
+    const cleanPackageRoot = copyPackageSource(join(directory, "source"), {
+      includeBuild: true,
+    });
+    const result = spawnSync(
+      "npm",
+      ["pack", "--ignore-scripts", "--dry-run", "--json"],
+      {
+        cwd: cleanPackageRoot,
+        encoding: "utf8",
+        env: isolatedPackageEnvironment(),
+      }
     );
-  });
+    if (result.status !== 0) throw new Error(result.stderr);
+    const files = npmPackEntries(result.stdout)[0].files.map(
+      (entry) => entry.path
+    );
+    const currentCliIdentity = statSync(cliPath);
+
+    await t.test("includes the unified CLI", () => {
+      assert.ok(files.includes("dist/bin/pi-dictation.js"));
+    });
+    await t.test(
+      "includes the self-contained real-device certification command",
+      () => {
+        assert.ok(files.includes("dist/bin/pi-dictation-bridge-certify.js"));
+      }
+    );
+    await t.test("includes the shared Bridge protocol runtime", () => {
+      assert.ok(files.includes("dist/lib/bridge-protocol.js"));
+    });
+    await t.test("includes the shared Bridge protocol declaration", () => {
+      assert.ok(files.includes("dist/lib/bridge-protocol.d.ts"));
+    });
+    await t.test("includes the companion Swift source", () => {
+      assert.ok(
+        files.includes("native/macos-companion/PiDictationBridge.swift")
+      );
+    });
+    await t.test(
+      "includes the least-privilege duration watchdog source",
+      () => {
+        assert.ok(
+          files.includes(
+            "native/macos-companion/PiDictationDurationWatchdog.swift"
+          )
+        );
+      }
+    );
+    await t.test(
+      "does not replace compiled artifacts used by parallel tests",
+      () => {
+        assert.deepEqual(
+          [currentCliIdentity.dev, currentCliIdentity.ino],
+          [sharedCliIdentity.dev, sharedCliIdentity.ino]
+        );
+      }
+    );
+  } finally {
+    closeSync(sharedCli);
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

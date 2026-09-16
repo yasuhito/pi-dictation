@@ -2,22 +2,28 @@ const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join, resolve } = require("node:path");
+const { join } = require("node:path");
 const { test } = require("node:test");
-
-const packageRoot = resolve(__dirname, "..");
+const {
+  copyPackageSource,
+  isolatedPackageEnvironment,
+} = require("./fixtures/package-source.cjs");
 
 test("the actual npm tarball carries and executes its Bridge certification documentation", async (t) => {
   const temporary = mkdtempSync(
     join(tmpdir(), "pi-dictation-certification-docs-")
   );
   try {
+    const cleanPackageRoot = copyPackageSource(join(temporary, "source"), {
+      includeBuild: true,
+    });
     const packed = spawnSync(
       "npm",
       ["pack", "--ignore-scripts", "--silent", "--pack-destination", temporary],
       {
-        cwd: packageRoot,
+        cwd: cleanPackageRoot,
         encoding: "utf8",
+        env: isolatedPackageEnvironment(),
       }
     );
     if (packed.status !== 0) throw new Error(packed.stderr);
